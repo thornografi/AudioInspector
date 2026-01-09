@@ -56,23 +56,46 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // Toggle side panel when extension icon is clicked
 let panelOpenTabs = new Set(); // Track which tabs have the panel open
+let togglingTabs = new Set(); // Mutex: prevent rapid click race condition
+
+// Side panel kapanma tespiti için port-based connection listener
+// beforeunload + sendMessage güvenilir değil, port disconnect güvenilir
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name.startsWith('sidepanel-')) {
+    const tabId = parseInt(port.name.split('-')[1]);
+
+    port.onDisconnect.addListener(() => {
+      // Panel kapandı (X butonu, tab kapatma, vb.)
+      panelOpenTabs.delete(tabId);
+      console.log('[Background] Side panel disconnected for tab:', tabId);
+    });
+  }
+});
 
 chrome.action.onClicked.addListener(async (tab) => {
   const tabId = tab.id;
 
-  if (panelOpenTabs.has(tabId)) {
-    // Panel açık, kapat (Chrome 116+ API)
-    try {
-      await chrome.sidePanel.close({ tabId });
-    } catch (e) {
-      // Panel zaten kapalı olabilir (X ile manuel kapatılmış)
-      console.log('[Background] Side panel already closed');
+  // Race condition guard - önceki işlem bitmeden yeni tıklama ignore
+  if (togglingTabs.has(tabId)) return;
+  togglingTabs.add(tabId);
+
+  try {
+    if (panelOpenTabs.has(tabId)) {
+      // Panel açık, kapat (Chrome 116+ API)
+      try {
+        await chrome.sidePanel.close({ tabId });
+      } catch (e) {
+        // Panel zaten kapalı olabilir (X ile manuel kapatılmış)
+        console.log('[Background] Side panel already closed');
+      }
+      panelOpenTabs.delete(tabId);
+    } else {
+      // Panel kapalı, aç
+      await chrome.sidePanel.open({ tabId });
+      panelOpenTabs.add(tabId);
     }
-    panelOpenTabs.delete(tabId);
-  } else {
-    // Panel kapalı, aç
-    await chrome.sidePanel.open({ tabId });
-    panelOpenTabs.add(tabId);
+  } finally {
+    togglingTabs.delete(tabId);
   }
 });
 
@@ -215,15 +238,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false; // sync response
   }
 
-  // Side panel kapandığında state güncelle (X butonu ile manuel kapatma)
-  if (message.type === 'PANEL_CLOSED') {
-    if (message.tabId) {
-      panelOpenTabs.delete(message.tabId);
-    }
-    sendResponse({ success: true });
-    return false; // sync response
-  }
-
+  // Note: PANEL_CLOSED artık port-based connection ile handle ediliyor (daha güvenilir)
   // Note: Icon updates now handled by storage.onChanged listener (see above)
 });
 
@@ -231,8 +246,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Handles the injection of the page script into the MAIN world
  */
 async function handleInjection(tabId, frameId) {
+  // frameId undefined veya null ise 0 kullan (main frame)
+  const targetFrameId = frameId ?? 0;
   const extensionUrl = chrome.runtime.getURL('');
-  const target = { tabId, frameIds: [frameId] };
+  const target = { tabId, frameIds: [targetFrameId] };
 
   // 1. Inject Extension URL constant
   await chrome.scripting.executeScript({

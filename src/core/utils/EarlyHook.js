@@ -119,6 +119,40 @@ export function installEarlyHooks() {
     handlerName: '__mediaRecorderCollectorHandler'
   });
 
+  // Hook Worker.postMessage for WASM encoder detection (opus-recorder pattern)
+  const originalPostMessage = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function(message, ...args) {
+    // opus-recorder pattern: { command: 'init', encoderSampleRate, encoderBitRate, ... }
+    if (message && typeof message === 'object') {
+      if (message.command === 'init' && message.encoderSampleRate) {
+        // Opus encoder init detected
+        const encoderInfo = {
+          type: 'opus',
+          sampleRate: message.encoderSampleRate,
+          bitRate: message.encoderBitRate || 0,
+          channels: message.numberOfChannels || 1,
+          application: message.encoderApplication, // 2048=Voice, 2049=FullBand, 2051=LowDelay
+          timestamp: Date.now()
+        };
+
+        // Store globally for late-discovery
+        // @ts-ignore
+        window.__wasmEncoderDetected = encoderInfo;
+
+        // Notify handler if registered
+        // @ts-ignore
+        if (window.__wasmEncoderHandler) {
+          // @ts-ignore
+          window.__wasmEncoderHandler(encoderInfo);
+        }
+
+        logger.info(LOG_PREFIX.INSPECTOR, `🔧 WASM Opus encoder detected: ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz`);
+      }
+    }
+    return originalPostMessage.apply(this, [message, ...args]);
+  };
+  logger.info(LOG_PREFIX.INSPECTOR, '✅ Hooked Worker.postMessage for WASM encoder detection');
+
   logger.info(LOG_PREFIX.INSPECTOR, '✅ Early hooks installed successfully');
 }
 

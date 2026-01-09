@@ -408,8 +408,9 @@ function renderACStats(data) {
   // Processing Sub-section
   const hasScriptProcessor = data.scriptProcessors && data.scriptProcessors.length > 0;
   const hasAudioWorklet = data.audioWorklets && data.audioWorklets.length > 0;
+  const hasWasmEncoder = data.wasmEncoder;
 
-  if (hasScriptProcessor || hasAudioWorklet) {
+  if (hasScriptProcessor || hasAudioWorklet || hasWasmEncoder) {
     html += `<div class="processing-section">`;
 
     // ScriptProcessor (deprecated)
@@ -437,6 +438,17 @@ function renderACStats(data) {
             <span class="detail-value" title="${escapeHtml(aw.moduleUrl)}">${escapeHtml(filename)}</span>
           </div>`;
       });
+    }
+
+    // WASM Encoder (detected via Worker.postMessage)
+    if (hasWasmEncoder) {
+      const encoder = data.wasmEncoder;
+      const bitrateKbps = encoder.bitRate ? `${encoder.bitRate / 1000}kbps` : '?';
+      html += `
+        <div class="processing-item sub-item">
+          <span class="detail-label">Encoder</span>
+          <span class="detail-value">WASM ${encoder.type || 'unknown'} (${bitrateKbps})</span>
+        </div>`;
     }
 
     // Output bilgisi
@@ -694,18 +706,27 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-// Notify background when panel closes (X button or other means)
-window.addEventListener('beforeunload', () => {
-  if (currentTabId) {
-    chrome.runtime.sendMessage({ type: 'PANEL_CLOSED', tabId: currentTabId });
-  }
-});
+// Panel kapanma bildirimi için port-based connection (beforeunload güvenilir değil)
+// Port açıldığında background.js'e tabId gönderilir, panel kapandığında port otomatik disconnect olur
+let panelPort = null;
+
+function setupPanelPort() {
+  if (!currentTabId) return;
+
+  panelPort = chrome.runtime.connect({ name: `sidepanel-${currentTabId}` });
+  panelPort.onDisconnect.addListener(() => {
+    // Port kapandı - bu normal, panel kapanıyor demek
+  });
+}
 
 // Initial load
 loadEnabledState().then(async () => {
   // Panel açıldığında aktif tab ID'sini kaydet (kapanma bildirim için)
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = activeTab?.id;
+
+  // Port-based connection kur (panel kapanınca background.js otomatik bilgilendirilir)
+  setupPanelPort();
 
   // Sayfa yenilendiğinde logları temizle
   await chrome.storage.local.remove(['debug_logs']);

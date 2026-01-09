@@ -145,18 +145,9 @@ class MediaRecorderCollector extends BaseCollector {
       };
 
       this.activeRecorders.set(recorder, metadata);
-      
-      // Add event listeners (Standard events only)
-      this._createRecorderEventListener(recorder, 'dataavailable', 'dataavailable', metadata);
-      this._createRecorderEventListener(recorder, 'start', 'event:start', metadata);
-      this._createRecorderEventListener(recorder, 'stop', 'event:stop', metadata);
-      this._createRecorderEventListener(recorder, 'pause', 'event:pause', metadata);
-      this._createRecorderEventListener(recorder, 'resume', 'event:resume', metadata);
-      this._createRecorderEventListener(recorder, 'error', 'error', metadata);
 
-      // İlk emit kaldırıldı - sadece 'start' event'inde emit edilecek
-      // (inactive MediaRecorder'lar artık görünmeyecek)
-
+      // Emit immediately (emit() checks this.active internally)
+      this.emit(EVENTS.DATA, metadata);
       logger.info(this.logPrefix, `MediaRecorder created:`, JSON.stringify(metadata));
   }
 

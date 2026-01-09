@@ -53,13 +53,14 @@ class AudioContextCollector extends BaseCollector {
 
     // 3. Hook createScriptProcessor (Sync method)
     // We can hook it on the prototype so all instances get it
+    // Note: shouldHook is always true - emit() checks this.active internally
     if (window.AudioContext && window.AudioContext.prototype) {
         this.originalCreateScriptProcessor = hookMethod(
             window.AudioContext.prototype,
             'createScriptProcessor',
             // @ts-ignore
             (node, args) => this._handleScriptProcessor(node, args),
-            () => this.active
+            () => true  // Always hook, emit() controls data flow
         );
         logger.info(this.logPrefix, 'Hooked AudioContext.prototype.createScriptProcessor');
     }
@@ -72,16 +73,11 @@ class AudioContextCollector extends BaseCollector {
             'createScriptProcessor',
             // @ts-ignore
             (node, args) => this._handleScriptProcessor(node, args),
-            () => this.active
+            () => true
         );
     }
 
     // 4. Hook AudioWorklet.addModule (Async method)
-    // AudioWorklet is a property of AudioContext instances usually, or AudioWorkletNode
-    // Actually, addModule is on the AudioWorklet interface.
-    // We can try to hook AudioWorklet.prototype.addModule if it exists in the window scope,
-    // but AudioWorklet might not be globally exposed as a constructor in older browsers or some contexts.
-    // It is available as window.AudioWorklet in modern browsers.
     // @ts-ignore
     if (window.AudioWorklet && window.AudioWorklet.prototype) {
         this.originalAudioWorkletAddModule = hookAsyncMethod(
@@ -90,7 +86,7 @@ class AudioContextCollector extends BaseCollector {
             'addModule',
             // @ts-ignore
             (result, args) => this._handleAudioWorkletAddModule(result, args),
-            () => this.active
+            () => true  // Always hook, emit() controls data flow
         );
         logger.info(this.logPrefix, 'Hooked AudioWorklet.addModule');
     }
@@ -103,10 +99,16 @@ class AudioContextCollector extends BaseCollector {
             'createMediaStreamDestination',
             // @ts-ignore
             (node, args) => this._handleMediaStreamDestination(node, args),
-            () => this.active
+            () => true  // Always hook, emit() controls data flow
         );
         logger.info(this.logPrefix, 'Hooked AudioContext.prototype.createMediaStreamDestination');
     }
+
+    // 6. Register WASM encoder handler (Worker.postMessage hook in EarlyHook.js)
+    // @ts-ignore
+    window.__wasmEncoderHandler = (encoderInfo) => {
+      this._handleWasmEncoder(encoderInfo);
+    };
 
   }
 
@@ -130,7 +132,7 @@ class AudioContextCollector extends BaseCollector {
 
       this.activeContexts.set(ctx, metadata);
 
-      // Emit immediately
+      // Emit immediately (emit() checks this.active internally)
       this.emit(EVENTS.DATA, metadata);
 
       logger.info(this.logPrefix, 'AudioContext created:', metadata);
@@ -249,7 +251,7 @@ class AudioContextCollector extends BaseCollector {
 
   /**
    * Handle createMediaStreamDestination calls
-   * Bu metod çağrıldığında output MediaRecorder'a gidiyor demektir
+   * Bu node audio'yu MediaStream olarak çıkarır - MediaRecorder, WebRTC veya WASM encoder kullanabilir
    * @private
    * @param {MediaStreamAudioDestinationNode} node
    * @param {any[]} args
@@ -264,14 +266,36 @@ class AudioContextCollector extends BaseCollector {
       if (this.activeContexts.has(ctx)) {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
-              // @ts-ignore
-              ctxData.destinationType = 'MediaStreamDestination (→ MediaRecorder)';
+              // @ts-ignore - sadece gerçeği söyle, varsayım yapma
+              ctxData.destinationType = 'MediaStreamDestination';
               // Re-emit updated context data
               this.emit(EVENTS.DATA, ctxData);
-              logger.info(this.logPrefix, 'MediaStreamDestination created - output goes to MediaRecorder');
+              logger.info(this.logPrefix, 'MediaStreamDestination created - audio routed to stream');
           }
       } else {
           logger.warn(this.logPrefix, `MediaStreamDestination created but context is ${ctx === null ? 'null' : 'undefined'}`);
+      }
+  }
+
+  /**
+   * Handle WASM encoder detection (from Worker.postMessage hook)
+   * @private
+   * @param {Object} encoderInfo - { type, sampleRate, bitRate, channels, application, timestamp }
+   */
+  _handleWasmEncoder(encoderInfo) {
+      // Find the most recent AudioContext to associate this encoder with
+      const lastCtxEntry = Array.from(this.activeContexts.entries()).pop();
+
+      if (lastCtxEntry) {
+          const [ctx, ctxData] = lastCtxEntry;
+          // @ts-ignore
+          ctxData.wasmEncoder = encoderInfo;
+          // Re-emit updated context data
+          this.emit(EVENTS.DATA, ctxData);
+          logger.info(this.logPrefix, `WASM Encoder attached: ${encoderInfo.type} @ ${encoderInfo.bitRate/1000}kbps`);
+      } else {
+          // No AudioContext yet - store for late association
+          logger.info(this.logPrefix, `WASM Encoder detected (no AudioContext yet): ${encoderInfo.type} @ ${encoderInfo.bitRate/1000}kbps`);
       }
   }
 

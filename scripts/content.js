@@ -59,7 +59,6 @@ async function injectPageScript() {
 
 // Storage keys for collected data (DRY - used in multiple places)
 const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder'];
-const STALE_CHECK_KEYS = ['audio_context', 'media_recorder', 'user_media'];
 
 // Helper to create storage handlers (DRY principle)
 const storageHandler = (key, emoji, label) => (payload) => ({
@@ -67,47 +66,10 @@ const storageHandler = (key, emoji, label) => (payload) => ({
   logMsg: `${emoji} Storing ${label}`
 });
 
-// Stale data threshold in milliseconds
-// 5 saniye: Kullanıcının profil değiştirmesi için makul süre
-// Daha kısa süre false positive'lere yol açabilir
-const STALE_THRESHOLD_MS = 5000;
-
-// Helper to clear stale data when new session starts
-function clearStaleDataOnNewSession(currentTimestamp) {
-  chrome.storage.local.get(STALE_CHECK_KEYS, (result) => {
-    const keysToRemove = [];
-
-    // Check each key for staleness
-    STALE_CHECK_KEYS.forEach(key => {
-      const data = result[key];
-      if (data?.timestamp && (currentTimestamp - data.timestamp) > STALE_THRESHOLD_MS) {
-        keysToRemove.push(key);
-      }
-    });
-
-    if (keysToRemove.length > 0) {
-      chrome.storage.local.remove(keysToRemove, () => {
-        logContent(`🧹 Cleared stale keys: ${keysToRemove.join(', ')}`);
-      });
-    }
-  });
-}
-
 const MESSAGE_HANDLERS = {
   rtc_stats: storageHandler('rtc_stats', '📡', 'WebRTC stats'),
-
-  // getUserMedia - clear stale audio_context/media_recorder if from different session
-  userMedia: (payload) => {
-    clearStaleDataOnNewSession(payload.timestamp);
-    return storageHandler('user_media', '🎤', 'getUserMedia')(payload);
-  },
-
-  // audioContext - clear stale user_media/media_recorder if from different session
-  audioContext: (payload) => {
-    clearStaleDataOnNewSession(payload.timestamp);
-    return storageHandler('audio_context', '🔊', 'AudioContext')(payload);
-  },
-
+  userMedia: storageHandler('user_media', '🎤', 'getUserMedia'),
+  audioContext: storageHandler('audio_context', '🔊', 'AudioContext'),
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
   // Special handler for audioWorklet - merge into parent audioContext
