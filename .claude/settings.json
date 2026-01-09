@@ -1,8 +1,7 @@
 {
   "skills": [
     ".claude/skills/architecture",
-    ".claude/skills/collectors",
-    ".claude/skills/skill-controller"
+    ".claude/skills/collectors"
   ],
   "model": "sonnet"
 }

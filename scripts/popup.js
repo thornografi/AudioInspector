@@ -3,6 +3,19 @@ let latestData = null;
 let autoRefresh = true;
 let enabled = false; // Default to false (stopped)
 let drawerOpen = false; // Console drawer state
+let currentTabId = null; // Track which tab this panel is associated with
+
+// Debug log helper - background.js üzerinden merkezi yönetim (race condition önleme)
+function debugLog(message) {
+  const entry = {
+    timestamp: Date.now(),
+    level: 'info',
+    prefix: 'Popup',
+    message: message
+  };
+
+  chrome.runtime.sendMessage({ type: 'ADD_LOG', entry: entry });
+}
 
 // Main update function
 async function updateUI() {
@@ -38,21 +51,46 @@ async function loadEnabledState() {
 // Toggle inspector on/off
 async function toggleInspector() {
   enabled = !enabled;
-  await chrome.storage.local.set({ inspectorEnabled: enabled });
 
   // Get active tab in current window
   const tabs = await chrome.tabs.query({active: true, currentWindow: true, url: ["http://*/*", "https://*/*"]});
-  const targetTab = tabs[0];
+  const activeTab = tabs[0];
 
-  if (targetTab?.id) {
-    chrome.tabs.sendMessage(targetTab.id, {
-      type: 'SET_ENABLED',
-      enabled: enabled
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        // Suppress error, it's fine if the content script isn't on the current page
-      }
+  // STOP durumunda kilitli tab bilgisini al (mesajı oraya göndermek için)
+  const result = await chrome.storage.local.get(['lockedTab']);
+  const lockedTab = result.lockedTab;
+
+  if (enabled && activeTab) {
+    // START: Aktif tab'ı kilitle
+    const lockedTabData = {
+      id: activeTab.id,
+      url: activeTab.url,
+      title: activeTab.title
+    };
+    debugLog(`🔒 Tab kilitlendi: ${activeTab.url} (id: ${activeTab.id})`);
+    await chrome.storage.local.set({
+      inspectorEnabled: true,
+      lockedTab: lockedTabData
     });
+
+    // Mesajı aktif tab'a gönder
+    chrome.tabs.sendMessage(activeTab.id, {
+      type: 'SET_ENABLED',
+      enabled: true
+    }, () => chrome.runtime.lastError); // Suppress error
+  } else {
+    // STOP: Mesajı KİLİTLİ TAB'A gönder (farklı tab'dan Stop'a basılmış olabilir)
+    debugLog('🔓 Tab kilidi kaldırıldı');
+
+    if (lockedTab?.id) {
+      debugLog(`Stopping inspector on locked tab: ${lockedTab.id}`);
+      chrome.tabs.sendMessage(lockedTab.id, {
+        type: 'SET_ENABLED',
+        enabled: false
+      }, () => chrome.runtime.lastError); // Suppress error
+    }
+
+    await chrome.storage.local.remove(['inspectorEnabled', 'lockedTab']);
   }
 
   // Clear data when toggling (both ON and OFF)
@@ -61,6 +99,7 @@ async function toggleInspector() {
 
   // Update button AND UI to reflect new state
   updateToggleButton();
+  await checkTabLock(); // Banner durumunu güncelle (Start'ta hemen göster)
   await updateUI(); // Critical: update label and data display
 }
 
@@ -83,6 +122,73 @@ function updateToggleButton() {
   }
 
   // Note: Icon is automatically updated by background.js storage listener
+}
+
+// Tab kilitleme kontrolü - popup açıldığında çağrılır
+async function checkTabLock() {
+  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const result = await chrome.storage.local.get(['lockedTab', 'inspectorEnabled']);
+
+  debugLog(`checkTabLock: currentTab=${currentTab?.id}, lockedTab=${result.lockedTab?.id}, enabled=${result.inspectorEnabled}`);
+
+  if (result.inspectorEnabled && result.lockedTab) {
+    const isSameTab = result.lockedTab.id === currentTab?.id;
+
+    // Her zaman banner'ı göster - aynı veya farklı tab fark etmez
+    showLockedTabInfo(result.lockedTab, isSameTab);
+    debugLog(`Banner gösteriliyor (${isSameTab ? 'aynı tab' : 'farklı tab'}): ${result.lockedTab.url}`);
+
+    return isSameTab;
+  } else {
+    debugLog('Inspector kapalı veya lockedTab yok');
+    hideLockedTabInfo();
+    return true;
+  }
+}
+
+// Kilitli tab bilgisini göster
+function showLockedTabInfo(lockedTab, isSameTab = false) {
+  const banner = document.getElementById('lockedTabBanner');
+  const domainSpan = document.getElementById('lockedTabDomain');
+  const infoText = document.querySelector('.locked-tab-banner .info-text');
+  const controls = document.querySelector('.controls');
+
+  if (!banner || !domainSpan) {
+    debugLog('❌ showLockedTabInfo: DOM element bulunamadı!');
+    return;
+  }
+
+  // URL'den domain çıkar
+  let domain;
+  try {
+    domain = new URL(lockedTab.url).hostname;
+    domainSpan.textContent = domain;
+  } catch {
+    domain = lockedTab.title || 'Bilinmeyen';
+    domainSpan.textContent = domain;
+  }
+
+  // Aynı tab vs farklı tab için farklı metin ve stil
+  if (isSameTab) {
+    banner.classList.add('visible', 'same-tab');
+    banner.classList.remove('different-tab');
+  } else {
+    banner.classList.add('visible', 'different-tab');
+    banner.classList.remove('same-tab');
+    // NOT: Farklı tab'da da Stop butonu aktif - kullanıcı inspector'ı durdurabilmeli
+  }
+  controls?.classList.remove('disabled'); // Stop butonu her zaman aktif
+
+  debugLog(`✅ Banner gösterildi: ${domain} (${isSameTab ? 'aynı' : 'farklı'} tab)`);
+}
+
+// Kilitli tab bilgisini gizle
+function hideLockedTabInfo() {
+  const banner = document.getElementById('lockedTabBanner');
+  const controls = document.querySelector('.controls');
+
+  banner?.classList.remove('visible', 'same-tab', 'different-tab');
+  controls?.classList.remove('disabled');
 }
 
 // Format timestamp
@@ -304,18 +410,19 @@ function renderACStats(data) {
   const hasAudioWorklet = data.audioWorklets && data.audioWorklets.length > 0;
 
   if (hasScriptProcessor || hasAudioWorklet) {
-    html += `<div class="processing-section">
-      <div class="processing-header">🎛️ Processing</div>`;
+    html += `<div class="processing-section">`;
 
     // ScriptProcessor (deprecated)
     if (hasScriptProcessor) {
       data.scriptProcessors.forEach(sp => {
         html += `
-          <div class="processing-item deprecated">
-            <span class="warning-icon">⚠️</span>
-            <span class="worklet-name">ScriptProcessor</span>
-            <span class="deprecated-label">deprecated</span>
-            <span class="processing-detail">Buffer: ${sp.bufferSize || '?'}</span>
+          <div class="processing-item subheader">
+            <span class="detail-label">Processor</span>
+            <span class="detail-value">ScriptProcessorNode <span class="has-tooltip has-tooltip--warning" data-tooltip="Deprecated API">⚠</span></span>
+          </div>
+          <div class="processing-item sub-item">
+            <span class="detail-label">Buffer</span>
+            <span class="detail-value">${sp.bufferSize || '?'}</span>
           </div>`;
       });
     }
@@ -324,30 +431,24 @@ function renderACStats(data) {
     if (hasAudioWorklet) {
       data.audioWorklets.forEach(aw => {
         const filename = aw.moduleUrl ? aw.moduleUrl.split('/').pop() : '-';
-
-        // Type inference (same logic as old awSection)
-        let workletType = 'Custom';
-        if (filename.includes('vad') || filename.includes('VAD')) workletType = 'VAD';
-        else if (filename.includes('meter') || filename.includes('level')) workletType = 'Meter';
-        else if (filename.includes('processor')) workletType = 'Processor';
-
         html += `
-          <div class="processing-item">
-            <span class="modern-icon">✨</span>
-            <span class="worklet-name">AudioWorklet</span>
-            <span class="type-label">${workletType}</span>
-            <span class="processing-filename" title="${escapeHtml(aw.moduleUrl)}">${escapeHtml(filename)}</span>
+          <div class="processing-item subheader">
+            <span class="detail-label">Processor</span>
+            <span class="detail-value" title="${escapeHtml(aw.moduleUrl)}">${escapeHtml(filename)}</span>
           </div>`;
       });
     }
 
+    // Output bilgisi
+    if (data.destinationType) {
+      html += `
+        <div class="processing-item sub-item">
+          <span class="detail-label">Output</span>
+          <span class="detail-value">${escapeHtml(data.destinationType)}</span>
+        </div>`;
+    }
+
     html += `</div>`;
-  } else {
-    // No processing nodes active
-    html += `<div class="processing-section">
-      <div class="processing-header">🎛️ Processing</div>
-      <div class="processing-item none">(none)</div>
-    </div>`;
   }
 
   container.innerHTML = html;
@@ -540,7 +641,7 @@ function updateLogBadge(count) {
   const badge = document.getElementById('logBadge');
   if (!badge) return;
 
-  badge.textContent = count > 99 ? '99+' : count;
+  badge.textContent = count;
   badge.classList.toggle('empty', count === 0);
 }
 
@@ -551,6 +652,12 @@ document.getElementById('clearBtn').addEventListener('click', clearData);
 document.getElementById('copyLogsBtn').addEventListener('click', copyLogs);
 document.getElementById('clearLogsBtn').addEventListener('click', clearLogs);
 document.getElementById('drawerHandle').addEventListener('click', toggleDrawer);
+
+// Sidebar modunda tab değişikliğini dinle
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  // Aktif tab değişti, banner durumunu kontrol et
+  checkTabLock();
+});
 
 // Listen for storage changes instead of polling
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -578,11 +685,35 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         updateToggleButton();
       }
     }
+
+    // lockedTab değişikliği (tab kapatıldığında background.js tarafından silinir)
+    if (changes.lockedTab) {
+      // lockedTab silindiyse veya değiştiyse tab lock kontrolü yap
+      checkTabLock();
+    }
+  }
+});
+
+// Notify background when panel closes (X button or other means)
+window.addEventListener('beforeunload', () => {
+  if (currentTabId) {
+    chrome.runtime.sendMessage({ type: 'PANEL_CLOSED', tabId: currentTabId });
   }
 });
 
 // Initial load
 loadEnabledState().then(async () => {
+  // Panel açıldığında aktif tab ID'sini kaydet (kapanma bildirim için)
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  currentTabId = activeTab?.id;
+
+  // Sayfa yenilendiğinde logları temizle
+  await chrome.storage.local.remove(['debug_logs']);
+  renderDebugLogs([]);
+
+  // Tab kilitleme kontrolü
+  await checkTabLock();
+
   // If inspector is not enabled on initial load, clear any old data
   if (!enabled) {
     await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder']);

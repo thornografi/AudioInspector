@@ -4,7 +4,7 @@ import BaseCollector from './BaseCollector.js';
 import { EVENTS, DATA_TYPES } from '../core/constants.js';
 import { logger } from '../core/Logger.js';
 import { hookAsyncMethod, hookMethod } from '../core/utils/ApiHook.js';
-import { getInstanceRegistry } from '../core/utils/EarlyHook.js';
+import { getInstanceRegistry, clearRegistryKey } from '../core/utils/EarlyHook.js';
 
 /**
  * Collects AudioContext stats (sample rate, latency).
@@ -25,6 +25,9 @@ class AudioContextCollector extends BaseCollector {
 
     /** @type {Function|null} */
     this.originalAudioWorkletAddModule = null;
+
+    /** @type {Function|null} */
+    this.originalCreateMediaStreamDestination = null;
   }
 
   /**
@@ -75,7 +78,7 @@ class AudioContextCollector extends BaseCollector {
 
     // 4. Hook AudioWorklet.addModule (Async method)
     // AudioWorklet is a property of AudioContext instances usually, or AudioWorkletNode
-    // Actually, addModule is on the AudioWorklet interface. 
+    // Actually, addModule is on the AudioWorklet interface.
     // We can try to hook AudioWorklet.prototype.addModule if it exists in the window scope,
     // but AudioWorklet might not be globally exposed as a constructor in older browsers or some contexts.
     // It is available as window.AudioWorklet in modern browsers.
@@ -90,6 +93,19 @@ class AudioContextCollector extends BaseCollector {
             () => this.active
         );
         logger.info(this.logPrefix, 'Hooked AudioWorklet.addModule');
+    }
+
+    // 5. Hook createMediaStreamDestination (Sync method)
+    // Bu metod MediaRecorder'a giden output için kullanılır
+    if (window.AudioContext && window.AudioContext.prototype) {
+        this.originalCreateMediaStreamDestination = hookMethod(
+            window.AudioContext.prototype,
+            'createMediaStreamDestination',
+            // @ts-ignore
+            (node, args) => this._handleMediaStreamDestination(node, args),
+            () => this.active
+        );
+        logger.info(this.logPrefix, 'Hooked AudioContext.prototype.createMediaStreamDestination');
     }
 
   }
@@ -108,7 +124,8 @@ class AudioContextCollector extends BaseCollector {
         outputLatency: ctx.outputLatency,
         state: ctx.state,
         scriptProcessors: [],
-        audioWorklets: []
+        audioWorklets: [],
+        destinationType: 'destination (speakers)'  // Default - ctx.destination
       };
 
       this.activeContexts.set(ctx, metadata);
@@ -117,6 +134,22 @@ class AudioContextCollector extends BaseCollector {
       this.emit(EVENTS.DATA, metadata);
 
       logger.info(this.logPrefix, 'AudioContext created:', metadata);
+  }
+
+  /**
+   * Ensure AudioContext is registered (late-discovery pattern)
+   * Called when we encounter a node whose context wasn't captured at creation time
+   * @private
+   * @param {AudioContext} ctx
+   * @returns {boolean} true if context was newly registered, false if already known
+   */
+  _ensureContextRegistered(ctx) {
+      if (ctx && !this.activeContexts.has(ctx)) {
+          logger.info(this.logPrefix, `Late-discovered AudioContext (${ctx.sampleRate}Hz, ${ctx.state}) - adding to registry`);
+          this._handleNewContext(ctx);
+          return true;
+      }
+      return false;
   }
 
   /**
@@ -141,6 +174,10 @@ class AudioContextCollector extends BaseCollector {
       // Find which context this node belongs to
       // node.context should point to the AudioContext
       const ctx = node.context;
+
+      // Late-discovery: register context if not already known
+      this._ensureContextRegistered(ctx);
+
       if (this.activeContexts.has(ctx)) {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
@@ -148,11 +185,11 @@ class AudioContextCollector extends BaseCollector {
             ctxData.scriptProcessors.push(spData);
             // Re-emit updated context data
             this.emit(EVENTS.DATA, ctxData);
-            logger.info(this.logPrefix, 'ScriptProcessor created:', spData);
+            logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch`);
           }
       } else {
-           // Context not found (maybe created before we hooked, or iframe issue)
-           logger.warn(this.logPrefix, 'ScriptProcessor created for UNKNOWN context', spData);
+           // Context gerçekten null veya undefined (iframe/cross-origin)
+           logger.warn(this.logPrefix, `ScriptProcessor created but context is ${ctx === null ? 'null' : 'undefined'}`);
 
            // Emit as orphan data
            this.emit(EVENTS.DATA, {
@@ -211,25 +248,44 @@ class AudioContextCollector extends BaseCollector {
   }
 
   /**
+   * Handle createMediaStreamDestination calls
+   * Bu metod çağrıldığında output MediaRecorder'a gidiyor demektir
+   * @private
+   * @param {MediaStreamAudioDestinationNode} node
+   * @param {any[]} args
+   */
+  _handleMediaStreamDestination(node, args) {
+      // node.context ile AudioContext'e erişebiliriz
+      const ctx = node.context;
+
+      // Late-discovery: register context if not already known
+      this._ensureContextRegistered(ctx);
+
+      if (this.activeContexts.has(ctx)) {
+          const ctxData = this.activeContexts.get(ctx);
+          if (ctxData) {
+              // @ts-ignore
+              ctxData.destinationType = 'MediaStreamDestination (→ MediaRecorder)';
+              // Re-emit updated context data
+              this.emit(EVENTS.DATA, ctxData);
+              logger.info(this.logPrefix, 'MediaStreamDestination created - output goes to MediaRecorder');
+          }
+      } else {
+          logger.warn(this.logPrefix, `MediaStreamDestination created but context is ${ctx === null ? 'null' : 'undefined'}`);
+      }
+  }
+
+  /**
    * Start collector
    * @returns {Promise<void>}
    */
   async start() {
     this.active = true;
 
-    // Handler already registered in initialize(), just emit pre-existing instances
-    const registry = getInstanceRegistry();
-    logger.info(this.logPrefix, `Checking registry... found ${registry.audioContexts.length} AudioContext(s)`);
-
-    if (registry.audioContexts.length > 0) {
-      logger.info(this.logPrefix, `Found ${registry.audioContexts.length} pre-existing AudioContext(s) from early hook`);
-
-      for (const { instance, timestamp, sampleRate, state } of registry.audioContexts) {
-        this._handleNewContext(instance);
-      }
-    }
-
-    logger.info(this.logPrefix, 'Started');
+    // Registry'deki eski instance'ları ignore et
+    // Sadece yeni oluşturulan AudioContext'leri izle
+    // Bu, profil değişikliğinde eski verilerin görünmesini önler
+    logger.info(this.logPrefix, 'Started - listening for new AudioContext instances only');
   }
 
   /**
@@ -243,6 +299,10 @@ class AudioContextCollector extends BaseCollector {
     // Just stop emitting by setting active=false
     // Note: Reverting global objects in a running page is risky/complex.
     this.activeContexts.clear();
+
+    // Clear registry to prevent stale data on next start
+    clearRegistryKey('audioContexts');
+
     logger.info(this.logPrefix, 'Stopped');
   }
 }

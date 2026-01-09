@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VoiceInspector</title>
+  <title>AudioInspector</title>
   <style>
     :root {
       --bg-primary: #0d1117;
@@ -164,7 +164,7 @@
     .main-content {
       flex: 1;
       display: grid;
-      grid-template-rows: 1.5fr 1fr 0.5fr;  /* WebRTC %50, GUM+AC %33, MR %17 */
+      grid-template-rows: 1fr 1fr 0.5fr;  /* WebRTC %33, GUM+AC %33, MR %17 */
       gap: 1px;
       background: var(--border-subtle);
       overflow: hidden;
@@ -417,121 +417,103 @@
       border-radius: 4px;
     }
 
-    /* Processing sub-section styles - clear parent-child hierarchy */
+    /* Processing - tablo satırlarıyla aynı hizada */
     .processing-section {
-      margin-top: 12px;
-      margin-left: 8px;
-      padding: 10px;
-      padding-left: 12px;
-      background: rgba(0, 0, 0, 0.1);
-      border-left: 2px solid var(--border-primary);
-      border-radius: 4px;
+      margin-top: 0;
+      padding: 0;
     }
 
     .processing-header {
-      font-size: 10px;
-      font-weight: 600;
-      color: var(--accent-blue);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 8px;
-      padding-bottom: 6px;
-      border-bottom: 1px solid rgba(88, 166, 255, 0.15);
-      opacity: 0.9;
+      display: none;
     }
 
+    /* Processing satırları - tablo tr gibi */
     .processing-item {
       display: flex;
-      flex-direction: row;
+      justify-content: space-between;
       align-items: center;
-      gap: 8px;
-      padding: 8px 0;
-      font-size: 11px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .processing-item:first-of-type {
-      padding-top: 8px;
+      padding: 6px 0;
+      font-size: 12px;
+      border-bottom: 1px solid var(--border-subtle);
     }
 
     .processing-item:last-child {
       border-bottom: none;
-      padding-bottom: 4px;
     }
 
     .processing-item.none {
       color: var(--text-muted);
       font-style: italic;
       justify-content: center;
-      padding: 8px 0;
+      padding: 6px 0;
     }
 
-    .processing-item.deprecated {
-      background: rgba(210, 153, 34, 0.12);
-      padding: 10px;
-      margin: 4px 0;
-      border-radius: 4px;
-      border: 1px solid rgba(210, 153, 34, 0.3);
+    /* Processor alt başlık stili */
+    .processing-item.subheader {
+      border-bottom: 2px solid var(--border-primary);
+      padding-bottom: 8px;
+      margin-bottom: 4px;
     }
 
-    .warning-icon {
-      font-size: 13px;
-      flex-shrink: 0;
-    }
-
-    .modern-icon {
-      font-size: 13px;
-      flex-shrink: 0;
-    }
-
-    .deprecated-label {
-      display: inline-flex;
-      align-items: center;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 9px;
+    .processing-item.subheader .detail-label {
+      font-size: 12px;
       font-weight: 600;
-      color: var(--accent-orange);
-      background: rgba(210, 153, 34, 0.2);
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-    }
-
-    .type-label {
-      display: inline-flex;
-      align-items: center;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 9px;
-      font-weight: 600;
-      color: var(--text-secondary);
-      background: rgba(88, 166, 255, 0.15);
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-    }
-
-    .worklet-name {
       color: var(--text-primary);
-      font-weight: 500;
     }
 
-    .processing-filename {
-      flex: 1;
+    /* Alt elemanlar indent */
+    .processing-item.sub-item {
+      padding-left: 12px;
+    }
+
+    .detail-label {
       color: var(--text-muted);
-      font-family: 'SF Mono', 'Consolas', monospace;
-      font-size: 10px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-left: auto;
-      max-width: 200px;
+      font-size: 11px;
     }
 
-    .processing-detail {
-      color: var(--text-secondary);
-      font-size: 10px;
-      margin-left: auto;
+    .detail-value {
+      color: var(--text-primary);
+      font-family: 'SF Mono', 'Consolas', monospace;
+      font-weight: 500;
+      text-align: right;
     }
+
+    /* ========== Generic Tooltip System (OCP-DRY) ========== */
+    .has-tooltip {
+      position: relative;
+      cursor: default;
+      margin-left: 4px;
+    }
+
+    .has-tooltip::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: calc(100% + 4px);
+      right: 0;
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: normal;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s;
+      z-index: 10;
+      border: 1px solid var(--border-primary);
+    }
+
+    .has-tooltip:hover::after {
+      opacity: 1;
+    }
+
+    /* Tooltip varyantları - sadece ikon rengi değişir */
+    .has-tooltip--warning { color: var(--accent-orange); }
+    .has-tooltip--info { color: var(--accent-blue); }
+    .has-tooltip--success { color: var(--accent-green); }
+    .has-tooltip--error { color: var(--accent-red); }
+
 
     /* AudioContext main table - parent section */
     .ac-main-table {
@@ -661,6 +643,59 @@
       padding-bottom: 36px;
     }
 
+    /* Locked Tab Info Banner */
+    .locked-tab-banner {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .locked-tab-banner.visible {
+      display: flex;
+    }
+
+    /* Aynı tab - yeşil/aktif stil */
+    .locked-tab-banner.same-tab {
+      background: linear-gradient(180deg, rgba(63, 185, 80, 0.1) 0%, rgba(63, 185, 80, 0.05) 100%);
+      border-bottom: 1px solid var(--accent-green);
+    }
+
+    .locked-tab-banner.same-tab .info-text strong {
+      color: var(--accent-green);
+    }
+
+    /* Farklı tab - mavi/bilgi stil */
+    .locked-tab-banner.different-tab {
+      background: linear-gradient(180deg, rgba(88, 166, 255, 0.15) 0%, rgba(88, 166, 255, 0.08) 100%);
+      border-bottom: 1px solid var(--accent-blue);
+    }
+
+    .locked-tab-banner.different-tab .info-text strong {
+      color: var(--accent-blue);
+    }
+
+    .locked-tab-banner .info-icon {
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .locked-tab-banner .info-text {
+      flex: 1;
+    }
+
+    .locked-tab-banner .info-text strong {
+      font-weight: 600;
+    }
+
+    /* Controls disabled state */
+    .controls.disabled .btn-primary {
+      opacity: 0.5;
+      pointer-events: none;
+    }
+
   </style>
 </head>
 <body>
@@ -681,12 +716,17 @@
     </button>
   </div>
 
+  <!-- Locked Tab Info Banner (farklı tab'dayken görünür) -->
+  <div class="locked-tab-banner" id="lockedTabBanner">
+    <span class="info-icon">&#x1F4CD;</span>
+    <span class="info-text">Veri toplanıyor: <strong id="lockedTabDomain">-</strong></span>
+  </div>
+
   <div class="main-content">
     <!-- WebRTC Section -->
     <div class="card" id="rtcSection">
       <div class="card-header">
         <div class="card-title">
-          <span class="card-icon rtc">R</span>
           WebRTC
         </div>
         <span class="timestamp" id="rtcTimestamp"></span>
@@ -701,7 +741,6 @@
       <div class="card" id="gumSection">
         <div class="card-header">
           <div class="card-title">
-            <span class="card-icon gum">G</span>
             getUserMedia
           </div>
           <span class="timestamp" id="gumTimestamp"></span>
@@ -713,7 +752,6 @@
       <div class="card" id="acSection">
         <div class="card-header">
           <div class="card-title">
-            <span class="card-icon ac">A</span>
             AudioContext
           </div>
           <span class="timestamp" id="acTimestamp"></span>
@@ -728,7 +766,6 @@
     <div class="card" id="mrSection">
       <div class="card-header">
         <div class="card-title">
-          <span class="card-icon mr">M</span>
           MediaRecorder
         </div>
         <span class="timestamp" id="mrTimestamp"></span>
@@ -743,7 +780,6 @@
   <div class="drawer-overlay" id="drawerOverlay">
     <div class="drawer-header">
       <div class="drawer-title">
-        <span class="card-icon log">L</span>
         Console
       </div>
       <div style="display: flex; gap: 6px;">

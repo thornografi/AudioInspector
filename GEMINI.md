@@ -1,7 +1,7 @@
-# VoiceInspector - Gemini Temsilci Yönergeleri
+# AudioInspector - Gemini Temsilci Yönergeleri
 
 ## 📁 Projeye Genel Bakış
-**Adı:** VoiceInspector
+**Adı:** AudioInspector
 **Türü:** Chrome Uzantısı (Manifest V3)
 **Hedef:** Teams, Discord, Zoom ve Google Meet gibi platformlarda WebRTC ses hatlarını (Codec, Bitrate, Jitter, AEC/NS/AGC) denetlemek.
 

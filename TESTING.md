@@ -1,4 +1,4 @@
-# VoiceInspector - UI Test Scenarios
+# AudioInspector - UI Test Scenarios
 
 ## Test Environment Setup
 1. Chrome'da extension yüklü olmalı

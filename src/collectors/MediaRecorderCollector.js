@@ -4,7 +4,7 @@ import { logger } from '../core/Logger.js';
 import BaseCollector from './BaseCollector.js';
 import { EVENTS, DATA_TYPES } from '../core/constants.js';
 import { parseMimeType, getCodecInfo } from '../core/utils/CodecParser.js';
-import { getInstanceRegistry } from '../core/utils/EarlyHook.js';
+import { getInstanceRegistry, clearRegistryKey } from '../core/utils/EarlyHook.js';
 
 /**
  * Collects MediaRecorder stats (mimeType, bitrate).
@@ -154,7 +154,8 @@ class MediaRecorderCollector extends BaseCollector {
       this._createRecorderEventListener(recorder, 'resume', 'event:resume', metadata);
       this._createRecorderEventListener(recorder, 'error', 'error', metadata);
 
-      this.emit(EVENTS.DATA, metadata);  // Emit metadata directly, not wrapped
+      // İlk emit kaldırıldı - sadece 'start' event'inde emit edilecek
+      // (inactive MediaRecorder'lar artık görünmeyecek)
 
       logger.info(this.logPrefix, `MediaRecorder created:`, JSON.stringify(metadata));
   }
@@ -166,19 +167,10 @@ class MediaRecorderCollector extends BaseCollector {
   async start() {
     this.active = true;
 
-    // Handler already registered in initialize()
-    // Emit pre-existing instances from early hook registry
-    const registry = getInstanceRegistry();
-    if (registry.mediaRecorders && registry.mediaRecorders.length > 0) {
-      logger.info(this.logPrefix, `Found ${registry.mediaRecorders.length} pre-existing MediaRecorder(s) from early hook`);
-
-      for (const { instance, timestamp } of registry.mediaRecorders) {
-        // We don't have args from registry, pass empty array
-        this._handleNewRecorder(instance, []);
-      }
-    }
-
-    logger.info(this.logPrefix, `Started`);
+    // Registry'deki eski instance'ları ignore et
+    // Sadece yeni oluşturulan MediaRecorder'ları izle
+    // Bu, profil değişikliğinde eski verilerin görünmesini önler
+    logger.info(this.logPrefix, 'Started - listening for new MediaRecorder instances only');
   }
 
   /**
@@ -194,6 +186,10 @@ class MediaRecorderCollector extends BaseCollector {
       this._removeAllListeners(recorder);
     });
     this.activeRecorders.clear();
+
+    // Clear registry to prevent stale data on next start
+    clearRegistryKey('mediaRecorders');
+
     logger.info(this.logPrefix, `Stopped`);
   }
 }

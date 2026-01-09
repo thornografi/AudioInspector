@@ -1,20 +1,19 @@
 // Content script - Bridge between page and extension
 let injected = false;
-let storedLogs = []; // Cache for logs
-const MAX_STORED_LOGS = 100;
 
-// Helper to save logs to storage
+// Helper to save logs - background.js üzerinden merkezi yönetim (race condition önleme)
 function persistLogs(newEntry) {
-    // Add new entry
-    storedLogs.push(newEntry);
-    
-    // Trim if too big
-    if (storedLogs.length > MAX_STORED_LOGS) {
-        storedLogs = storedLogs.slice(-MAX_STORED_LOGS);
-    }
-    
-    // Save to storage
-    chrome.storage.local.set({ 'debug_logs': storedLogs });
+    chrome.runtime.sendMessage({ type: 'ADD_LOG', entry: newEntry });
+}
+
+// Helper to create standardized log entries (DRY principle)
+function createLog(prefix, message, level = 'info') {
+    return {
+        timestamp: Date.now(),
+        level,
+        prefix,
+        message
+    };
 }
 
 // Debug logging
@@ -41,28 +40,26 @@ async function injectPageScript() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'INJECT_PAGE_SCRIPT' });
     if (response?.success) {
-      logContent('✅ VoiceInspector: page script injected via background script');
+      logContent('✅ AudioInspector: page script injected via background script');
 
       // Add initialization log to storage
-      const initLog = {
-        timestamp: Date.now(),
-        level: 'info',
-        prefix: 'Inspector',
-        message: '🚀 VoiceInspector initialized'
-      };
-      persistLogs(initLog);
+      persistLogs(createLog('Inspector', '🚀 AudioInspector initialized'));
 
       // Note: State restoration moved to INSPECTOR_READY handler below
       // to avoid race condition with PageInspector initialization
     } else {
-      logContent('❌ VoiceInspector: page script injection failed via background script', response?.error);
+      logContent('❌ AudioInspector: page script injection failed via background script', response?.error);
     }
   } catch (error) {
-    logContent('❌ VoiceInspector: error sending injection request to background script', error);
+    logContent('❌ AudioInspector: error sending injection request to background script', error);
   }
 }
 
 // --- Message Handlers (All payloads now have consistent 'type' field) ---
+
+// Storage keys for collected data (DRY - used in multiple places)
+const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder'];
+const STALE_CHECK_KEYS = ['audio_context', 'media_recorder', 'user_media'];
 
 // Helper to create storage handlers (DRY principle)
 const storageHandler = (key, emoji, label) => (payload) => ({
@@ -70,10 +67,47 @@ const storageHandler = (key, emoji, label) => (payload) => ({
   logMsg: `${emoji} Storing ${label}`
 });
 
+// Stale data threshold in milliseconds
+// 5 saniye: Kullanıcının profil değiştirmesi için makul süre
+// Daha kısa süre false positive'lere yol açabilir
+const STALE_THRESHOLD_MS = 5000;
+
+// Helper to clear stale data when new session starts
+function clearStaleDataOnNewSession(currentTimestamp) {
+  chrome.storage.local.get(STALE_CHECK_KEYS, (result) => {
+    const keysToRemove = [];
+
+    // Check each key for staleness
+    STALE_CHECK_KEYS.forEach(key => {
+      const data = result[key];
+      if (data?.timestamp && (currentTimestamp - data.timestamp) > STALE_THRESHOLD_MS) {
+        keysToRemove.push(key);
+      }
+    });
+
+    if (keysToRemove.length > 0) {
+      chrome.storage.local.remove(keysToRemove, () => {
+        logContent(`🧹 Cleared stale keys: ${keysToRemove.join(', ')}`);
+      });
+    }
+  });
+}
+
 const MESSAGE_HANDLERS = {
   rtc_stats: storageHandler('rtc_stats', '📡', 'WebRTC stats'),
-  userMedia: storageHandler('user_media', '🎤', 'getUserMedia'),
-  audioContext: storageHandler('audio_context', '🔊', 'AudioContext'),
+
+  // getUserMedia - clear stale audio_context/media_recorder if from different session
+  userMedia: (payload) => {
+    clearStaleDataOnNewSession(payload.timestamp);
+    return storageHandler('user_media', '🎤', 'getUserMedia')(payload);
+  },
+
+  // audioContext - clear stale user_media/media_recorder if from different session
+  audioContext: (payload) => {
+    clearStaleDataOnNewSession(payload.timestamp);
+    return storageHandler('audio_context', '🔊', 'AudioContext')(payload);
+  },
+
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
   // Special handler for audioWorklet - merge into parent audioContext
@@ -127,35 +161,59 @@ window.addEventListener('message', (event) => {
   if (event.source !== window) return;
   if (!event.data?.__audioPipelineInspector) return;
   
-  // Handle INSPECTOR_READY - restore state if needed
+  // Handle INSPECTOR_READY - restore state if needed (with tab lock check)
   if (event.data.type === 'INSPECTOR_READY') {
-      chrome.storage.local.get(['inspectorEnabled'], (result) => {
-          if (result.inspectorEnabled === true) {
-              logContent('🔄 Restoring inspector state after READY signal');
+      chrome.storage.local.get(['inspectorEnabled', 'lockedTab'], (result) => {
+          if (result.inspectorEnabled === true && result.lockedTab) {
+              // Tab ID kontrolü yap
+              chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
+                  const currentTabId = response?.tabId;
+                  const lockedTabId = result.lockedTab.id;
+                  const currentOrigin = window.location.origin;
+                  let lockedOrigin;
+                  try {
+                      lockedOrigin = new URL(result.lockedTab.url).origin;
+                  } catch {
+                      lockedOrigin = null;
+                  }
 
-              const restoreLog = {
-                timestamp: Date.now(),
-                level: 'info',
-                prefix: 'Content',
-                message: '🔄 Restoring inspector state'
-              };
-              persistLogs(restoreLog);
+                  // Debug log - tab ID ve origin karşılaştırması
+                  logContent(`Tab check: current=${currentTabId}, locked=${lockedTabId}, origins: ${currentOrigin} vs ${lockedOrigin}`);
+                  persistLogs(createLog('Content', `Tab check: current=${currentTabId}, locked=${lockedTabId}`));
 
-              window.postMessage({
-                  __audioPipelineInspector: true,
-                  type: 'SET_ENABLED',
-                  enabled: true
-              }, '*');
+                  // Tab ID kontrolü
+                  if (currentTabId !== lockedTabId) {
+                      // Farklı tab, başlatma
+                      logContent('Inspector active but this tab is not locked (not starting)');
+                      persistLogs(createLog('Content', `Different tab (${currentTabId} != ${lockedTabId}) - not starting`));
+                      return;
+                  }
+
+                  // Origin kontrolü - aynı tab'da farklı siteye gidilmiş olabilir
+                  if (currentOrigin !== lockedOrigin) {
+                      logContent(`Same tab but different origin: ${currentOrigin} vs ${lockedOrigin} (not starting)`);
+                      persistLogs(createLog('Content', `Same tab, different origin (${currentOrigin}) - not starting`));
+                      return;
+                  }
+
+                  // Hem tab ID hem origin eşleşti, başlat
+                  logContent('🔄 Restoring inspector state (tab + origin match)');
+                  persistLogs(createLog('Content', '🔄 Restoring inspector state'));
+
+                  // Clear stale data before restoring
+                  chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+                    logContent('🧹 Cleared stale data before restore');
+
+                    window.postMessage({
+                        __audioPipelineInspector: true,
+                        type: 'SET_ENABLED',
+                        enabled: true
+                    }, '*');
+                  });
+              });
           } else {
               logContent('Inspector READY but state is stopped (not restoring)');
-
-              const stopLog = {
-                timestamp: Date.now(),
-                level: 'info',
-                prefix: 'Content',
-                message: 'Inspector state: stopped (not restoring)'
-              };
-              persistLogs(stopLog);
+              persistLogs(createLog('Content', 'Inspector state: stopped (not restoring)'));
           }
       });
       return;
@@ -197,30 +255,35 @@ window.addEventListener('message', (event) => {
 });
 
 
-// Listen for messages from popup
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'SET_ENABLED') {
-    // Persist state
-    chrome.storage.local.set({ inspectorEnabled: message.enabled });
+// Listen for messages from popup (main frame only to prevent duplication)
+if (window.self === window.top) {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'SET_ENABLED') {
+      // Persist state
+      chrome.storage.local.set({ inspectorEnabled: message.enabled });
 
-    // Add explicit log to storage
-    const statusLog = {
-      timestamp: Date.now(),
-      level: 'info',
-      prefix: 'Content',
-      message: message.enabled ? '✅ Inspector started' : '⏸️ Inspector stopped'
-    };
-    persistLogs(statusLog);
+      // Clear all data storage on start to prevent stale data from previous sessions
+      if (message.enabled) {
+        chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+          logContent('🧹 Cleared stale data from storage');
+        });
+      }
 
-    // Forward enable/disable command to page script
-    window.postMessage({
-      __audioPipelineInspector: true,
-      type: 'SET_ENABLED',
-      enabled: message.enabled
-    }, '*');
-    sendResponse({success: true});
-  }
-});
+      // Add explicit log to storage
+      persistLogs(createLog('Content', message.enabled ? '✅ Inspector started' : '⏸️ Inspector stopped'));
+
+      // Forward enable/disable command to page script
+      window.postMessage({
+        __audioPipelineInspector: true,
+        type: 'SET_ENABLED',
+        enabled: message.enabled
+      }, '*');
+      sendResponse({success: true});
+    }
+  });
+} else {
+  logContent(`⚠️ Running in iframe - message handling disabled`);
+}
 
 // Inject immediately
 injectPageScript();

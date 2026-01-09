@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "VoiceInspector",
+  "name": "AudioInspector",
   "version": "1.0.1",
   "description": "Audio codec, bitrate, jitter, buffer size, AGC/AEC/NS monitor for voice calls",
   "permissions": ["scripting", "storage", "activeTab", "sidePanel", "tabs"],

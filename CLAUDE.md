@@ -1,16 +1,15 @@
-# VoiceInspector - Project Guidelines
+# AudioInspector - Project Guidelines
 
 ## Klasör Yapısı
 
 ```
-voice-inspector/
+audio-inspector/
 ├── .claude/              # Claude Code configuration & skills
 │   ├── settings.json     # Skill registration
 │   ├── README.md         # Skill index
 │   └── skills/           # Custom skills
 │       ├── architecture/SKILL.md
-│       ├── collectors/SKILL.md
-│       └── skill-controller/SKILL.md
+│       └── collectors/SKILL.md
 │
 ├── src/                  # Modular application code
 │   ├── core/             # Utilities & constants
@@ -115,9 +114,11 @@ popup.js reads → displays UI
 
 ### State Management
 
-- **inspectorEnabled** (page.js) - Controls polling & data collection
+- **inspectorEnabled** (chrome.storage.local) - Inspector aktif mi?
+- **lockedTab** (chrome.storage.local) - Kilitli tab bilgisi: `{ id, url, title }`
 - **platformInfo** (chrome.storage.local) - Platform detection (persistent)
 - **audioData** (chrome.storage.local) - Latest stats data
+- **debug_logs** (chrome.storage.local) - Merkezi log kayıtları
 
 ### Control Messages
 
@@ -128,20 +129,50 @@ popup.js reads → displays UI
 - `SET_ENABLED` - Toggle stats collection on/off
 - `FORCE_REFRESH` - Immediate stats collection
 
+**content.js → background.js** (Tab & Log yönetimi)
+- `GET_TAB_ID` - Content script kendi tab ID'sini öğrenir (tab kilitleme için)
+- `ADD_LOG` - Merkezi log ekleme (race condition önleme)
+
 **content.js → page.js** (State restoration)
-- `SET_ENABLED` - Restore inspector state after INSPECTOR_READY signal
+- `SET_ENABLED` - Restore inspector state after INSPECTOR_READY signal (tab ID + origin kontrolü ile)
 
 ## Skill Routing
 
-Üç özel skill mevcut (`.claude/skills/`):
+İki özel skill mevcut (`.claude/skills/`):
 
 | Skill | Amaç | Tetikleyici Kelimeler |
 |-------|------|----------------------|
 | **architecture** | Extension mimarisi, script türleri, veri akışı | mimari, manifest, content script, main world, postMessage |
 | **collectors** | Collector yazma, API hooking | collector, hook, rtcpeerconnection, getusermedia, emit |
-| **skill-controller** | Skill denetimi | skill audit, skill kontrol, senkronizasyon |
 
 Detaylı bilgi: `.claude/README.md`
+
+## Kod Yazma Kuralları
+
+### 🔄 DRY (Don't Repeat Yourself)
+1. **Yeni kod yazmadan önce mevcut utility'leri kontrol et**
+   - CSS: `popup.html` → `.has-tooltip`, `.subheader`, `.sub-item`, CSS variables
+   - JS: `src/core/utils/ApiHook.js`, `src/core/constants.js`
+2. **Tekrar eden değerler → constants.js veya CSS variable**
+3. **Benzer fonksiyonlar → tek parametrik fonksiyon**
+
+### 🔓 OCP (Open-Closed Principle)
+4. **Genişlemeye açık, değişikliğe kapalı yaz**
+   - `data-attribute` > hardcoded content (bkz: `.has-tooltip`)
+   - Config object > çoklu if-else
+   - Factory function > tekrarlı constructor
+5. **Yeni özellik = yeni kod, mevcut kodu değiştirme**
+
+### 🧬 Inheritance & Composition
+6. **Mevcut base class varsa türet**
+   - Collector → `BaseCollector` veya `PollingCollector`
+   - Detector → `RegexDetector`
+7. **Pattern'leri takip et** - Benzer kod nasıl yazılmış?
+8. **Composition > deep inheritance** - 2 seviyeden fazla türetme yapma
+
+### ⚖️ Aşırı Mühendislikten Kaçın
+9. **YAGNI** - Şu an gerekmiyorsa ekleme
+10. **3 satır tekrar > 1 gereksiz abstraction**
 
 ## Development Guidelines
 
@@ -180,9 +211,9 @@ After refactoring or adding features:
 
 ```bash
 1. Open chrome://extensions/
-2. Click reload on VoiceInspector
+2. Click reload on AudioInspector
 3. Open DevTools (F12) → Console
-4. Check for errors starting with [VoiceInspector]
+4. Check for errors starting with [AudioInspector]
 5. Test on WhatsApp Web, Teams, Discord, etc.
 6. Verify Start/Stop works
 7. Verify platform detection persists

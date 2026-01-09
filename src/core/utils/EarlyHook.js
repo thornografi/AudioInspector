@@ -140,3 +140,14 @@ export function clearInstanceRegistry() {
   instanceRegistry.mediaRecorders = [];
   logger.info(LOG_PREFIX.INSPECTOR, 'Instance registry cleared');
 }
+
+/**
+ * Clear a specific key in the instance registry
+ * @param {string} key - Registry key to clear (e.g., 'audioContexts', 'mediaRecorders')
+ */
+export function clearRegistryKey(key) {
+  if (instanceRegistry[key]) {
+    instanceRegistry[key] = [];
+    logger.info(LOG_PREFIX.INSPECTOR, `Registry key '${key}' cleared`);
+  }
+}

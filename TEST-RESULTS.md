@@ -1,4 +1,4 @@
-# VoiceInspector - Test Results
+# AudioInspector - Test Results
 **Test Date:** 2026-01-08
 **Test Method:** Automated via Claude in Chrome
 **Environment:** Google Chrome, google.com test page

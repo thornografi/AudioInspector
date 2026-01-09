@@ -264,9 +264,10 @@ class RTCPeerConnectionCollector extends PollingCollector {
       }
 
       // Store current stats for next delta calculation
+      // Preserve previous values if current stats unavailable (prevents bitrate spikes)
       this.previousStats.set(pc, {
-        bytesSent: audioOutbound?.bytesSent || 0,
-        bytesReceived: audioInbound?.bytesReceived || 0,
+        bytesSent: audioOutbound?.bytesSent ?? prev?.bytesSent ?? 0,
+        bytesReceived: audioInbound?.bytesReceived ?? prev?.bytesReceived ?? 0,
         timestamp: now
       });
 
