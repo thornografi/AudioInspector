@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoiceInspector UI Test Page</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #0d1117;
+      color: #e6edf3;
+    }
+
+    h1 {
+      color: #58a6ff;
+      border-bottom: 2px solid #21262d;
+      padding-bottom: 10px;
+    }
+
+    h2 {
+      color: #3fb950;
+      margin-top: 30px;
+    }
+
+    .test-section {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+
+    .scenario {
+      background: #0d1117;
+      padding: 15px;
+      margin: 15px 0;
+      border-left: 3px solid #58a6ff;
+    }
+
+    .scenario h3 {
+      margin-top: 0;
+      color: #58a6ff;
+    }
+
+    .steps {
+      margin: 10px 0;
+    }
+
+    .step {
+      padding: 8px 0;
+      border-bottom: 1px solid #21262d;
+    }
+
+    .step:last-child {
+      border-bottom: none;
+    }
+
+    .expected {
+      background: #1a2f1a;
+      border-left: 3px solid #3fb950;
+      padding: 10px;
+      margin: 10px 0;
+    }
+
+    .issue {
+      background: #2f1a1a;
+      border-left: 3px solid #f85149;
+      padding: 10px;
+      margin: 10px 0;
+    }
+
+    .btn {
+      background: #238636;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      margin: 5px;
+    }
+
+    .btn:hover {
+      background: #2ea043;
+    }
+
+    .btn-secondary {
+      background: #30363d;
+    }
+
+    .btn-secondary:hover {
+      background: #484f58;
+    }
+
+    .btn-danger {
+      background: #da3633;
+    }
+
+    .btn-danger:hover {
+      background: #f85149;
+    }
+
+    .console {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      padding: 15px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      max-height: 300px;
+      overflow-y: auto;
+      margin: 15px 0;
+    }
+
+    .console-line {
+      padding: 3px 0;
+      border-bottom: 1px solid #161b22;
+    }
+
+    .info { color: #58a6ff; }
+    .success { color: #3fb950; }
+    .error { color: #f85149; }
+    .warning { color: #d29922; }
+
+    .checkbox {
+      margin: 10px 0;
+    }
+
+    .checkbox input {
+      margin-right: 8px;
+    }
+
+    .actions {
+      margin: 20px 0;
+      padding: 15px;
+      background: #161b22;
+      border-radius: 6px;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-left: 10px;
+    }
+
+    .status-pass { background: #1a2f1a; color: #3fb950; }
+    .status-fail { background: #2f1a1a; color: #f85149; }
+    .status-pending { background: #2f2a1a; color: #d29922; }
+  </style>
+</head>
+<body>
+  <h1>🧪 VoiceInspector - UI Test Suite</h1>
+
+  <div class="test-section">
+    <h2>Quick Actions</h2>
+    <div class="actions">
+      <button class="btn" onclick="checkExtension()">Check Extension Status</button>
+      <button class="btn btn-secondary" onclick="checkStorage()">View Storage</button>
+      <button class="btn btn-secondary" onclick="simulateWebRTC()">Simulate WebRTC</button>
+      <button class="btn btn-danger" onclick="clearStorage()">Clear All Storage</button>
+    </div>
+
+    <div class="console" id="testConsole">
+      <div class="console-line info">Ready for testing...</div>
+    </div>
+  </div>
+
+  <div class="test-section">
+    <h2>📋 Test Scenarios</h2>
+
+    <div class="scenario">
+      <h3>Scenario 1: Basic Start/Stop Toggle</h3>
+      <div class="steps">
+        <div class="step">1. Click extension icon → Open sidebar</div>
+        <div class="step">2. Press Start button</div>
+        <div class="step">3. Verify status shows "Started"</div>
+        <div class="step">4. Check log shows "✅ Inspector started"</div>
+        <div class="step">5. Press Stop button</div>
+        <div class="step">6. Verify status shows "Stopped"</div>
+      </div>
+      <div class="expected">
+        ✅ Expected: Button toggles, status updates instantly, logs appear
+      </div>
+      <div class="issue">
+        ❌ Potential: Log delay, race condition on rapid toggle
+      </div>
+      <div class="checkbox">
+        <input type="checkbox" id="test1"> <label for="test1">Test Completed</label>
+      </div>
+    </div>
+
+    <div class="scenario">
+      <h3>Scenario 2: Tab Switch</h3>
+      <div class="steps">
+        <div class="step">1. Open sidebar in Tab A, press Start</div>
+        <div class="step">2. Switch to Tab B (keep sidebar open)</div>
+        <div class="step">3. Observe if Tab B inspector is active</div>
+        <div class="step">4. Return to Tab A</div>
+        <div class="step">5. Verify data still updating</div>
+      </div>
+      <div class="expected">
+        ✅ Expected: Sidebar tracks Tab A only, Tab B not inspected
+      </div>
+      <div class="issue">
+        ❌ Potential: Wrong tab targeted, sidebar confusion
+      </div>
+      <div class="checkbox">
+        <input type="checkbox" id="test2"> <label for="test2">Test Completed</label>
+      </div>
+    </div>
+
+    <div class="scenario">
+      <h3>Scenario 3: Page Navigation</h3>
+      <div class="steps">
+        <div class="step">1. Open sidebar, Start inspector</div>
+        <div class="step">2. Navigate to different domain (e.g., google.com → youtube.com)</div>
+        <div class="step">3. Check if inspector stops</div>
+        <div class="step">4. Press Stop/Start</div>
+        <div class="step">5. Verify works on new page</div>
+      </div>
+      <div class="expected">
+        ✅ Expected: State persists, content script re-injected
+      </div>
+      <div class="issue">
+        ❌ Potential: Content script not injected, state lost
+      </div>
+      <div class="checkbox">
+        <input type="checkbox" id="test3"> <label for="test3">Test Completed</label>
+      </div>
+    </div>
+
+    <div class="scenario">
+      <h3>Scenario 4: Page Refresh (F5)</h3>
+      <div class="steps">
+        <div class="step">1. Sidebar open, inspector started</div>
+        <div class="step">2. Press F5 to refresh page</div>
+        <div class="step">3. Check sidebar still open</div>
+        <div class="step">4. Check inspector state restored</div>
+        <div class="step">5. Verify logs cleared (new session)</div>
+      </div>
+      <div class="expected">
+        ✅ Expected: Sidebar persists, state restored, clean logs
+      </div>
+      <div class="issue">
+        ❌ Potential: State restore delay, old logs remain
+      </div>
+      <div class="checkbox">
+        <input type="checkbox" id="test4"> <label for="test4">Test Completed</label>
+      </div>
+    </div>
+
+    <div class="scenario">
+      <h3>Scenario 5: Rapid Toggle (Stress)</h3>
+      <div class="steps">
+        <div class="step">1. Click Start-Stop-Start-Stop rapidly (5x in 1 second)</div>
+        <div class="step">2. Check UI doesn't freeze</div>
+        <div class="step">3. Verify final state is consistent</div>
+        <div class="step">4. Check for duplicate logs</div>
+      </div>
+      <div class="expected">
+        ✅ Expected: UI responsive, state correct, no duplicates
+      </div>
+      <div class="issue">
+        ❌ Potential: Race condition, duplicate logs, state mismatch
+      </div>
+      <div class="checkbox">
+        <input type="checkbox" id="test5"> <label for="test5">Test Completed</label>
+      </div>
+    </div>
+
+    <div class="scenario">
+      <h3>Scenario 6: Export/Clear Operations</h3>
+      <div class="steps">
+        <div class="step">1. Collect some data (Start inspector)</div>
+        <div class="step">2. Click Export → Verify JSON downloaded</div>
+        <div class="step">3. Click Clear Logs → Verify only logs cleared</div>
+        <div class="step">4. Click Clear Data → Verify full reset</div>
+      </div>
+      <div class="expected">
+        ✅ Expected: Export valid JSON, Clear operations work independently
+      </div>
+      <div class="issue">
+        ❌ Potential: Export fails with null data, clear too aggressive
+      </div>
+      <div class="checkbox">
+        <input type="checkbox" id="test6"> <label for="test6">Test Completed</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="test-section">
+    <h2>🎯 Test Summary</h2>
+    <div id="summary" style="padding: 15px;">
+      <p>Complete the tests above and click the button to see results.</p>
+      <button class="btn" onclick="showSummary()">Generate Test Report</button>
+    </div>
+  </div>
+
+  <script>
+    function log(message, type = 'info') {
+      const console = document.getElementById('testConsole');
+      const line = document.createElement('div');
+      line.className = `console-line ${type}`;
+      const timestamp = new Date().toLocaleTimeString();
+      line.textContent = `[${timestamp}] ${message}`;
+      console.appendChild(line);
+      console.scrollTop = console.scrollHeight;
+    }
+
+    async function checkExtension() {
+      log('Checking extension status...', 'info');
+      try {
+        const result = await chrome.storage.local.get(['inspectorEnabled', 'targetTabId']);
+        log(`Inspector Enabled: ${result.inspectorEnabled}`, 'success');
+        log(`Target Tab ID: ${result.targetTabId || 'None'}`, 'info');
+
+        // Check if page inspector is loaded
+        if (window.__pageInspector) {
+          log('✅ Page Inspector loaded', 'success');
+        } else {
+          log('⚠️ Page Inspector not found', 'warning');
+        }
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    async function checkStorage() {
+      log('Reading all storage...', 'info');
+      try {
+        const data = await chrome.storage.local.get(null);
+        log(`Storage Keys: ${Object.keys(data).join(', ')}`, 'info');
+        console.table(data);
+        log('Check browser console for detailed table', 'success');
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    async function clearStorage() {
+      if (!confirm('Clear ALL storage? This will reset the extension.')) return;
+      log('Clearing storage...', 'warning');
+      try {
+        await chrome.storage.local.clear();
+        log('✅ Storage cleared', 'success');
+        log('Reload the page to reinitialize', 'info');
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    function simulateWebRTC() {
+      log('Simulating WebRTC connection...', 'info');
+      try {
+        // Create a dummy RTCPeerConnection
+        const pc = new RTCPeerConnection();
+        log('✅ RTCPeerConnection created', 'success');
+
+        // Create a data channel
+        const dc = pc.createDataChannel('test');
+        log('✅ DataChannel created', 'success');
+
+        // Create offer
+        pc.createOffer().then(offer => {
+          log('✅ SDP Offer created', 'success');
+          pc.setLocalDescription(offer);
+        });
+
+        log('Check sidebar for RTC stats', 'info');
+
+        // Clean up after 5 seconds
+        setTimeout(() => {
+          pc.close();
+          log('🛑 Connection closed', 'info');
+        }, 5000);
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    function showSummary() {
+      const total = 6;
+      const completed = document.querySelectorAll('input[type="checkbox"]:checked').length;
+      const percentage = Math.round((completed / total) * 100);
+
+      const summary = document.getElementById('summary');
+      summary.innerHTML = `
+        <h3>Test Results</h3>
+        <p style="font-size: 24px; margin: 20px 0;">
+          ${completed} / ${total} tests completed (${percentage}%)
+        </p>
+        <div style="background: #21262d; height: 30px; border-radius: 6px; overflow: hidden;">
+          <div style="width: ${percentage}%; height: 100%; background: linear-gradient(90deg, #3fb950, #58a6ff); transition: width 0.5s;"></div>
+        </div>
+        <p style="margin-top: 20px;">
+          ${completed === total ? '🎉 All tests completed!' : '⚠️ Some tests remaining'}
+        </p>
+        <button class="btn" onclick="location.reload()">Reset Tests</button>
+      `;
+    }
+
+    // Auto-check extension on load
+    window.addEventListener('load', () => {
+      setTimeout(checkExtension, 500);
+    });
+  </script>
+</body>
+</html>

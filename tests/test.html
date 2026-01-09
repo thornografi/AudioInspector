@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoiceInspector - Test Page</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #1e1e1e;
+      color: #e0e0e0;
+    }
+    
+    h1 {
+      color: #61dafb;
+    }
+    
+    button {
+      background: #61dafb;
+      color: #1e1e1e;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin: 8px;
+      font-weight: 600;
+    }
+    
+    button:hover {
+      background: #4fa8c5;
+    }
+    
+    #status {
+      background: #2d2d2d;
+      padding: 16px;
+      border-radius: 8px;
+      margin-top: 20px;
+      font-family: 'Consolas', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    
+    .success {
+      color: #51cf66;
+    }
+    
+    .error {
+      color: #ff6b6b;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎙️ VoiceInspector - Test Page</h1>
+  
+  <p>Bu sayfa extension'ı test etmek için hazırlanmıştır. Aşağıdaki butonlara tıklayarak farklı audio API'lerini tetikleyebilirsin.</p>
+  
+  <div>
+    <button onclick="testGetUserMedia()">📹 Test getUserMedia</button>
+    <button onclick="testAudioContext()">🔊 Test AudioContext</button>
+    <button onclick="testMediaRecorder()">⏺️ Test MediaRecorder</button>
+    <button onclick="testWebRTC()">☎️ Test WebRTC (Loopback)</button>
+  </div>
+  
+  <div id="status"></div>
+  
+  <script>
+    const statusDiv = document.getElementById('status');
+    
+    function log(msg, isError = false) {
+      const span = document.createElement('div');
+      span.className = isError ? 'error' : 'success';
+      span.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      statusDiv.appendChild(span);
+      statusDiv.scrollTop = statusDiv.scrollHeight;
+    }
+    
+    // Test getUserMedia
+    async function testGetUserMedia() {
+      try {
+        log('getUserMedia: Requesting audio...');
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000,
+            channelCount: 2
+          }
+        });
+        
+        const track = stream.getAudioTracks()[0];
+        const settings = track.getSettings();
+        
+        log(`✓ Audio track created: ${settings.sampleRate}Hz, ${settings.channelCount}ch`);
+        log(`  AEC: ${settings.echoCancellation}, AGC: ${settings.autoGainControl}, NS: ${settings.noiseSuppression}`);
+        
+        // Stop after 3 seconds
+        setTimeout(() => {
+          stream.getTracks().forEach(t => t.stop());
+          log('✓ Stream stopped');
+        }, 3000);
+        
+      } catch (err) {
+        log(`✗ Error: ${err.message}`, true);
+      }
+    }
+    
+    // Test AudioContext
+    function testAudioContext() {
+      try {
+        log('AudioContext: Creating...');
+        const ctx = new AudioContext();
+        
+        log(`✓ AudioContext created: ${ctx.sampleRate}Hz`);
+        log(`  Base latency: ${(ctx.baseLatency * 1000).toFixed(2)}ms`);
+        
+        // Create oscillator for 2 seconds
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.1;
+        
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        osc.start();
+        log('✓ Playing 440Hz tone for 2 seconds...');
+        
+        setTimeout(() => {
+          osc.stop();
+          ctx.close();
+          log('✓ AudioContext closed');
+        }, 2000);
+        
+      } catch (err) {
+        log(`✗ Error: ${err.message}`, true);
+      }
+    }
+    
+    // Test MediaRecorder
+    async function testMediaRecorder() {
+      try {
+        log('MediaRecorder: Getting audio...');
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        
+        const recorder = new MediaRecorder(stream, {
+          mimeType: 'audio/webm;codecs=opus',
+          audioBitsPerSecond: 128000
+        });
+        
+        log(`✓ MediaRecorder created: ${recorder.mimeType}`);
+        log(`  Audio bitrate: ${recorder.audioBitsPerSecond / 1000}Kbps`);
+        
+        recorder.start();
+        log('✓ Recording started (3 seconds)...');
+        
+        setTimeout(() => {
+          recorder.stop();
+          stream.getTracks().forEach(t => t.stop());
+          log('✓ Recording stopped');
+        }, 3000);
+        
+      } catch (err) {
+        log(`✗ Error: ${err.message}`, true);
+      }
+    }
+    
+    // Test WebRTC (Loopback)
+    async function testWebRTC() {
+      try {
+        log('WebRTC: Creating peer connection...');
+        
+        const pc1 = new RTCPeerConnection();
+        const pc2 = new RTCPeerConnection();
+        
+        log('✓ Two peer connections created');
+        
+        // Get audio stream
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(track => pc1.addTrack(track, stream));
+        log('✓ Audio track added to PC1');
+        
+        // ICE candidate exchange
+        pc1.onicecandidate = e => e.candidate && pc2.addIceCandidate(e.candidate);
+        pc2.onicecandidate = e => e.candidate && pc1.addIceCandidate(e.candidate);
+        
+        // Create offer/answer
+        const offer = await pc1.createOffer();
+        await pc1.setLocalDescription(offer);
+        await pc2.setRemoteDescription(offer);
+        
+        const answer = await pc2.createAnswer();
+        await pc2.setLocalDescription(answer);
+        await pc1.setRemoteDescription(answer);
+        
+        log('✓ WebRTC connection established!');
+        log('  Extension şimdi stats toplamalı (popup\'ı aç)');
+        
+        // Keep connection open for 10 seconds
+        setTimeout(() => {
+          pc1.close();
+          pc2.close();
+          stream.getTracks().forEach(t => t.stop());
+          log('✓ WebRTC connection closed');
+        }, 10000);
+        
+      } catch (err) {
+        log(`✗ Error: ${err.message}`, true);
+      }
+    }
+    
+    // Initial message
+    log('Extension\'ı yükledin mi? Popup\'ı aç ve butonlara tıkla!');
+  </script>
+</body>
+</html>

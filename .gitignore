@@ -1,0 +1,23 @@
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build artifacts
+dist/
+build/
+*.zip
+
+# Dependencies (if any)
+node_modules/
+
+# Sensitive
+*.pem
+*.key
+.env

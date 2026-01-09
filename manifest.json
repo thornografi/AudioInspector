@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "VoiceInspector",
+  "version": "1.0.1",
+  "description": "Audio codec, bitrate, jitter, buffer size, AGC/AEC/NS monitor for voice calls",
+  "permissions": ["scripting", "storage", "activeTab", "sidePanel", "tabs"],
+  "host_permissions": ["<all_urls>", "http://localhost:8080/*"],
+  "background": {
+    "service_worker": "scripts/background.js"
+  },
+  "action": {
+    "default_icon": {
+      "16": "images/icon16.png",
+      "48": "images/icon48.png",
+      "128": "images/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "views/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["scripts/content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/**/*.js", "scripts/page.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "images/icon16.png",
+    "48": "images/icon48.png",
+    "128": "images/icon128.png"
+  }
+}
