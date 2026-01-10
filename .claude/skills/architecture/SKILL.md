@@ -77,6 +77,53 @@ Inspector başlatıldığında sadece o tab'da çalışır.
 [content.js @ locked tab] SET_ENABLED: false alır
 ```
 
+## Early Hook System
+
+Sayfa API'leri PageInspector başlamadan ÖNCE kullanabilir. Bu sorunu `EarlyHook.js` çözer.
+
+### Yükleme Sırası
+
+```
+1. content.js → INJECT_PAGE_SCRIPT → background.js
+2. background.js → chrome.scripting.executeScript(page.js)
+3. page.js yüklenir:
+   a. installEarlyHooks()     ← Constructor Proxy'leri + Worker.postMessage hook
+   b. new PageInspector()
+   c. inspector.initialize()  ← Collector handler'ları kaydedilir
+   d. inspector.start()
+```
+
+### Hook Tipleri
+
+| Hook | Mekanizma | Kaynak |
+|------|-----------|--------|
+| Constructor | `new Proxy(Original, { construct })` | EarlyHook.js |
+| Method | `prototype[method] = wrapper` | ApiHook.js |
+| Worker.postMessage | `Worker.prototype.postMessage = wrapper` | EarlyHook.js |
+
+### Veri Akışı (Detaylı)
+
+```
+[EarlyHook.js - page load]
+  new AudioContext() → Proxy intercept
+       ↓
+  instanceRegistry.audioContexts.push(ctx)
+  window.__audioContextCollectorHandler?.(ctx)
+       ↓
+[PageInspector.initialize()]
+  AudioContextCollector.initialize()
+    → window.__audioContextCollectorHandler = handler
+    → Late-discovery: check __wasmEncoderDetected
+       ↓
+[Collector aktif]
+  emit(EVENTS.DATA, metadata)
+       ↓
+  PageInspector._report() → postMessage()
+       ↓
+[content.js]
+  chrome.storage.local.set()
+```
+
 ## Klasör Yapısı
 
 ```
@@ -84,7 +131,11 @@ src/
 ├── collectors/       # API hook modülleri (→ collectors skill)
 ├── detectors/        # Platform algılama
 ├── core/
-│   ├── utils/ApiHook.js
+│   ├── utils/
+│   │   ├── ApiHook.js      # hookMethod, hookAsyncMethod, hookConstructor
+│   │   ├── EarlyHook.js    # installEarlyHooks, getInstanceRegistry
+│   │   └── CodecParser.js  # parseMimeType, parseOpusParams
+│   ├── Logger.js
 │   └── constants.js
 └── page/PageInspector.js   # Ana orkestratör
 ```
@@ -92,5 +143,6 @@ src/
 ## Debug
 
 ```javascript
-window.__pageInspector  // Inspector instance
+window.__pageInspector      // Inspector instance
+window.__wasmEncoderDetected  // WASM encoder tespit bilgisi
 ```

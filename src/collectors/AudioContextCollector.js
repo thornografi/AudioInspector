@@ -110,6 +110,13 @@ class AudioContextCollector extends BaseCollector {
       this._handleWasmEncoder(encoderInfo);
     };
 
+    // 7. Check for WASM encoder detected BEFORE handler registration (late-discovery)
+    // @ts-ignore
+    if (window.__wasmEncoderDetected) {
+      logger.info(this.logPrefix, 'Found pre-existing WASM encoder detection');
+      this._handleWasmEncoder(window.__wasmEncoderDetected);
+    }
+
   }
 
   /**

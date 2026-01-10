@@ -13,7 +13,7 @@ WebRTC/Audio API'lerini hook edip veri toplayan modüller.
 |-----------|-----------------|-------|
 | RTCPeerConnectionCollector | `new RTCPeerConnection()` | `src/collectors/RTCPeerConnectionCollector.js` |
 | GetUserMediaCollector | `navigator.mediaDevices.getUserMedia()` | `src/collectors/GetUserMediaCollector.js` |
-| AudioContextCollector | `new AudioContext()` | `src/collectors/AudioContextCollector.js` |
+| AudioContextCollector | `new AudioContext()`, `createScriptProcessor()`, `createMediaStreamDestination()`, `AudioWorklet.addModule()`, Worker.postMessage (WASM) | `src/collectors/AudioContextCollector.js` |
 | MediaRecorderCollector | `new MediaRecorder()` | `src/collectors/MediaRecorderCollector.js` |
 
 ## Base Class'lar
@@ -86,4 +86,59 @@ initialize() → start() → [emit('data')] → stop()
 
 API'ler PageInspector'dan önce yaratılabilir. Bu durumda `src/core/utils/EarlyHook.js` kullanılır.
 
-**Detay:** Koda bak → `createConstructorHook()` factory function.
+### Constructor Hooks (Proxy)
+
+```javascript
+// EarlyHook.js - createConstructorHook() factory
+createConstructorHook({
+  globalName: 'AudioContext',
+  registryKey: 'audioContexts',
+  handlerName: '__audioContextCollectorHandler',
+  extractMetadata: (ctx) => ({ instance: ctx, sampleRate: ctx.sampleRate })
+});
+```
+
+### Worker.postMessage Hook (WASM Encoder)
+
+opus-recorder ve benzeri WASM encoder'ları tespit eder:
+
+```javascript
+// EarlyHook.js - installEarlyHooks() içinde
+Worker.prototype.postMessage = function(message, ...args) {
+  if (message?.command === 'init' && message.encoderSampleRate) {
+    window.__wasmEncoderDetected = {
+      type: 'opus',
+      sampleRate: message.encoderSampleRate,
+      bitRate: message.encoderBitRate
+    };
+    window.__wasmEncoderHandler?.(window.__wasmEncoderDetected);
+  }
+  return originalPostMessage.apply(this, [message, ...args]);
+};
+```
+
+### Late-Discovery Pattern
+
+Hook, collector initialize olmadan ÖNCE tetiklenebilir. Bu durumda:
+
+1. **EarlyHook.js:** Veriyi global değişkene kaydet (`window.__*Detected`)
+2. **Collector.initialize():** Handler kaydet + mevcut veriyi kontrol et
+
+```javascript
+// AudioContextCollector.js - initialize() sonunda
+window.__wasmEncoderHandler = (info) => this._handleWasmEncoder(info);
+
+// Late-discovery: handler'dan önce tespit edilmişse
+if (window.__wasmEncoderDetected) {
+  this._handleWasmEncoder(window.__wasmEncoderDetected);
+}
+```
+
+### Global Handler Pattern
+
+| Global | Collector | Amaç |
+|--------|-----------|------|
+| `__audioContextCollectorHandler` | AudioContextCollector | Yeni AudioContext |
+| `__rtcPeerConnectionCollectorHandler` | RTCPeerConnectionCollector | Yeni PeerConnection |
+| `__mediaRecorderCollectorHandler` | MediaRecorderCollector | Yeni MediaRecorder |
+| `__wasmEncoderHandler` | AudioContextCollector | WASM encoder tespiti |
