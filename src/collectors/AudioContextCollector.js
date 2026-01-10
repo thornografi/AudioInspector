@@ -190,8 +190,9 @@ class AudioContextCollector extends BaseCollector {
       if (this.activeContexts.has(ctx)) {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
-            // @ts-ignore
-            ctxData.scriptProcessors.push(spData);
+            // Single active processor - replace instead of accumulate
+            // (eski processor disconnect olduğunda collector'dan silinmiyor, bu yüzden sadece son processor'ı tutuyoruz)
+            ctxData.scriptProcessors = [spData];
             // Re-emit updated context data
             this.emit(EVENTS.DATA, ctxData);
             logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch`);
