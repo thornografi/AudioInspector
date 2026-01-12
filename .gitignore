@@ -21,3 +21,6 @@ node_modules/
 *.pem
 *.key
 .env
+
+# Claude Code temp files
+tmpclaude-*
