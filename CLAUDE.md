@@ -142,8 +142,8 @@ popup.js reads → displays UI
 
 | Skill | Amaç | Tetikleyici Kelimeler |
 |-------|------|----------------------|
-| **architecture** | Extension mimarisi, script türleri, veri akışı | mimari, manifest, content script, main world, postMessage |
-| **collectors** | Collector yazma, API hooking | collector, hook, rtcpeerconnection, getusermedia, emit |
+| **architecture** | Extension mimarisi, script türleri, veri akışı | mimari, architecture, manifest, content script, background, page script, main world, isolated world, postMessage, veri akışı |
+| **collectors** | Collector yazma, API hooking, veri toplama | collector, hook, rtcpeerconnection, getusermedia, audiocontext, mediarecorder, polling, getstats, emit, yeni collector |
 
 Detaylı bilgi: `.claude/README.md`
 

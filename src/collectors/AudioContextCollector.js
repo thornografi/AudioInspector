@@ -1,7 +1,7 @@
 // @ts-check
 
 import BaseCollector from './BaseCollector.js';
-import { EVENTS, DATA_TYPES } from '../core/constants.js';
+import { EVENTS, DATA_TYPES, DESTINATION_TYPES } from '../core/constants.js';
 import { logger } from '../core/Logger.js';
 import { hookAsyncMethod, hookMethod } from '../core/utils/ApiHook.js';
 import { getInstanceRegistry, clearRegistryKey } from '../core/utils/EarlyHook.js';
@@ -16,9 +16,12 @@ class AudioContextCollector extends BaseCollector {
 
     /** @type {Function|null} */
     this.originalAudioContext = null;
-    
+
     /** @type {Map<any, Object>} */
     this.activeContexts = new Map();
+
+    /** @type {number} */
+    this.contextIdCounter = 0;
 
     /** @type {Function|null} */
     this.originalCreateScriptProcessor = null;
@@ -28,6 +31,9 @@ class AudioContextCollector extends BaseCollector {
 
     /** @type {Function|null} */
     this.originalCreateMediaStreamDestination = null;
+
+    /** @type {Function|null} */
+    this.originalCreateAnalyser = null;
   }
 
   /**
@@ -104,7 +110,19 @@ class AudioContextCollector extends BaseCollector {
         logger.info(this.logPrefix, 'Hooked AudioContext.prototype.createMediaStreamDestination');
     }
 
-    // 6. Register WASM encoder handler (Worker.postMessage hook in EarlyHook.js)
+    // 6. Hook createAnalyser (Sync method) - VU meter / visualizer detection
+    if (window.AudioContext && window.AudioContext.prototype) {
+        this.originalCreateAnalyser = hookMethod(
+            window.AudioContext.prototype,
+            'createAnalyser',
+            // @ts-ignore
+            (node, args) => this._handleAnalyserNode(node),
+            () => true
+        );
+        logger.info(this.logPrefix, 'Hooked AudioContext.prototype.createAnalyser');
+    }
+
+    // 7. Register WASM encoder handler (Worker.postMessage hook in EarlyHook.js)
     // @ts-ignore
     window.__wasmEncoderHandler = (encoderInfo) => {
       this._handleWasmEncoder(encoderInfo);
@@ -119,8 +137,13 @@ class AudioContextCollector extends BaseCollector {
    * @param {boolean} shouldEmit - If true, emit data event; if false, silent registration
    */
   _handleNewContext(ctx, shouldEmit = true) {
+      // Generate unique context ID
+      this.contextIdCounter++;
+      const contextId = `ctx_${this.contextIdCounter}`;
+
       const metadata = {
         type: DATA_TYPES.AUDIO_CONTEXT,
+        contextId,
         timestamp: Date.now(),
         sampleRate: ctx.sampleRate,
         baseLatency: ctx.baseLatency,
@@ -128,7 +151,8 @@ class AudioContextCollector extends BaseCollector {
         state: ctx.state,
         scriptProcessors: [],
         audioWorklets: [],
-        destinationType: 'destination (speakers)'  // Default - ctx.destination
+        hasAnalyser: false,
+        destinationType: DESTINATION_TYPES.SPEAKERS  // Default - ctx.destination
       };
 
       this.activeContexts.set(ctx, metadata);
@@ -272,13 +296,37 @@ class AudioContextCollector extends BaseCollector {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
               // @ts-ignore - sadece gerçeği söyle, varsayım yapma
-              ctxData.destinationType = 'MediaStreamDestination';
+              ctxData.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
               // Re-emit updated context data
               this.emit(EVENTS.DATA, ctxData);
               logger.info(this.logPrefix, 'MediaStreamDestination created - audio routed to stream');
           }
       } else {
           logger.warn(this.logPrefix, `MediaStreamDestination created but context is ${ctx === null ? 'null' : 'undefined'}`);
+      }
+  }
+
+  /**
+   * Handle createAnalyser calls - indicates VU meter / audio visualization
+   * @private
+   * @param {AnalyserNode} node
+   */
+  _handleAnalyserNode(node) {
+      const ctx = node.context;
+
+      // Late-discovery: register context if not already known
+      this._ensureContextRegistered(ctx);
+
+      if (this.activeContexts.has(ctx)) {
+          const ctxData = this.activeContexts.get(ctx);
+          if (ctxData) {
+              ctxData.hasAnalyser = true;
+              // Re-emit updated context data
+              this.emit(EVENTS.DATA, ctxData);
+              logger.info(this.logPrefix, `AnalyserNode created - VU meter/visualizer detected (context: ${ctxData.contextId})`);
+          }
+      } else {
+          logger.warn(this.logPrefix, `AnalyserNode created but context is ${ctx === null ? 'null' : 'undefined'}`);
       }
   }
 

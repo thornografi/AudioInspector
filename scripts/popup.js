@@ -5,6 +5,13 @@ let enabled = false; // Default to false (stopped)
 let drawerOpen = false; // Console drawer state
 let currentTabId = null; // Track which tab this panel is associated with
 
+// Constants (mirror of src/core/constants.js for extension context)
+const DESTINATION_TYPES = {
+  SPEAKERS: 'speakers',
+  MEDIA_STREAM: 'MediaStreamDestination'
+};
+const MAX_AUDIO_CONTEXTS = 4;
+
 // Debug log helper - background.js üzerinden merkezi yönetim (race condition önleme)
 function debugLog(message) {
   const entry = {
@@ -23,7 +30,7 @@ async function updateUI() {
   const result = await chrome.storage.local.get([
     'rtc_stats',
     'user_media',
-    'audio_context',
+    'audio_contexts',
     'media_recorder',
     'debug_logs',
     'lastUpdate'
@@ -35,7 +42,7 @@ async function updateUI() {
   // The render functions are designed to handle null/undefined data gracefully
   renderRTCStats(result.rtc_stats);
   renderGUMStats(result.user_media);
-  renderACStats(result.audio_context); // Now includes audioWorklets merged in
+  renderACStats(result.audio_contexts); // Now includes audioWorklets merged in
   renderMRStats(result.media_recorder);
   renderDebugLogs(result.debug_logs);
 }
@@ -103,7 +110,7 @@ async function toggleInspector() {
   // Clear data ONLY when starting (not when stopping)
   // This allows users to review collected data after stopping
   if (enabled) {
-    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder']);
+    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder']);
   }
 
   // Update button AND UI to reflect new state
@@ -412,92 +419,111 @@ function renderGUMStats(data) {
   container.innerHTML = html;
 }
 
-// Render AudioContext stats with processing sub-section
-function renderACStats(data) {
+// Determine AudioContext purpose based on features
+function getContextPurpose(ctx) {
+  if (ctx.hasAnalyser) return { icon: '📊', label: 'VU Meter' };
+  if (ctx.destinationType === DESTINATION_TYPES.MEDIA_STREAM) return { icon: '🎙️', label: 'Recording' };
+  if (ctx.wasmEncoder) return { icon: '🔧', label: 'Encoding' };
+  return { icon: '🔊', label: 'Playback' };
+}
+
+// Render AudioContext stats - supports multiple contexts
+function renderACStats(contexts) {
   const container = document.getElementById('acContent');
   const timestamp = document.getElementById('acTimestamp');
 
-  if (!data) {
+  // Handle both array and single object (backwards compat)
+  if (!contexts || (Array.isArray(contexts) && contexts.length === 0)) {
     container.innerHTML = '<div class="no-data">No context</div>';
     timestamp.textContent = '';
     return;
   }
 
-  timestamp.textContent = formatTime(data.timestamp);
+  // Convert to array if single object, limit to MAX_AUDIO_CONTEXTS
+  let contextArray = Array.isArray(contexts) ? contexts : [contexts];
+  if (contextArray.length > MAX_AUDIO_CONTEXTS) {
+    contextArray = contextArray.slice(0, MAX_AUDIO_CONTEXTS);
+  }
 
-  // Main AudioContext info
-  const latencyMs = data.baseLatency ? `${(data.baseLatency * 1000).toFixed(1)}ms` : '-';
-  const stateClass = data.state === 'running' ? 'good' : (data.state === 'suspended' ? 'warning' : '');
+  // Use most recent timestamp
+  const latestTimestamp = Math.max(...contextArray.map(c => c.timestamp || 0));
+  timestamp.textContent = formatTime(latestTimestamp);
 
-  let html = `
-    <table class="ac-main-table">
-      <tbody>
-        <tr><td>Rate</td><td class="metric-value">${data.sampleRate || '-'} Hz</td></tr>
-        <tr><td>State</td><td class="${stateClass}"><span class="badge badge-code">${data.state || '-'}</span></td></tr>
-        <tr><td>Latency</td><td>${latencyMs}</td></tr>
-      </tbody>
-    </table>
-  `;
+  let html = '';
 
-  // Processing Sub-section
-  const hasScriptProcessor = data.scriptProcessors && data.scriptProcessors.length > 0;
-  const hasAudioWorklet = data.audioWorklets && data.audioWorklets.length > 0;
-  const hasWasmEncoder = data.wasmEncoder;
+  contextArray.forEach((ctx, index) => {
+    const purpose = getContextPurpose(ctx);
+    const latencyMs = ctx.baseLatency ? `${(ctx.baseLatency * 1000).toFixed(1)}ms` : '-';
+    const stateClass = ctx.state === 'running' ? 'good' : (ctx.state === 'suspended' ? 'warning' : '');
 
-  if (hasScriptProcessor || hasAudioWorklet || hasWasmEncoder) {
-    html += `<div class="processing-section">`;
+    // Context header with purpose
+    html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
+    html += `<div class="context-purpose">${purpose.icon} ${purpose.label}</div>`;
 
-    // ScriptProcessor (deprecated)
-    if (hasScriptProcessor) {
-      data.scriptProcessors.forEach(sp => {
+    // Main info
+    html += `
+      <table class="ac-main-table">
+        <tbody>
+          <tr><td>Rate</td><td class="metric-value">${ctx.sampleRate || '-'} Hz</td></tr>
+          <tr><td>State</td><td class="${stateClass}"><span class="badge badge-code">${ctx.state || '-'}</span></td></tr>
+          <tr><td>Latency</td><td>${latencyMs}</td></tr>
+        </tbody>
+      </table>
+    `;
+
+    // Processing Sub-section
+    const hasScriptProcessor = ctx.scriptProcessors && ctx.scriptProcessors.length > 0;
+    const hasAudioWorklet = ctx.audioWorklets && ctx.audioWorklets.length > 0;
+    const hasWasmEncoder = ctx.wasmEncoder;
+
+    if (hasScriptProcessor || hasAudioWorklet || hasWasmEncoder || ctx.destinationType) {
+      html += `<div class="processing-section">`;
+
+      // ScriptProcessor (deprecated)
+      if (hasScriptProcessor) {
+        ctx.scriptProcessors.forEach(sp => {
+          html += `
+            <div class="processing-item sub-item">
+              <span class="detail-label">Processor</span>
+              <span class="detail-value">ScriptProcessor (${sp.bufferSize || '?'})</span>
+            </div>`;
+        });
+      }
+
+      // AudioWorklet (modern)
+      if (hasAudioWorklet) {
         html += `
-          <div class="processing-item subheader">
-            <span class="detail-label">Processor</span>
-            <span class="detail-value">ScriptProcessorNode <span class="has-tooltip has-tooltip--warning" data-tooltip="Deprecated API">⚠</span></span>
-          </div>
           <div class="processing-item sub-item">
-            <span class="detail-label">Buffer</span>
-            <span class="detail-value">${sp.bufferSize || '?'}</span>
-          </div>`;
-      });
-    }
-
-    // AudioWorklet (modern)
-    if (hasAudioWorklet) {
-      data.audioWorklets.forEach(aw => {
-        html += `
-          <div class="processing-item subheader">
             <span class="detail-label">Processor</span>
-            <span class="detail-value">
-              AudioWorkletNode
-              <span class="has-tooltip" data-tooltip="Modern Web Audio API">ℹ️</span>
-            </span>
+            <span class="detail-value">AudioWorklet</span>
           </div>`;
-      });
-    }
+      }
 
-    // WASM Encoder (detected via Worker.postMessage)
-    if (hasWasmEncoder) {
-      const encoder = data.wasmEncoder;
-      const bitrateKbps = encoder.bitRate ? `${encoder.bitRate / 1000}kbps` : '?';
-      html += `
-        <div class="processing-item sub-item">
-          <span class="detail-label">Encoder</span>
-          <span class="detail-value">WASM ${encoder.type || 'unknown'} (${bitrateKbps})</span>
-        </div>`;
-    }
+      // WASM Encoder
+      if (hasWasmEncoder) {
+        const encoder = ctx.wasmEncoder;
+        const bitrateKbps = encoder.bitRate ? `${encoder.bitRate / 1000}kbps` : '?';
+        html += `
+          <div class="processing-item sub-item">
+            <span class="detail-label">Encoder</span>
+            <span class="detail-value">WASM ${encoder.type || 'opus'} (${bitrateKbps})</span>
+          </div>`;
+      }
 
-    // Output bilgisi
-    if (data.destinationType) {
-      html += `
-        <div class="processing-item sub-item">
-          <span class="detail-label">Output</span>
-          <span class="detail-value">${escapeHtml(data.destinationType)}</span>
-        </div>`;
+      // Output
+      if (ctx.destinationType) {
+        html += `
+          <div class="processing-item sub-item">
+            <span class="detail-label">Output</span>
+            <span class="detail-value">${escapeHtml(ctx.destinationType)}</span>
+          </div>`;
+      }
+
+      html += `</div>`;
     }
 
     html += `</div>`;
-  }
+  });
 
   container.innerHTML = html;
 }
@@ -711,8 +737,8 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === 'local') {
     // Only update UI if relevant keys changed
-    // Note: audioWorklet data is now merged into audio_context
-    const relevantKeys = ['rtc_stats', 'user_media', 'audio_context', 'media_recorder'];
+    // Note: audioWorklet data is now merged into audio_contexts
+    const relevantKeys = ['rtc_stats', 'user_media', 'audio_contexts', 'media_recorder'];
     const shouldUpdate = Object.keys(changes).some(key => relevantKeys.includes(key));
 
     if (shouldUpdate) {
@@ -773,7 +799,7 @@ loadEnabledState().then(async () => {
 
   // If inspector is not enabled on initial load, clear any old data
   if (!enabled) {
-    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder']);
+    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder']);
   }
   updateUI();
 });

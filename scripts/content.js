@@ -68,7 +68,55 @@ async function injectPageScript() {
 // --- Message Handlers (All payloads now have consistent 'type' field) ---
 
 // Storage keys for collected data (DRY - used in multiple places)
-const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder'];
+const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder'];
+
+// Queue for audioContext updates to prevent race conditions
+let audioContextQueue = [];
+let isProcessingAudioContext = false;
+
+function processAudioContextQueue() {
+  if (isProcessingAudioContext || audioContextQueue.length === 0) return;
+
+  isProcessingAudioContext = true;
+  const payload = audioContextQueue.shift();
+
+  chrome.storage.local.get(['audio_contexts'], (result) => {
+    let contexts = result.audio_contexts || [];
+
+    // Find existing context by contextId
+    const existingIndex = contexts.findIndex(c => c.contextId === payload.contextId);
+
+    if (existingIndex >= 0) {
+      // Merge with existing
+      const existing = contexts[existingIndex];
+      contexts[existingIndex] = {
+        ...existing,
+        ...payload,
+        scriptProcessors: payload.scriptProcessors?.length > 0 ? payload.scriptProcessors : existing.scriptProcessors || [],
+        audioWorklets: payload.audioWorklets?.length > 0 ? payload.audioWorklets : existing.audioWorklets || [],
+        wasmEncoder: payload.wasmEncoder || existing.wasmEncoder,
+        hasAnalyser: payload.hasAnalyser || existing.hasAnalyser
+      };
+    } else {
+      // New context
+      contexts.push(payload);
+    }
+
+    chrome.storage.local.set({
+      audio_contexts: contexts,
+      lastUpdate: Date.now()
+    }, () => {
+      if (chrome.runtime.lastError) {
+        persistLogs(createLog('Content', `❌ audioContext SET error: ${chrome.runtime.lastError.message}`, 'error'));
+      } else {
+        persistLogs(createLog('Content', `✅ audioContext SET: ${contexts.length} context(s)`));
+      }
+
+      isProcessingAudioContext = false;
+      processAudioContextQueue(); // Process next in queue
+    });
+  });
+}
 
 // Helper to create storage handlers (DRY principle)
 const storageHandler = (key, emoji, label) => (payload) => ({
@@ -80,85 +128,54 @@ const MESSAGE_HANDLERS = {
   rtc_stats: storageHandler('rtc_stats', '📡', 'WebRTC stats'),
   userMedia: storageHandler('user_media', '🎤', 'getUserMedia'),
 
-  // Special handler for audioContext - merge strategy to preserve wasmEncoder
+  // Special handler for audioContext - uses queue to prevent race conditions
   audioContext: (payload) => {
-    chrome.storage.local.get(['audio_context'], (result) => {
-      const existing = result.audio_context || {};
-
-      // Merge strategy: Preserve important fields (especially wasmEncoder)
-      const merged = {
-        // Base fields from payload (latest)
-        type: payload.type,
-        timestamp: payload.timestamp,
-        sampleRate: payload.sampleRate || existing.sampleRate,
-        baseLatency: payload.baseLatency ?? existing.baseLatency,
-        outputLatency: payload.outputLatency ?? existing.outputLatency,
-        state: payload.state || existing.state,
-        destinationType: payload.destinationType || existing.destinationType,
-
-        // Arrays: Prefer non-empty
-        scriptProcessors: payload.scriptProcessors?.length > 0 ? payload.scriptProcessors : existing.scriptProcessors || [],
-        audioWorklets: payload.audioWorklets?.length > 0 ? payload.audioWorklets : existing.audioWorklets || [],
-
-        // Critical: Preserve wasmEncoder if exists
-        wasmEncoder: payload.wasmEncoder || existing.wasmEncoder
-      };
-
-      // Log with WASM encoder detection (using DRY helper)
-      logContent('🔊 Storing AudioContext');
-      logWasmEncoder(merged.wasmEncoder);
-
-      chrome.storage.local.set({
-        audio_context: merged,
-        lastUpdate: Date.now()
-      }, () => {
-        if (chrome.runtime.lastError) {
-          logContent('❌ Error storing AudioContext:', chrome.runtime.lastError);
-        }
-      });
-    });
-
+    persistLogs(createLog('Content', `🔊 audioContext queued: id=${payload?.contextId}, rate=${payload?.sampleRate}`));
+    audioContextQueue.push(payload);
+    processAudioContextQueue();
     return null; // Handled internally
   },
 
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
-  // Special handler for audioWorklet - merge into parent audioContext
+  // Special handler for audioWorklet - merge into most recent audioContext
   audioWorklet: (payload) => {
-    chrome.storage.local.get(['audio_context'], (result) => {
-      const context = result.audio_context || {};
+    chrome.storage.local.get(['audio_contexts'], (result) => {
+      let contexts = result.audio_contexts || [];
+
+      if (contexts.length === 0) {
+        logContent('🎛️ AudioWorklet received but no AudioContext exists yet');
+        return;
+      }
+
+      // Add to most recent context (last in array)
+      const lastContext = contexts[contexts.length - 1];
 
       // Initialize audioWorklets array if needed
-      if (!context.audioWorklets) {
-        context.audioWorklets = [];
+      if (!lastContext.audioWorklets) {
+        lastContext.audioWorklets = [];
       }
 
       // Add new worklet (avoid duplicates by checking moduleUrl)
-      const existingIndex = context.audioWorklets.findIndex(w => w.moduleUrl === payload.moduleUrl);
+      const existingIndex = lastContext.audioWorklets.findIndex(w => w.moduleUrl === payload.moduleUrl);
       if (existingIndex >= 0) {
-        // Update existing entry
-        context.audioWorklets[existingIndex] = {
+        lastContext.audioWorklets[existingIndex] = {
           moduleUrl: payload.moduleUrl,
           timestamp: payload.timestamp
         };
       } else {
-        // Add new entry
-        context.audioWorklets.push({
+        lastContext.audioWorklets.push({
           moduleUrl: payload.moduleUrl,
           timestamp: payload.timestamp
         });
       }
 
-      // CRITICAL: Preserve wasmEncoder (don't lose it during merge!)
-      // context.wasmEncoder already exists from previous audioContext emit
-
       // Save merged data back
       chrome.storage.local.set({
-        audio_context: context,
+        audio_contexts: contexts,
         lastUpdate: Date.now()
       }, () => {
         logContent('🎛️ AudioWorklet merged into AudioContext', payload.moduleUrl);
-        logWasmEncoder(context.wasmEncoder, '🎛️');
       });
     });
 

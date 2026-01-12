@@ -53,3 +53,18 @@ export const INSTALL_FLAG = '__audioPipelineInspectorInstalled';
  * Default poll interval for RTC stats collectors
  */
 export const RTC_STATS_POLL_INTERVAL_MS = 1000;
+
+/**
+ * AudioContext destination types
+ */
+export const DESTINATION_TYPES = {
+  SPEAKERS: 'speakers',
+  MEDIA_STREAM: 'MediaStreamDestination'
+};
+
+/**
+ * UI display limits
+ */
+export const UI_LIMITS = {
+  MAX_AUDIO_CONTEXTS: 4
+};

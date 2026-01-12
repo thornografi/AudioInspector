@@ -13,7 +13,7 @@ WebRTC/Audio API'lerini hook edip veri toplayan modüller.
 |-----------|-----------------|-------|
 | RTCPeerConnectionCollector | `new RTCPeerConnection()` | `src/collectors/RTCPeerConnectionCollector.js` |
 | GetUserMediaCollector | `navigator.mediaDevices.getUserMedia()` | `src/collectors/GetUserMediaCollector.js` |
-| AudioContextCollector | `new AudioContext()`, `createScriptProcessor()`, `createMediaStreamDestination()`, `AudioWorklet.addModule()`, Worker.postMessage (WASM) | `src/collectors/AudioContextCollector.js` |
+| AudioContextCollector | `new AudioContext()`, `createScriptProcessor()`, `createMediaStreamDestination()`, `createAnalyser()`, `AudioWorklet.addModule()`, Worker.postMessage (WASM) | `src/collectors/AudioContextCollector.js` |
 | MediaRecorderCollector | `new MediaRecorder()` | `src/collectors/MediaRecorderCollector.js` |
 
 ## Base Class'lar
@@ -88,6 +88,23 @@ hookConstructor(window, 'RTCPeerConnection', (pc, args) => {
 | `DATA_TYPES.AUDIO_WORKLET` | `'audioWorklet'` | AudioWorklet module bilgisi |
 | `DATA_TYPES.MEDIA_RECORDER` | `'mediaRecorder'` | MediaRecorder bilgisi |
 | `DATA_TYPES.PLATFORM_DETECTED` | `'platform_detected'` | Platform tespiti |
+
+## DESTINATION_TYPES Sabitleri
+
+AudioContext output hedefleri için:
+
+| Sabit | Değer | Açıklama |
+|-------|-------|----------|
+| `DESTINATION_TYPES.SPEAKERS` | `'speakers'` | Default ctx.destination |
+| `DESTINATION_TYPES.MEDIA_STREAM` | `'MediaStreamDestination'` | MediaRecorder'a yönlendirme |
+
+## UI_LIMITS Sabitleri
+
+UI görüntüleme limitleri:
+
+| Sabit | Değer | Açıklama |
+|-------|-------|----------|
+| `UI_LIMITS.MAX_AUDIO_CONTEXTS` | `4` | Aynı anda gösterilecek max AudioContext |
 
 ### Kullanım
 
