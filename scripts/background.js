@@ -167,51 +167,6 @@ function reloadTestTabs() {
   });
 }
 
-// --- Development Auto-Reload Logic (SSE Based) ---
-const isDevelopment = true; 
-
-if (isDevelopment) {
-  let eventSource = null;
-  let retryTimer = null;
-
-  function connectToWatcher() {
-    if (eventSource) {
-      eventSource.close();
-    }
-
-    // Connect to SSE Server
-    eventSource = new EventSource('http://localhost:8080/events');
-
-    eventSource.onopen = () => {
-      console.log('[Dev] Connected to watcher server');
-    };
-
-    eventSource.onmessage = (event) => {
-      if (event.data === 'reload') {
-        console.log('[Dev] 🔄 Reload signal received. Reloading extension...');
-        
-        // Reloading the runtime will kill this script and restart it.
-        // The new instance will then call reloadTestTabs() on startup.
-        chrome.runtime.reload();
-      }
-    };
-
-    eventSource.onerror = (err) => {
-      console.log('[Dev] Watcher disconnected. Retrying in 2s...');
-      eventSource.close();
-      eventSource = null;
-      
-      // Retry connection
-      if (retryTimer) clearTimeout(retryTimer);
-      retryTimer = setTimeout(connectToWatcher, 2000);
-    };
-  }
-
-  // Initial connection
-  connectToWatcher();
-}
-// ------------------------------------
-
 // Auto-inject page script when content script requests it
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'INJECT_PAGE_SCRIPT' && sender.tab?.id) {

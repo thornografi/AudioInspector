@@ -96,6 +96,10 @@ class MediaRecorderCollector extends BaseCollector {
         Object.assign(eventData, { message: event.error.message });
       }
       
+      // Cap events array to prevent memory/storage overflow (FIFO - oldest removed first)
+      if (metadata.events.length >= 50) {
+        metadata.events.shift();
+      }
       metadata.events.push(eventData);
       this.emit(EVENTS.DATA, metadata);  // Emit metadata directly
       
@@ -149,6 +153,13 @@ class MediaRecorderCollector extends BaseCollector {
       // Emit immediately (emit() checks this.active internally)
       this.emit(EVENTS.DATA, metadata);
       logger.info(this.logPrefix, `MediaRecorder created:`, JSON.stringify(metadata));
+
+      // Attach event listeners to track recorder lifecycle
+      const eventTypes = ['start', 'stop', 'pause', 'resume', 'dataavailable', 'error'];
+      eventTypes.forEach(eventType => {
+        this._createRecorderEventListener(recorder, eventType, eventType, metadata);
+      });
+      logger.info(this.logPrefix, `Attached ${eventTypes.length} event listeners to MediaRecorder`);
   }
 
   /**

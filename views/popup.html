@@ -696,6 +696,22 @@
       pointer-events: none;
     }
 
+    /* Auto-Stop Notification Banner */
+    .auto-stop-banner {
+      display: none;
+      background: linear-gradient(180deg, rgba(210, 153, 34, 0.15) 0%, rgba(210, 153, 34, 0.08) 100%);
+      border-bottom: 1px solid var(--accent-orange);
+      color: var(--accent-orange);
+      padding: 10px 16px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .auto-stop-banner.visible {
+      display: block;
+    }
+
   </style>
 </head>
 <body>
@@ -721,6 +737,9 @@
     <span class="info-icon">&#x1F4CD;</span>
     <span class="info-text">Veri toplanıyor: <strong id="lockedTabDomain">-</strong></span>
   </div>
+
+  <!-- Auto-Stop Notification Banner -->
+  <div class="auto-stop-banner" id="autoStopBanner"></div>
 
   <div class="main-content">
     <!-- WebRTC Section -->

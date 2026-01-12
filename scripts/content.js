@@ -16,6 +16,16 @@ function createLog(prefix, message, level = 'info') {
     };
 }
 
+// Helper to log wasmEncoder info (DRY - used in multiple handlers)
+function logWasmEncoder(encoder, prefix = '🔊') {
+    if (!encoder) return;
+    logContent(`${prefix} [WITH WASM ENCODER]`, {
+        type: encoder.type,
+        bitRate: encoder.bitRate,
+        sampleRate: encoder.sampleRate
+    });
+}
+
 // Debug logging
 const contentLogs = [];
 function logContent(msg, data) {
@@ -69,7 +79,48 @@ const storageHandler = (key, emoji, label) => (payload) => ({
 const MESSAGE_HANDLERS = {
   rtc_stats: storageHandler('rtc_stats', '📡', 'WebRTC stats'),
   userMedia: storageHandler('user_media', '🎤', 'getUserMedia'),
-  audioContext: storageHandler('audio_context', '🔊', 'AudioContext'),
+
+  // Special handler for audioContext - merge strategy to preserve wasmEncoder
+  audioContext: (payload) => {
+    chrome.storage.local.get(['audio_context'], (result) => {
+      const existing = result.audio_context || {};
+
+      // Merge strategy: Preserve important fields (especially wasmEncoder)
+      const merged = {
+        // Base fields from payload (latest)
+        type: payload.type,
+        timestamp: payload.timestamp,
+        sampleRate: payload.sampleRate || existing.sampleRate,
+        baseLatency: payload.baseLatency ?? existing.baseLatency,
+        outputLatency: payload.outputLatency ?? existing.outputLatency,
+        state: payload.state || existing.state,
+        destinationType: payload.destinationType || existing.destinationType,
+
+        // Arrays: Prefer non-empty
+        scriptProcessors: payload.scriptProcessors?.length > 0 ? payload.scriptProcessors : existing.scriptProcessors || [],
+        audioWorklets: payload.audioWorklets?.length > 0 ? payload.audioWorklets : existing.audioWorklets || [],
+
+        // Critical: Preserve wasmEncoder if exists
+        wasmEncoder: payload.wasmEncoder || existing.wasmEncoder
+      };
+
+      // Log with WASM encoder detection (using DRY helper)
+      logContent('🔊 Storing AudioContext');
+      logWasmEncoder(merged.wasmEncoder);
+
+      chrome.storage.local.set({
+        audio_context: merged,
+        lastUpdate: Date.now()
+      }, () => {
+        if (chrome.runtime.lastError) {
+          logContent('❌ Error storing AudioContext:', chrome.runtime.lastError);
+        }
+      });
+    });
+
+    return null; // Handled internally
+  },
+
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
   // Special handler for audioWorklet - merge into parent audioContext
@@ -98,13 +149,17 @@ const MESSAGE_HANDLERS = {
         });
       }
 
+      // CRITICAL: Preserve wasmEncoder (don't lose it during merge!)
+      // context.wasmEncoder already exists from previous audioContext emit
+
       // Save merged data back
       chrome.storage.local.set({
         audio_context: context,
         lastUpdate: Date.now()
+      }, () => {
+        logContent('🎛️ AudioWorklet merged into AudioContext', payload.moduleUrl);
+        logWasmEncoder(context.wasmEncoder, '🎛️');
       });
-
-      logContent('🎛️ AudioWorklet merged into AudioContext', payload.moduleUrl);
     });
 
     return null; // Handled internally
@@ -153,8 +208,15 @@ window.addEventListener('message', (event) => {
 
                   // Origin kontrolü - aynı tab'da farklı siteye gidilmiş olabilir
                   if (currentOrigin !== lockedOrigin) {
-                      logContent(`Same tab but different origin: ${currentOrigin} vs ${lockedOrigin} (not starting)`);
-                      persistLogs(createLog('Content', `Same tab, different origin (${currentOrigin}) - not starting`));
+                      logContent(`Same tab but different origin: ${currentOrigin} vs ${lockedOrigin} (auto-stopping)`);
+                      persistLogs(createLog('Content', `Origin changed (${currentOrigin}) - inspector auto-stopped`));
+
+                      // Auto-stop: Set reason flag first, then clear inspector state
+                      chrome.storage.local.set({ autoStoppedReason: 'origin_change' }, () => {
+                          chrome.storage.local.remove(['inspectorEnabled', 'lockedTab'], () => {
+                              logContent('🛑 Inspector auto-stopped due to origin change');
+                          });
+                      });
                       return;
                   }
 
@@ -204,6 +266,7 @@ window.addEventListener('message', (event) => {
       lastUpdate: Date.now()
     };
 
+    // Log data being stored
     logContent(logMsg, logData || payload);
 
     chrome.storage.local.set(dataToStore, () => {

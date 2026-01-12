@@ -22,6 +22,9 @@ class PollingCollector extends BaseCollector {
 
     /** @type {number} */
     this.pollIntervalMs = options.pollIntervalMs || 1000;
+
+    /** @type {boolean} Re-entrancy guard - prevents overlapping collectData calls */
+    this.isCollecting = false;
   }
 
   /**
@@ -35,12 +38,23 @@ class PollingCollector extends BaseCollector {
     }
 
     this.active = true;
+    this.isCollecting = false; // Reset guard on start
 
     // Call collectData immediately on start
     await this.collectData();
 
     this.pollIntervalId = setInterval(async () => {
-      await this.collectData();
+      // Re-entrancy guard: skip if previous collectData is still running
+      if (this.isCollecting) {
+        logger.warn(this.logPrefix, 'Skipping poll - previous collection still in progress');
+        return;
+      }
+      this.isCollecting = true;
+      try {
+        await this.collectData();
+      } finally {
+        this.isCollecting = false;
+      }
     }, this.pollIntervalMs);
 
     logger.info(this.logPrefix, `Polling started (every ${this.pollIntervalMs}ms)`);

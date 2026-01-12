@@ -4,7 +4,7 @@
   "version": "1.0.1",
   "description": "Audio codec, bitrate, jitter, buffer size, AGC/AEC/NS monitor for voice calls",
   "permissions": ["scripting", "storage", "activeTab", "sidePanel", "tabs"],
-  "host_permissions": ["<all_urls>", "http://localhost:8080/*"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "scripts/background.js"
   },

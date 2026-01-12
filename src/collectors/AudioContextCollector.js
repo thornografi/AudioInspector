@@ -110,21 +110,15 @@ class AudioContextCollector extends BaseCollector {
       this._handleWasmEncoder(encoderInfo);
     };
 
-    // 7. Check for WASM encoder detected BEFORE handler registration (late-discovery)
-    // @ts-ignore
-    if (window.__wasmEncoderDetected) {
-      logger.info(this.logPrefix, 'Found pre-existing WASM encoder detection');
-      this._handleWasmEncoder(window.__wasmEncoderDetected);
-    }
-
   }
 
   /**
    * Handle new AudioContext instance
    * @private
    * @param {AudioContext} ctx
+   * @param {boolean} shouldEmit - If true, emit data event; if false, silent registration
    */
-  _handleNewContext(ctx) {
+  _handleNewContext(ctx, shouldEmit = true) {
       const metadata = {
         type: DATA_TYPES.AUDIO_CONTEXT,
         timestamp: Date.now(),
@@ -139,10 +133,13 @@ class AudioContextCollector extends BaseCollector {
 
       this.activeContexts.set(ctx, metadata);
 
-      // Emit immediately (emit() checks this.active internally)
-      this.emit(EVENTS.DATA, metadata);
-
-      logger.info(this.logPrefix, 'AudioContext created:', metadata);
+      // Conditionally emit based on caller
+      if (shouldEmit) {
+        this.emit(EVENTS.DATA, metadata);
+        logger.info(this.logPrefix, 'AudioContext created:', metadata);
+      } else {
+        logger.info(this.logPrefix, 'AudioContext registered (silent):', metadata);
+      }
   }
 
   /**
@@ -251,7 +248,7 @@ class AudioContextCollector extends BaseCollector {
 
       // Emit as a separate audioWorklet data type
       this.emit(EVENTS.DATA, {
-          type: 'audioWorklet',
+          type: DATA_TYPES.AUDIO_WORKLET,
           timestamp: Date.now(),
           moduleUrl: workletData.url
       });
@@ -288,23 +285,75 @@ class AudioContextCollector extends BaseCollector {
   /**
    * Handle WASM encoder detection (from Worker.postMessage hook)
    * @private
-   * @param {Object} encoderInfo - { type, sampleRate, bitRate, channels, application, timestamp }
+   * @param {Object} encoderInfo - { type, sampleRate, bitRate, channels, application, timestamp, pattern, originalSampleRate?, frameSize?, bufferLength? }
    */
   _handleWasmEncoder(encoderInfo) {
-      // Find the most recent AudioContext to associate this encoder with
-      const lastCtxEntry = Array.from(this.activeContexts.entries()).pop();
+      logger.info(this.logPrefix, 'WASM encoder detected:', encoderInfo);
 
-      if (lastCtxEntry) {
-          const [ctx, ctxData] = lastCtxEntry;
-          // @ts-ignore
-          ctxData.wasmEncoder = encoderInfo;
-          // Re-emit updated context data
-          this.emit(EVENTS.DATA, ctxData);
-          logger.info(this.logPrefix, `WASM Encoder attached: ${encoderInfo.type} @ ${encoderInfo.bitRate/1000}kbps`);
-      } else {
-          // No AudioContext yet - store for late association
-          logger.info(this.logPrefix, `WASM Encoder detected (no AudioContext yet): ${encoderInfo.type} @ ${encoderInfo.bitRate/1000}kbps`);
+      // Strategy: Match encoder to AudioContext by sample rate
+      // Nested pattern uses originalSampleRate (input) → encoderSampleRate (output)
+      const targetSampleRate = encoderInfo.originalSampleRate || encoderInfo.sampleRate;
+
+      // Find matching AudioContext by sample rate
+      let matchedCtx = null;
+      let matchedMetadata = null;
+
+      for (const [ctx, metadata] of this.activeContexts.entries()) {
+          if (ctx.sampleRate === targetSampleRate) {
+              matchedCtx = ctx;
+              matchedMetadata = metadata;
+              break;
+          }
       }
+
+      // Fallback: Use most recent context if no sample rate match
+      if (!matchedCtx) {
+          if (targetSampleRate) {
+              logger.warn(
+                  this.logPrefix,
+                  `No AudioContext found with sampleRate=${targetSampleRate}Hz, using most recent context`
+              );
+          }
+          const lastCtxEntry = Array.from(this.activeContexts.entries()).pop();
+          if (!lastCtxEntry) {
+              logger.warn(this.logPrefix, 'No active AudioContext found for WASM encoder');
+              return;
+          }
+          [matchedCtx, matchedMetadata] = lastCtxEntry;
+      }
+
+      // Attach encoder info to context metadata
+      matchedMetadata.wasmEncoder = encoderInfo;
+
+      // Verify mutation persists in Map
+      const verifyMetadata = this.activeContexts.get(matchedCtx);
+      if (verifyMetadata && verifyMetadata.wasmEncoder) {
+        logger.info(this.logPrefix, '✓ WASM encoder persisted in activeContexts');
+      } else {
+        logger.warn(this.logPrefix, '⚠ WASM encoder NOT persisted (may be a reference issue)');
+      }
+
+      // Emit updated metadata
+      this.emit(EVENTS.DATA, matchedMetadata);
+
+      // Detailed logging with metadata content
+      logger.info(
+          this.logPrefix,
+          `WASM encoder (${encoderInfo.pattern}) attached to AudioContext (${matchedCtx.sampleRate}Hz)`
+      );
+      logger.info(this.logPrefix, 'Re-emitting AudioContext with WASM encoder:', {
+        sampleRate: matchedMetadata.sampleRate,
+        state: matchedMetadata.state,
+        hasScriptProcessors: matchedMetadata.scriptProcessors.length > 0,
+        hasAudioWorklets: matchedMetadata.audioWorklets.length > 0,
+        wasmEncoder: {
+          type: encoderInfo.type,
+          bitRate: encoderInfo.bitRate,
+          sampleRate: encoderInfo.sampleRate,
+          channels: encoderInfo.channels,
+          pattern: encoderInfo.pattern
+        }
+      });
   }
 
   /**
@@ -314,10 +363,55 @@ class AudioContextCollector extends BaseCollector {
   async start() {
     this.active = true;
 
-    // Registry'deki eski instance'ları ignore et
-    // Sadece yeni oluşturulan AudioContext'leri izle
-    // Bu, profil değişikliğinde eski verilerin görünmesini önler
-    logger.info(this.logPrefix, 'Started - listening for new AudioContext instances only');
+    // Sync pre-existing instances from early hook registry
+    const registry = getInstanceRegistry();
+    if (registry.audioContexts.length > 0) {
+      logger.info(
+        this.logPrefix,
+        `Found ${registry.audioContexts.length} pre-existing AudioContext(s) from early hook`
+      );
+
+      for (const { instance } of registry.audioContexts) {
+        // Ensure instance is registered (handler may have already added it)
+        if (!this.activeContexts.has(instance)) {
+          this._handleNewContext(instance, false); // Silent add to Map
+          logger.info(this.logPrefix, 'Registered pre-existing AudioContext (was missed by handler)');
+        }
+      }
+    }
+
+    // Now that we're active, emit all contexts in activeContexts
+    // This handles both:
+    // - Contexts added by handler (before start, blocked by active=false)
+    // - Contexts just synced from registry
+    if (this.activeContexts.size > 0) {
+      logger.info(
+        this.logPrefix,
+        `Emitting ${this.activeContexts.size} existing AudioContext(s) on start`
+      );
+
+      for (const [ctx, metadata] of this.activeContexts.entries()) {
+        this.emit(EVENTS.DATA, metadata);
+        logger.info(this.logPrefix, 'Emitted existing AudioContext:', {
+          sampleRate: metadata.sampleRate,
+          state: metadata.state,
+          hasScriptProcessors: metadata.scriptProcessors.length > 0,
+          hasWasmEncoder: !!metadata.wasmEncoder
+        });
+      }
+    }
+
+    // Check for WASM encoder detected BEFORE start (late-discovery)
+    // Process AFTER registry sync and emit so activeContexts is populated
+    // @ts-ignore
+    if (window.__wasmEncoderDetected) {
+      logger.info(this.logPrefix, 'Found pre-existing WASM encoder detection (deferred processing)');
+      this._handleWasmEncoder(window.__wasmEncoderDetected);
+      // @ts-ignore
+      window.__wasmEncoderDetected = null; // Clear flag to avoid reprocessing
+    }
+
+    logger.info(this.logPrefix, 'Started - ready to capture new audio activity');
   }
 
   /**

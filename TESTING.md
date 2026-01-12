@@ -102,8 +102,7 @@
 - ✅ Kullanıcı manuel Start yapmalı
 
 **Potential Issues:**
-- ❌ Background'da isDevelopment=true varsa auto-reload loop
-- ❌ Test tab'ları otomatik reload olabilir
+- ❌ State restore gecikmeli olabilir
 
 ---
 

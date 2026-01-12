@@ -17,6 +17,7 @@ export const DATA_TYPES = {
   RTC_STATS: 'rtc_stats',
   USER_MEDIA: 'userMedia',
   AUDIO_CONTEXT: 'audioContext',
+  AUDIO_WORKLET: 'audioWorklet',
   MEDIA_RECORDER: 'mediaRecorder',
   PLATFORM_DETECTED: 'platform_detected'
 };

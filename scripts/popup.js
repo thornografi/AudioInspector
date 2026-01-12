@@ -50,8 +50,6 @@ async function loadEnabledState() {
 
 // Toggle inspector on/off
 async function toggleInspector() {
-  enabled = !enabled;
-
   // Get active tab in current window
   const tabs = await chrome.tabs.query({active: true, currentWindow: true, url: ["http://*/*", "https://*/*"]});
   const activeTab = tabs[0];
@@ -59,6 +57,15 @@ async function toggleInspector() {
   // STOP durumunda kilitli tab bilgisini al (mesajı oraya göndermek için)
   const result = await chrome.storage.local.get(['lockedTab']);
   const lockedTab = result.lockedTab;
+
+  // START durumunda geçerli tab yoksa işlem yapma (chrome://, about:, vb.)
+  if (!enabled && !activeTab) {
+    debugLog('⚠️ No valid tab to start inspector (chrome:// or about:// pages are not supported)');
+    return;
+  }
+
+  // Şimdi güvenle toggle yap
+  enabled = !enabled;
 
   if (enabled && activeTab) {
     // START: Aktif tab'ı kilitle
@@ -93,9 +100,11 @@ async function toggleInspector() {
     await chrome.storage.local.remove(['inspectorEnabled', 'lockedTab']);
   }
 
-  // Clear data when toggling (both ON and OFF)
-  // This ensures fresh start for each session
-  await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder']);
+  // Clear data ONLY when starting (not when stopping)
+  // This allows users to review collected data after stopping
+  if (enabled) {
+    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_context', 'audio_worklet', 'media_recorder']);
+  }
 
   // Update button AND UI to reflect new state
   updateToggleButton();
@@ -127,9 +136,15 @@ function updateToggleButton() {
 // Tab kilitleme kontrolü - popup açıldığında çağrılır
 async function checkTabLock() {
   const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const result = await chrome.storage.local.get(['lockedTab', 'inspectorEnabled']);
+  const result = await chrome.storage.local.get(['lockedTab', 'inspectorEnabled', 'autoStoppedReason']);
 
   debugLog(`checkTabLock: currentTab=${currentTab?.id}, lockedTab=${result.lockedTab?.id}, enabled=${result.inspectorEnabled}`);
+
+  // Auto-stop bildirimi varsa göster ve temizle
+  if (result.autoStoppedReason) {
+    showAutoStopBanner(result.autoStoppedReason);
+    chrome.storage.local.remove(['autoStoppedReason']);
+  }
 
   if (result.inspectorEnabled && result.lockedTab) {
     const isSameTab = result.lockedTab.id === currentTab?.id;
@@ -189,6 +204,25 @@ function hideLockedTabInfo() {
 
   banner?.classList.remove('visible', 'same-tab', 'different-tab');
   controls?.classList.remove('disabled');
+}
+
+// Auto-stop bildirimi göster (origin değişikliği vb.)
+function showAutoStopBanner(reason) {
+  const banner = document.getElementById('autoStopBanner');
+  if (!banner) return;
+
+  const messages = {
+    'origin_change': 'Inspector stopped: Site changed'
+  };
+  banner.textContent = messages[reason] || 'Inspector stopped';
+  banner.classList.add('visible');
+
+  // 5 saniye sonra gizle
+  setTimeout(() => {
+    banner.classList.remove('visible');
+  }, 5000);
+
+  debugLog(`Auto-stop banner shown: ${reason}`);
 }
 
 // Format timestamp
@@ -431,11 +465,13 @@ function renderACStats(data) {
     // AudioWorklet (modern)
     if (hasAudioWorklet) {
       data.audioWorklets.forEach(aw => {
-        const filename = aw.moduleUrl ? aw.moduleUrl.split('/').pop() : '-';
         html += `
           <div class="processing-item subheader">
             <span class="detail-label">Processor</span>
-            <span class="detail-value" title="${escapeHtml(aw.moduleUrl)}">${escapeHtml(filename)}</span>
+            <span class="detail-value">
+              AudioWorkletNode
+              <span class="has-tooltip" data-tooltip="Modern Web Audio API">ℹ️</span>
+            </span>
           </div>`;
       });
     }

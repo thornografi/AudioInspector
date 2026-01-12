@@ -119,22 +119,48 @@ export function installEarlyHooks() {
     handlerName: '__mediaRecorderCollectorHandler'
   });
 
-  // Hook Worker.postMessage for WASM encoder detection (opus-recorder pattern)
+  // Hook Worker.postMessage for WASM encoder detection
   const originalPostMessage = Worker.prototype.postMessage;
   Worker.prototype.postMessage = function(message, ...args) {
-    // opus-recorder pattern: { command: 'init', encoderSampleRate, encoderBitRate, ... }
     if (message && typeof message === 'object') {
+      let encoderInfo = null;
+
+      // Pattern 1: Direct format (opus-recorder)
+      // { command: 'init', encoderSampleRate: 48000, encoderBitRate: 128000, ... }
       if (message.command === 'init' && message.encoderSampleRate) {
-        // Opus encoder init detected
-        const encoderInfo = {
+        encoderInfo = {
           type: 'opus',
           sampleRate: message.encoderSampleRate,
           bitRate: message.encoderBitRate || 0,
           channels: message.numberOfChannels || 1,
           application: message.encoderApplication, // 2048=Voice, 2049=FullBand, 2051=LowDelay
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          pattern: 'direct'
         };
+      }
 
+      // Pattern 2: Nested config format
+      // { type: "message", message: { command: "encode-init", config: { ... } } }
+      else if (message.type === 'message' &&
+               message.message?.command === 'encode-init' &&
+               message.message?.config) {
+        const config = message.message.config;
+        encoderInfo = {
+          type: 'opus',
+          sampleRate: config.encoderSampleRate || config.sampleRate || 0,
+          bitRate: config.bitRate || config.encoderBitRate || 0,
+          channels: config.numberOfChannels || 1,
+          application: config.encoderApplication || 2048, // Default to VOIP
+          originalSampleRate: config.originalSampleRate,
+          frameSize: config.encoderFrameSize,
+          bufferLength: config.bufferLength,
+          timestamp: Date.now(),
+          pattern: 'nested'
+        };
+      }
+
+      // If encoder detected, store and notify
+      if (encoderInfo) {
         // Store globally for late-discovery
         // @ts-ignore
         window.__wasmEncoderDetected = encoderInfo;
@@ -146,7 +172,10 @@ export function installEarlyHooks() {
           window.__wasmEncoderHandler(encoderInfo);
         }
 
-        logger.info(LOG_PREFIX.INSPECTOR, `🔧 WASM Opus encoder detected: ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz`);
+        logger.info(
+          LOG_PREFIX.INSPECTOR,
+          `🔧 WASM Opus encoder detected (${encoderInfo.pattern}): ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels}ch`
+        );
       }
     }
     return originalPostMessage.apply(this, [message, ...args]);

@@ -51,6 +51,11 @@ class RTCPeerConnectionCollector extends PollingCollector {
    * @param {RTCPeerConnection} pc
    */
   _handleNewConnection(pc) {
+    // Duplicate guard: prevent adding listener twice for the same connection
+    if (this.peerConnections.has(pc)) {
+      logger.info(this.logPrefix, 'RTCPeerConnection already tracked, skipping duplicate');
+      return;
+    }
     this.peerConnections.add(pc);
 
     logger.info(this.logPrefix, `New RTCPeerConnection created`);

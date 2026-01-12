@@ -76,6 +76,38 @@ hookConstructor(window, 'RTCPeerConnection', (pc, args) => {
 }, () => this.active);
 ```
 
+## DATA_TYPES Sabitleri
+
+`src/core/constants.js` dosyasında tanımlı sabitler. Emit ederken **magic string yerine sabit kullan**:
+
+| Sabit | Değer | Açıklama |
+|-------|-------|----------|
+| `DATA_TYPES.RTC_STATS` | `'rtc_stats'` | WebRTC istatistikleri |
+| `DATA_TYPES.USER_MEDIA` | `'userMedia'` | getUserMedia sonuçları |
+| `DATA_TYPES.AUDIO_CONTEXT` | `'audioContext'` | AudioContext metadata |
+| `DATA_TYPES.AUDIO_WORKLET` | `'audioWorklet'` | AudioWorklet module bilgisi |
+| `DATA_TYPES.MEDIA_RECORDER` | `'mediaRecorder'` | MediaRecorder bilgisi |
+| `DATA_TYPES.PLATFORM_DETECTED` | `'platform_detected'` | Platform tespiti |
+
+### Kullanım
+
+```javascript
+import { EVENTS, DATA_TYPES } from '../core/constants.js';
+
+// ✅ Doğru - sabit kullan
+this.emit(EVENTS.DATA, {
+  type: DATA_TYPES.AUDIO_WORKLET,
+  timestamp: Date.now(),
+  moduleUrl: url
+});
+
+// ❌ Yanlış - magic string
+this.emit(EVENTS.DATA, {
+  type: 'audioWorklet',  // Değişirse 3 dosyayı kırar
+  ...
+});
+```
+
 ## Lifecycle
 
 ```
@@ -100,22 +132,58 @@ createConstructorHook({
 
 ### Worker.postMessage Hook (WASM Encoder)
 
-opus-recorder ve benzeri WASM encoder'ları tespit eder:
+opus-recorder ve benzeri WASM encoder'ları tespit eder. İki farklı message pattern'i desteklenir:
 
 ```javascript
 // EarlyHook.js - installEarlyHooks() içinde
 Worker.prototype.postMessage = function(message, ...args) {
-  if (message?.command === 'init' && message.encoderSampleRate) {
-    window.__wasmEncoderDetected = {
+  let encoderInfo = null;
+
+  // Pattern 1: Direct format (opus-recorder)
+  // { command: 'init', encoderSampleRate: 48000, encoderBitRate: 128000, ... }
+  if (message.command === 'init' && message.encoderSampleRate) {
+    encoderInfo = {
       type: 'opus',
       sampleRate: message.encoderSampleRate,
-      bitRate: message.encoderBitRate
+      bitRate: message.encoderBitRate || 0,
+      channels: message.numberOfChannels || 1,
+      application: message.encoderApplication,
+      timestamp: Date.now(),
+      pattern: 'direct'
     };
-    window.__wasmEncoderHandler?.(window.__wasmEncoderDetected);
+  }
+
+  // Pattern 2: Nested config format (örn: WhatsApp, Discord)
+  // { type: "message", message: { command: "encode-init", config: { ... } } }
+  else if (message.type === 'message' &&
+           message.message?.command === 'encode-init' &&
+           message.message?.config) {
+    const config = message.message.config;
+    encoderInfo = {
+      type: 'opus',
+      sampleRate: config.encoderSampleRate || config.sampleRate || 0,
+      bitRate: config.bitRate || config.encoderBitRate || 0,
+      channels: config.numberOfChannels || 1,
+      application: config.encoderApplication || 2048,
+      originalSampleRate: config.originalSampleRate,
+      frameSize: config.encoderFrameSize,
+      bufferLength: config.bufferLength,
+      timestamp: Date.now(),
+      pattern: 'nested'
+    };
+  }
+
+  if (encoderInfo) {
+    window.__wasmEncoderDetected = encoderInfo;
+    window.__wasmEncoderHandler?.(encoderInfo);
   }
   return originalPostMessage.apply(this, [message, ...args]);
 };
 ```
+
+**Pattern'ler:**
+- **Direct:** opus-recorder library standart formatı
+- **Nested:** WhatsApp, Discord gibi platformların özel formatı
 
 ### Late-Discovery Pattern
 
