@@ -123,6 +123,58 @@ class MediaRecorderCollector extends BaseCollector {
   }
 
   /**
+   * Analyze MediaStream tracks to determine source type
+   * @private
+   * @param {MediaStream} stream
+   * @returns {{hasAudio: boolean, hasVideo: boolean, audioSource: string, trackInfo: Array}}
+   */
+  _analyzeStreamTracks(stream) {
+      const result = {
+        hasAudio: false,
+        hasVideo: false,
+        audioSource: 'none', // 'microphone', 'system', 'synthesized', 'unknown'
+        trackInfo: []
+      };
+
+      if (!stream || typeof stream.getTracks !== 'function') {
+        return result;
+      }
+
+      const tracks = stream.getTracks();
+      for (const track of tracks) {
+        const info = {
+          kind: track.kind,
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState
+        };
+
+        if (track.kind === 'audio') {
+          result.hasAudio = true;
+          // Determine audio source from label
+          const label = (track.label || '').toLowerCase();
+          if (label.includes('microphone') || label.includes('mic') || label.includes('input')) {
+            result.audioSource = 'microphone';
+          } else if (label.includes('system') || label.includes('loopback') || label.includes('stereo mix')) {
+            result.audioSource = 'system';
+          } else if (label === '' || label.includes('mediastreamdestination')) {
+            // Empty label often means synthesized (from AudioContext)
+            result.audioSource = 'synthesized';
+          } else {
+            result.audioSource = 'unknown';
+          }
+        } else if (track.kind === 'video') {
+          result.hasVideo = true;
+        }
+
+        result.trackInfo.push(info);
+      }
+
+      return result;
+  }
+
+  /**
    * Handle new MediaRecorder instance
    * @private
    * @param {any} recorder
@@ -130,7 +182,11 @@ class MediaRecorderCollector extends BaseCollector {
    */
   _handleNewRecorder(recorder, args) {
       logger.info(this.logPrefix, `_handleNewRecorder called for new MediaRecorder instance.`);
-      const options = args[1] || {}; // Constructor signature: (stream, options)
+      const stream = args[0]; // Constructor signature: (stream, options)
+      const options = args[1] || {};
+
+      // Analyze stream tracks to determine source
+      const trackAnalysis = this._analyzeStreamTracks(stream);
 
       // Parse mimeType to extract codec info
       const parsedMime = parseMimeType(recorder.mimeType);
@@ -145,6 +201,11 @@ class MediaRecorderCollector extends BaseCollector {
         audioBitsPerSecond: recorder.audioBitsPerSecond,
         state: recorder.state,
         requestedOptions: options,
+        // NEW: Track analysis to prevent false positives
+        hasAudioTrack: trackAnalysis.hasAudio,
+        hasVideoTrack: trackAnalysis.hasVideo,
+        audioSource: trackAnalysis.audioSource, // 'microphone', 'system', 'synthesized', 'unknown', 'none'
+        trackInfo: trackAnalysis.trackInfo,
         events: []
       };
 

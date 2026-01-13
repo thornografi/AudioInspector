@@ -13,7 +13,7 @@ WebRTC/Audio API'lerini hook edip veri toplayan modüller.
 |-----------|-----------------|-------|
 | RTCPeerConnectionCollector | `new RTCPeerConnection()` | `src/collectors/RTCPeerConnectionCollector.js` |
 | GetUserMediaCollector | `navigator.mediaDevices.getUserMedia()` | `src/collectors/GetUserMediaCollector.js` |
-| AudioContextCollector | `new AudioContext()`, `createScriptProcessor()`, `createMediaStreamDestination()`, `createAnalyser()`, `AudioWorklet.addModule()`, Worker.postMessage (WASM) | `src/collectors/AudioContextCollector.js` |
+| AudioContextCollector | `new AudioContext()`, `createScriptProcessor()`, `createMediaStreamSource()`, `createMediaStreamDestination()`, `createAnalyser()`, `AudioWorklet.addModule()`, Worker.postMessage (WASM) | `src/collectors/AudioContextCollector.js` |
 | MediaRecorderCollector | `new MediaRecorder()` | `src/collectors/MediaRecorderCollector.js` |
 
 ## Base Class'lar
@@ -62,17 +62,27 @@ this.collectors = [..., new MyCollector()];
 
 `src/core/utils/ApiHook.js`:
 
-| Fonksiyon | Ne Zaman |
-|-----------|----------|
-| `hookConstructor(target, prop, onInstance, shouldHook)` | `new X()` çağrıları |
-| `hookAsyncMethod(target, prop, onResult, shouldHook)` | Promise dönen metodlar |
-| `hookMethod(target, prop, onCall, shouldHook)` | Senkron metodlar |
+| Fonksiyon | Callback Signature | Ne Zaman |
+|-----------|-------------------|----------|
+| `hookConstructor(target, prop, onInstance, shouldHook)` | `onInstance(instance, args)` | `new X()` çağrıları |
+| `hookAsyncMethod(target, prop, onResult, shouldHook)` | `onResult(result, args, thisArg)` | Promise dönen metodlar |
+| `hookMethod(target, prop, onCall, shouldHook)` | `onCall(result, args, thisArg)` | Senkron metodlar |
+
+> **Not:** `thisArg` parametresi prototype method'larda (örn: `AudioWorklet.prototype.addModule`) çağrıyı yapan instance'a erişim sağlar. Bu sayede hangi context'e ait olduğu belirlenebilir.
 
 ### Örnek
 
 ```javascript
+// Constructor hook
 hookConstructor(window, 'RTCPeerConnection', (pc, args) => {
   this.emit('data', { type: 'pc_created', config: args[0] });
+}, () => this.active);
+
+// Method hook with thisArg (prototype methods)
+hookAsyncMethod(AudioWorklet.prototype, 'addModule', (result, args, thisArg) => {
+  // thisArg = AudioWorklet instance, thisArg ile parent AudioContext bulunabilir
+  const moduleUrl = args[0];
+  this._handleWorkletModule(moduleUrl, thisArg);
 }, () => this.active);
 ```
 
@@ -87,6 +97,7 @@ hookConstructor(window, 'RTCPeerConnection', (pc, args) => {
 | `DATA_TYPES.AUDIO_CONTEXT` | `'audioContext'` | AudioContext metadata |
 | `DATA_TYPES.AUDIO_WORKLET` | `'audioWorklet'` | AudioWorklet module bilgisi |
 | `DATA_TYPES.MEDIA_RECORDER` | `'mediaRecorder'` | MediaRecorder bilgisi |
+| `DATA_TYPES.WASM_ENCODER` | `'wasmEncoder'` | WASM encoder (opus) bilgisi - bağımsız sinyal |
 | `DATA_TYPES.PLATFORM_DETECTED` | `'platform_detected'` | Platform tespiti |
 
 ## DESTINATION_TYPES Sabitleri
@@ -149,7 +160,7 @@ createConstructorHook({
 
 ### Worker.postMessage Hook (WASM Encoder)
 
-opus-recorder ve benzeri WASM encoder'ları tespit eder. İki farklı message pattern'i desteklenir:
+opus-recorder ve benzeri WASM encoder'ları tespit eder. **WASM encoder bağımsız sinyal olarak emit edilir** - AudioContext'e bağlanmaz (sampleRate eşleşmesi güvenilir değil). İki farklı message pattern'i desteklenir (yüksek doğruluk için sadece Opus):
 
 ```javascript
 // EarlyHook.js - installEarlyHooks() içinde
@@ -198,9 +209,11 @@ Worker.prototype.postMessage = function(message, ...args) {
 };
 ```
 
-**Pattern'ler:**
-- **Direct:** opus-recorder library standart formatı
-- **Nested:** WhatsApp, Discord gibi platformların özel formatı
+**Pattern'ler (Sadece Opus - Yüksek Doğruluk):**
+- **Direct:** opus-recorder library standart formatı (`command: 'init'` + `encoderSampleRate`)
+- **Nested:** WhatsApp, Discord gibi platformların özel formatı (`type: 'message'`, `command: 'encode-init'`)
+
+> **Not:** MP3 (lamejs) ve generic encoder pattern'leri yanlış pozitif riski nedeniyle kaldırıldı.
 
 ### Late-Discovery Pattern
 

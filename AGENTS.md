@@ -4,7 +4,6 @@
 |-------|-------------|------------|
 | Architecture | Project structure, Manifest V3 patterns | .claude/skills/architecture/SKILL.md |
 | Collectors | Data collection hooks & patterns | .claude/skills/collectors/SKILL.md |
-| Skill Controller | Skill health, audit & synchronization | .claude/skills/skill-controller/SKILL.md |
 
 # Rules from .clinerules:
 # PROJE KURALLARI

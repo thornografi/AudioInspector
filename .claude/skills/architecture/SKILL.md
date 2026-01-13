@@ -54,6 +54,17 @@ Inspector başlatıldığında sadece o tab'da çalışır.
 - `lockedTab: { id, url, title }` - Kilitli tab bilgisi
 - `inspectorEnabled: boolean` - Inspector durumu
 
+### Data Storage Keys
+Toplanan veriler için kullanılan key'ler (content.js & popup.js'de `DATA_STORAGE_KEYS` sabiti):
+- `rtc_stats` - WebRTC istatistikleri
+- `user_media` - getUserMedia sonuçları
+- `audio_contexts` - AudioContext metadata (array)
+- `audio_worklet` - AudioWorklet module bilgisi (audio_contexts'e merge edilir)
+- `media_recorder` - MediaRecorder bilgisi
+- `wasm_encoder` - WASM encoder (opus) bilgisi - **bağımsız sinyal**
+
+> **Not:** `wasm_encoder` AudioContext'e bağlanmaz - sampleRate eşleştirme güvenilir değildir.
+
 ### Kontrol Akışı
 ```
 [popup.js] Start butonuna basıldı

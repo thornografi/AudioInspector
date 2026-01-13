@@ -19,6 +19,7 @@ export const DATA_TYPES = {
   AUDIO_CONTEXT: 'audioContext',
   AUDIO_WORKLET: 'audioWorklet',
   MEDIA_RECORDER: 'mediaRecorder',
+  WASM_ENCODER: 'wasmEncoder',
   PLATFORM_DETECTED: 'platform_detected'
 };
 

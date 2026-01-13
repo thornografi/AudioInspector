@@ -68,7 +68,9 @@ class Logger {
   }
 
   /**
-   * Log warning message
+   * Log warning message.
+   * NOTE: warn() logs are ALWAYS recorded regardless of enabled state.
+   * This is intentional - critical warnings should never be suppressed.
    * @param {string} prefix
    * @param {string} message
    * @param {any} [data]
@@ -79,7 +81,9 @@ class Logger {
   }
 
   /**
-   * Log error message
+   * Log error message.
+   * NOTE: error() logs are ALWAYS recorded regardless of enabled state.
+   * This is intentional - critical errors should never be suppressed.
    * @param {string} prefix
    * @param {string} message
    * @param {any} [data]

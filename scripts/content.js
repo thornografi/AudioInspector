@@ -1,5 +1,6 @@
 // Content script - Bridge between page and extension
 let injected = false;
+let currentTabId = null; // Global tab ID for sourceTabId tagging
 
 // Helper to save logs - background.js üzerinden merkezi yönetim (race condition önleme)
 function persistLogs(newEntry) {
@@ -36,8 +37,11 @@ function logContent(msg, data) {
   console.log('[Content]', msg, data || '');
 }
 
-// Auto-inject on load
-async function injectPageScript() {
+// Auto-inject on load with retry mechanism
+const INJECTION_MAX_RETRIES = 3;
+const INJECTION_RETRY_DELAY = 100; // ms, exponential backoff
+
+async function injectPageScript(attempt = 1) {
   if (injected) return;
 
   // Don't inject on chrome:// URLs (extension, settings, etc)
@@ -45,12 +49,17 @@ async function injectPageScript() {
     return;
   }
 
-  injected = true;
-
   try {
     const response = await chrome.runtime.sendMessage({ type: 'INJECT_PAGE_SCRIPT' });
     if (response?.success) {
+      injected = true; // Only set on success
       logContent('✅ AudioInspector: page script injected via background script');
+
+      // Get tab ID early for sourceTabId tagging
+      chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (tabResponse) => {
+        currentTabId = tabResponse?.tabId || null;
+        logContent(`📍 Tab ID acquired: ${currentTabId}`);
+      });
 
       // Add initialization log to storage
       persistLogs(createLog('Inspector', '🚀 AudioInspector initialized'));
@@ -58,17 +67,28 @@ async function injectPageScript() {
       // Note: State restoration moved to INSPECTOR_READY handler below
       // to avoid race condition with PageInspector initialization
     } else {
-      logContent('❌ AudioInspector: page script injection failed via background script', response?.error);
+      throw new Error(response?.error || 'Unknown injection error');
     }
   } catch (error) {
-    logContent('❌ AudioInspector: error sending injection request to background script', error);
+    logContent(`⚠️ Injection attempt ${attempt}/${INJECTION_MAX_RETRIES} failed`, error);
+
+    if (attempt < INJECTION_MAX_RETRIES) {
+      // Exponential backoff retry
+      const delay = INJECTION_RETRY_DELAY * attempt;
+      await new Promise(r => setTimeout(r, delay));
+      return injectPageScript(attempt + 1);
+    } else {
+      logContent('❌ All injection attempts failed - manual reload may be required');
+      // Notify user via autoStopBanner mechanism
+      chrome.storage.local.set({ autoStoppedReason: 'injection_failed' });
+    }
   }
 }
 
 // --- Message Handlers (All payloads now have consistent 'type' field) ---
 
 // Storage keys for collected data (DRY - used in multiple places)
-const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder'];
+const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder'];
 
 // Queue for audioContext updates to prevent race conditions
 let audioContextQueue = [];
@@ -102,6 +122,17 @@ function processAudioContextQueue() {
       contexts.push(payload);
     }
 
+    // DEBUG: Log context data before storage
+    console.log('[Content] DEBUG: Saving audio_contexts:', contexts.map(c => ({
+      contextId: c.contextId,
+      sourceTabId: c.sourceTabId,
+      state: c.state,
+      baseLatency: c.baseLatency,
+      audioWorklets: c.audioWorklets,
+      wasmEncoder: c.wasmEncoder,
+      destinationType: c.destinationType
+    })));
+
     chrome.storage.local.set({
       audio_contexts: contexts,
       lastUpdate: Date.now()
@@ -131,53 +162,60 @@ const MESSAGE_HANDLERS = {
   // Special handler for audioContext - uses queue to prevent race conditions
   audioContext: (payload) => {
     persistLogs(createLog('Content', `🔊 audioContext queued: id=${payload?.contextId}, rate=${payload?.sampleRate}`));
-    audioContextQueue.push(payload);
+    audioContextQueue.push({ ...payload, sourceTabId: currentTabId });
     processAudioContextQueue();
     return null; // Handled internally
   },
 
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
-  // Special handler for audioWorklet - merge into most recent audioContext
+  // WASM encoder - independent signal (not attached to AudioContext)
+  wasmEncoder: storageHandler('wasm_encoder', '🔧', 'WASM Encoder'),
+
+  // Special handler for audioWorklet
+  // NOTE: AudioContextCollector already handles worklets with proper context matching
+  // This handler only receives ORPHAN worklets (context not found)
+  // FIX: Do NOT blindly assign to "most recent context" - that causes false positives
+  // Instead, just log the orphan worklet for debugging
   audioWorklet: (payload) => {
-    chrome.storage.local.get(['audio_contexts'], (result) => {
-      let contexts = result.audio_contexts || [];
+    // Check if this worklet has a contextId (properly matched by collector)
+    if (payload.contextId) {
+      // Already matched by collector, merge into correct context
+      chrome.storage.local.get(['audio_contexts'], (result) => {
+        let contexts = result.audio_contexts || [];
+        const targetContext = contexts.find(c => c.contextId === payload.contextId);
 
-      if (contexts.length === 0) {
-        logContent('🎛️ AudioWorklet received but no AudioContext exists yet');
-        return;
-      }
+        if (targetContext) {
+          if (!targetContext.audioWorklets) {
+            targetContext.audioWorklets = [];
+          }
+          const existingIndex = targetContext.audioWorklets.findIndex(w => w.moduleUrl === payload.moduleUrl);
+          if (existingIndex >= 0) {
+            targetContext.audioWorklets[existingIndex] = {
+              moduleUrl: payload.moduleUrl,
+              timestamp: payload.timestamp
+            };
+          } else {
+            targetContext.audioWorklets.push({
+              moduleUrl: payload.moduleUrl,
+              timestamp: payload.timestamp
+            });
+          }
 
-      // Add to most recent context (last in array)
-      const lastContext = contexts[contexts.length - 1];
-
-      // Initialize audioWorklets array if needed
-      if (!lastContext.audioWorklets) {
-        lastContext.audioWorklets = [];
-      }
-
-      // Add new worklet (avoid duplicates by checking moduleUrl)
-      const existingIndex = lastContext.audioWorklets.findIndex(w => w.moduleUrl === payload.moduleUrl);
-      if (existingIndex >= 0) {
-        lastContext.audioWorklets[existingIndex] = {
-          moduleUrl: payload.moduleUrl,
-          timestamp: payload.timestamp
-        };
-      } else {
-        lastContext.audioWorklets.push({
-          moduleUrl: payload.moduleUrl,
-          timestamp: payload.timestamp
-        });
-      }
-
-      // Save merged data back
-      chrome.storage.local.set({
-        audio_contexts: contexts,
-        lastUpdate: Date.now()
-      }, () => {
-        logContent('🎛️ AudioWorklet merged into AudioContext', payload.moduleUrl);
+          chrome.storage.local.set({
+            audio_contexts: contexts,
+            lastUpdate: Date.now()
+          }, () => {
+            logContent(`🎛️ AudioWorklet merged into context ${payload.contextId}`, payload.moduleUrl);
+          });
+        }
       });
-    });
+    } else {
+      // ORPHAN worklet - context not found
+      // Do NOT assign to random context - just log it
+      logContent('🎛️ AudioWorklet detected (orphan - context not matched)', payload.moduleUrl);
+      persistLogs(createLog('Content', `⚠️ Orphan AudioWorklet: ${payload.moduleUrl} (context unknown)`));
+    }
 
     return null; // Handled internally
   },
@@ -191,8 +229,9 @@ const MESSAGE_HANDLERS = {
 
 // Listen for messages from page script
 window.addEventListener('message', (event) => {
-  // Only accept messages from same origin
+  // Security: Only accept messages from same window and same origin
   if (event.source !== window) return;
+  if (event.origin !== window.location.origin) return;
   if (!event.data?.__audioPipelineInspector) return;
   
   // Handle INSPECTOR_READY - restore state if needed (with tab lock check)
@@ -201,7 +240,7 @@ window.addEventListener('message', (event) => {
           if (result.inspectorEnabled === true && result.lockedTab) {
               // Tab ID kontrolü yap
               chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
-                  const currentTabId = response?.tabId;
+                  const thisTabId = response?.tabId; // Renamed to avoid shadow variable with global currentTabId
                   const lockedTabId = result.lockedTab.id;
                   const currentOrigin = window.location.origin;
                   let lockedOrigin;
@@ -212,14 +251,14 @@ window.addEventListener('message', (event) => {
                   }
 
                   // Debug log - tab ID ve origin karşılaştırması
-                  logContent(`Tab check: current=${currentTabId}, locked=${lockedTabId}, origins: ${currentOrigin} vs ${lockedOrigin}`);
-                  persistLogs(createLog('Content', `Tab check: current=${currentTabId}, locked=${lockedTabId}`));
+                  logContent(`Tab check: current=${thisTabId}, locked=${lockedTabId}, origins: ${currentOrigin} vs ${lockedOrigin}`);
+                  persistLogs(createLog('Content', `Tab check: current=${thisTabId}, locked=${lockedTabId}`));
 
                   // Tab ID kontrolü
-                  if (currentTabId !== lockedTabId) {
+                  if (thisTabId !== lockedTabId) {
                       // Farklı tab, başlatma
                       logContent('Inspector active but this tab is not locked (not starting)');
-                      persistLogs(createLog('Content', `Different tab (${currentTabId} != ${lockedTabId}) - not starting`));
+                      persistLogs(createLog('Content', `Different tab (${thisTabId} != ${lockedTabId}) - not starting`));
                       return;
                   }
 
@@ -279,7 +318,7 @@ window.addEventListener('message', (event) => {
 
     const { key, logMsg, logData } = result;
     const dataToStore = {
-      [key]: payload,
+      [key]: { ...payload, sourceTabId: currentTabId },
       lastUpdate: Date.now()
     };
 

@@ -5,7 +5,6 @@ let logQueue = [];
 let isProcessingLogs = false;
 
 const LOG_LIMIT = 1000;
-const LOG_TRIM_SIZE = 200;
 
 async function processLogQueue() {
   if (isProcessingLogs || logQueue.length === 0) return;
@@ -21,9 +20,9 @@ async function processLogQueue() {
       logs.push(logQueue.shift());
     }
 
-    // Sınırı aştıysa en eskilerden 200 sil
+    // Sınırı aştıysa en yeni LOG_LIMIT kadar tut
     if (logs.length > LOG_LIMIT) {
-      logs = logs.slice(LOG_TRIM_SIZE);
+      logs = logs.slice(-LOG_LIMIT);
     }
 
     await chrome.storage.local.set({ debug_logs: logs });
@@ -122,12 +121,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // Update badge based on inspector state (simpler than icon switching)
-function updateBadge(isRecording) {
-  if (isRecording) {
-    // Show red dot badge when recording
+function updateBadge(isMonitoring) {
+  if (isMonitoring) {
+    // Show blue dot badge when monitoring (not red - that implies recording)
     chrome.action.setBadgeText({ text: '●' });
-    chrome.action.setBadgeBackgroundColor({ color: '#ff3b30' }); // iOS red
-    console.log('[Background] ✅ Badge set to recording');
+    chrome.action.setBadgeBackgroundColor({ color: '#007aff' }); // iOS blue - monitoring, not recording
+    console.log('[Background] ✅ Badge set to monitoring');
   } else {
     // Clear badge when stopped
     chrome.action.setBadgeText({ text: '' });

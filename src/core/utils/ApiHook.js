@@ -59,10 +59,10 @@ export function hookConstructor(target, property, onInstance, shouldHook = () =>
 
 /**
  * Hooks an async method (returning a Promise) on a target object.
- * 
+ *
  * @param {Object} target - The object containing the method (e.g., navigator.mediaDevices)
  * @param {string} property - The name of the method (e.g., 'getUserMedia')
- * @param {Function} onResult - Callback invoked with (result, args) after the promise resolves
+ * @param {Function} onResult - Callback invoked with (result, args, thisArg) after the promise resolves
  * @param {Function} [shouldHook] - Optional predicate that returns true if the hook logic should run
  * @returns {Function|null} The original method, or null if target/property didn't exist
  */
@@ -72,7 +72,7 @@ export function hookAsyncMethod(target, property, onResult, shouldHook = () => t
 
   // @ts-ignore
   const original = target[property];
-  
+
   // Do NOT bind 'this' here. We need to respect the 'this' context at the call site,
   // especially for prototype methods (like AudioWorklet.prototype.addModule).
   // For singleton objects (like navigator.mediaDevices), 'this' will naturally be the singleton.
@@ -85,7 +85,8 @@ export function hookAsyncMethod(target, property, onResult, shouldHook = () => t
 
     const result = await original.apply(this, args);
     try {
-      await onResult(result, args);
+      // Pass 'this' context to handler for proper context identification
+      await onResult(result, args, this);
     } catch (err) {
       logger.error(LOG_PREFIX.INSPECTOR, `Error in ${property} hook:`, err);
     }
@@ -97,10 +98,10 @@ export function hookAsyncMethod(target, property, onResult, shouldHook = () => t
 
 /**
  * Hooks a synchronous method on a target object.
- * 
+ *
  * @param {Object} target - The object containing the method (e.g., AudioContext.prototype)
  * @param {string} property - The name of the method (e.g., 'createScriptProcessor')
- * @param {Function} onCall - Callback invoked with (result, args) after the method returns
+ * @param {Function} onCall - Callback invoked with (result, args, thisArg) after the method returns
  * @param {Function} [shouldHook] - Optional predicate that returns true if the hook logic should run
  * @returns {Function|null} The original method, or null if target/property didn't exist
  */
@@ -110,7 +111,7 @@ export function hookMethod(target, property, onCall, shouldHook = () => true) {
 
   // @ts-ignore
   const original = target[property];
-  
+
   // @ts-ignore
   target[property] = function(/** @type {any[]} */ ...args) {
     if (!shouldHook()) {
@@ -119,7 +120,8 @@ export function hookMethod(target, property, onCall, shouldHook = () => true) {
 
     const result = original.apply(this, args);
     try {
-      onCall(result, args);
+      // Pass 'this' context to handler for proper context identification
+      onCall(result, args, this);
     } catch (err) {
       logger.error(LOG_PREFIX.INSPECTOR, `Error in ${property} hook:`, err);
     }

@@ -20,7 +20,7 @@
       --accent-orange: #d29922;
       --accent-red: #f85149;
       --accent-purple: #a371f7;
-      --recording-glow: rgba(248, 81, 73, 0.4);
+      --monitoring-glow: rgba(88, 166, 255, 0.4);
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -42,9 +42,9 @@
       transition: all 0.3s ease;
     }
 
-    /* Recording mode - entire UI shifts */
-    body.recording {
-      background: linear-gradient(180deg, #1a0a0a 0%, var(--bg-primary) 100%);
+    /* Monitoring mode - entire UI shifts (blue tint, not red) */
+    body.monitoring {
+      background: linear-gradient(180deg, #0a1a2a 0%, var(--bg-primary) 100%);
     }
 
     /* Controls Bar */
@@ -93,6 +93,30 @@
       line-height: 1;
     }
 
+    /* Ghost buttons - secondary actions */
+    .btn-ghost {
+      background: transparent;
+      border-color: transparent;
+      color: var(--text-muted);
+      padding: 0 10px;
+      font-size: 11px;
+      height: 28px;
+    }
+
+    .btn-ghost:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--border-primary);
+      color: var(--text-primary);
+    }
+
+    .btn-ghost .btn-label {
+      opacity: 0.9;
+    }
+
+    .btn-ghost:hover .btn-label {
+      opacity: 1;
+    }
+
     .btn-primary {
       background: var(--accent-green);
       color: #fff;
@@ -107,20 +131,20 @@
       color: #fff;
     }
 
-    body.recording .btn-primary {
-      background: var(--accent-red);
-      border-color: var(--accent-red);
+    body.monitoring .btn-primary {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
       animation: pulse-btn 2s ease-in-out infinite;
     }
 
-    body.recording .btn-primary:hover {
-      background: #da3633;
-      border-color: #da3633;
+    body.monitoring .btn-primary:hover {
+      background: #4a9eff;
+      border-color: #4a9eff;
     }
 
     @keyframes pulse-btn {
-      0%, 100% { box-shadow: 0 0 0 0 var(--recording-glow); }
-      50% { box-shadow: 0 0 12px 2px var(--recording-glow); }
+      0%, 100% { box-shadow: 0 0 0 0 var(--monitoring-glow); }
+      50% { box-shadow: 0 0 12px 2px var(--monitoring-glow); }
     }
 
     .controls-spacer {
@@ -146,8 +170,8 @@
       transition: all 0.3s ease;
     }
 
-    body.recording .status-dot {
-      background: var(--accent-red);
+    body.monitoring .status-dot {
+      background: var(--accent-blue);
       animation: pulse-dot 1.5s ease-in-out infinite;
     }
 
@@ -156,15 +180,15 @@
       50% { opacity: 0.5; transform: scale(0.8); }
     }
 
-    body.recording .status-text {
-      color: var(--accent-red);
+    body.monitoring .status-text {
+      color: var(--accent-blue);
     }
 
     /* Main Content Grid - 3 rows (WebRTC expanded) */
     .main-content {
       flex: 1;
       display: grid;
-      grid-template-rows: 1fr 1fr 0.5fr;  /* WebRTC %33, GUM+AC %33, MR %17 */
+      grid-template-rows: minmax(0, 0.72fr) minmax(0, 1.09fr) minmax(0, 0.69fr);  /* WebRTC %29, GUM+AC %44, MR %27 */
       gap: 1px;
       background: var(--border-subtle);
       overflow: hidden;
@@ -179,6 +203,7 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
+      min-height: 0; /* Grid içinde scroll çalışması için gerekli */
     }
 
     .card-header {
@@ -225,7 +250,25 @@
 
     .card-content {
       flex: 1;
-      overflow: hidden;
+      overflow-y: auto;
+      min-height: 0; /* Grid/flex içinde scroll çalışması için gerekli */
+    }
+
+    .card-content::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .card-content::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .card-content::-webkit-scrollbar-thumb {
+      background: var(--border-primary);
+      border-radius: 3px;
+    }
+
+    .card-content::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
     }
 
     /* Two Column Layout */
@@ -234,19 +277,50 @@
       grid-template-columns: 1fr 1fr;
       gap: 1px;
       background: var(--border-subtle);
+      min-height: 0; /* Grid içinde içerik taşmasını önle */
     }
 
     /* RTC Two Column Content */
     #rtcContent {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 16px;
+      gap: 1px;
       height: 100%;
+      background: var(--border-subtle);
     }
 
     .rtc-column {
       display: flex;
       flex-direction: column;
+      overflow-y: auto;
+      min-height: 0;
+      background: var(--bg-primary);
+      padding: 0 12px;
+    }
+
+    .rtc-column:first-child {
+      padding-left: 0;
+    }
+
+    .rtc-column:last-child {
+      padding-right: 0;
+    }
+
+    .rtc-column::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .rtc-column::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .rtc-column::-webkit-scrollbar-thumb {
+      background: var(--border-primary);
+      border-radius: 3px;
+    }
+
+    .rtc-column::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
     }
 
     .rtc-column-header {
@@ -290,7 +364,7 @@
     }
 
     td {
-      padding: 6px 0;
+      padding: 5px 0;
     }
 
     td:first-child {
@@ -428,6 +502,24 @@
       margin-top: 8px;
     }
 
+    /* WASM Encoder - independent section */
+    .encoder-section {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--accent-purple);
+    }
+
+    .encoder-header {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent-purple);
+      margin-bottom: 6px;
+    }
+
+    .encoder-section table {
+      width: 100%;
+    }
+
     .context-purpose {
       font-size: 11px;
       font-weight: 600;
@@ -451,7 +543,7 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 6px 0;
+      padding: 5px 0;
       font-size: 12px;
       border-bottom: 1px solid var(--border-subtle);
     }
@@ -743,11 +835,11 @@
       <span class="status-text" id="statusText">Stopped</span>
     </div>
     <div class="controls-spacer"></div>
-    <button class="btn btn-icon" id="exportBtn" title="Export Data">
-      <span>Export</span>
+    <button class="btn btn-ghost" id="exportBtn" title="Export Data">
+      <span class="btn-label">Export</span>
     </button>
-    <button class="btn btn-icon" id="clearBtn" title="Clear Data">
-      <span>Clear</span>
+    <button class="btn btn-ghost" id="clearBtn" title="Clear Data">
+      <span class="btn-label">Clear</span>
     </button>
   </div>
 

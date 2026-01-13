@@ -124,6 +124,7 @@ export function installEarlyHooks() {
   Worker.prototype.postMessage = function(message, ...args) {
     if (message && typeof message === 'object') {
       let encoderInfo = null;
+      let isEncodeData = false;
 
       // Pattern 1: Direct format (opus-recorder)
       // { command: 'init', encoderSampleRate: 48000, encoderBitRate: 128000, ... }
@@ -135,7 +136,8 @@ export function installEarlyHooks() {
           channels: message.numberOfChannels || 1,
           application: message.encoderApplication, // 2048=Voice, 2049=FullBand, 2051=LowDelay
           timestamp: Date.now(),
-          pattern: 'direct'
+          pattern: 'direct',
+          status: 'initialized' // NEW: Track init vs active
         };
       }
 
@@ -155,11 +157,19 @@ export function installEarlyHooks() {
           frameSize: config.encoderFrameSize,
           bufferLength: config.bufferLength,
           timestamp: Date.now(),
-          pattern: 'nested'
+          pattern: 'nested',
+          status: 'initialized' // NEW: Track init vs active
         };
       }
 
-      // If encoder detected, store and notify
+      // NEW: Detect actual encode commands (verify encoder is being used)
+      // Pattern: { command: 'encode', ... } or { type: 'message', message: { command: 'encode', ... } }
+      else if (message.command === 'encode' ||
+               (message.type === 'message' && message.message?.command === 'encode')) {
+        isEncodeData = true;
+      }
+
+      // If encoder detected (init), store and notify
       if (encoderInfo) {
         // Store globally for late-discovery
         // @ts-ignore
@@ -174,8 +184,28 @@ export function installEarlyHooks() {
 
         logger.info(
           LOG_PREFIX.INSPECTOR,
-          `🔧 WASM Opus encoder detected (${encoderInfo.pattern}): ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels}ch`
+          `🔧 WASM Opus encoder INITIALIZED (${encoderInfo.pattern}): ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels}ch`
         );
+      }
+
+      // If encode data detected, update status to 'encoding'
+      if (isEncodeData && window.__wasmEncoderDetected) {
+        // @ts-ignore
+        if (window.__wasmEncoderDetected.status !== 'encoding') {
+          // @ts-ignore
+          window.__wasmEncoderDetected.status = 'encoding';
+          // @ts-ignore
+          window.__wasmEncoderDetected.firstEncodeTimestamp = Date.now();
+
+          // Notify handler of status change
+          // @ts-ignore
+          if (window.__wasmEncoderHandler) {
+            // @ts-ignore
+            window.__wasmEncoderHandler(window.__wasmEncoderDetected);
+          }
+
+          logger.info(LOG_PREFIX.INSPECTOR, '🔧 WASM Opus encoder ACTIVELY ENCODING');
+        }
       }
     }
     return originalPostMessage.apply(this, [message, ...args]);

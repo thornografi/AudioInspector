@@ -12,6 +12,9 @@ const DESTINATION_TYPES = {
 };
 const MAX_AUDIO_CONTEXTS = 4;
 
+// Storage keys for collected data (DRY - single source of truth for cleanup)
+const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder'];
+
 // Debug log helper - background.js üzerinden merkezi yönetim (race condition önleme)
 function debugLog(message) {
   const entry = {
@@ -31,19 +34,51 @@ async function updateUI() {
     'rtc_stats',
     'user_media',
     'audio_contexts',
+    'wasm_encoder',
     'media_recorder',
     'debug_logs',
-    'lastUpdate'
+    'lastUpdate',
+    'lockedTab'
   ]);
 
   latestData = result; // Keep a copy for export
 
-  // Render each section with its own data
-  // The render functions are designed to handle null/undefined data gracefully
-  renderRTCStats(result.rtc_stats);
-  renderGUMStats(result.user_media);
-  renderACStats(result.audio_contexts); // Now includes audioWorklets merged in
-  renderMRStats(result.media_recorder);
+  // DEBUG: Log storage data for troubleshooting
+  console.log('=== DEBUG: updateUI ===');
+  console.log('lockedTabId:', result.lockedTab?.id);
+  console.log('audio_contexts raw:', result.audio_contexts);
+  if (result.audio_contexts?.length > 0) {
+    result.audio_contexts.forEach((ctx, i) => {
+      console.log(`  ctx[${i}]:`, {
+        sourceTabId: ctx.sourceTabId,
+        state: ctx.state,
+        baseLatency: ctx.baseLatency,
+        audioWorklets: ctx.audioWorklets,
+        wasmEncoder: ctx.wasmEncoder,
+        destinationType: ctx.destinationType
+      });
+    });
+  }
+
+  // Tab ID validation - only show data from current locked tab
+  const lockedTabId = result.lockedTab?.id;
+  const isValidData = (data) => !data || !lockedTabId || data.sourceTabId === lockedTabId;
+
+  // Filter audio_contexts array by sourceTabId
+  const validAudioContexts = result.audio_contexts?.filter(ctx =>
+    !lockedTabId || ctx.sourceTabId === lockedTabId
+  );
+  console.log('validAudioContexts:', validAudioContexts);
+
+  // Filter wasm_encoder by sourceTabId
+  const validWasmEncoder = isValidData(result.wasm_encoder) ? result.wasm_encoder : null;
+
+  // Render each section with validated data
+  // Data from different tabs is filtered out to prevent stale data display
+  renderRTCStats(isValidData(result.rtc_stats) ? result.rtc_stats : null);
+  renderGUMStats(isValidData(result.user_media) ? result.user_media : null);
+  renderACStats(validAudioContexts?.length > 0 ? validAudioContexts : null, validWasmEncoder);
+  renderMRStats(isValidData(result.media_recorder) ? result.media_recorder : null);
   renderDebugLogs(result.debug_logs);
 }
 
@@ -110,7 +145,7 @@ async function toggleInspector() {
   // Clear data ONLY when starting (not when stopping)
   // This allows users to review collected data after stopping
   if (enabled) {
-    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder']);
+    await chrome.storage.local.remove(DATA_STORAGE_KEYS);
   }
 
   // Update button AND UI to reflect new state
@@ -128,13 +163,13 @@ function updateToggleButton() {
   if (enabled) {
     // Inspector çalışıyor → Stop butonu göster
     btn.innerHTML = '<span>Stop</span>';
-    statusText.textContent = 'Started';
-    body.classList.add('recording');
+    statusText.textContent = 'Monitoring';
+    body.classList.add('monitoring');
   } else {
     // Inspector durmuş → Start butonu göster
     btn.innerHTML = '<span>Start</span>';
     statusText.textContent = 'Stopped';
-    body.classList.remove('recording');
+    body.classList.remove('monitoring');
   }
 
   // Note: Icon is automatically updated by background.js storage listener
@@ -219,7 +254,8 @@ function showAutoStopBanner(reason) {
   if (!banner) return;
 
   const messages = {
-    'origin_change': 'Inspector stopped: Site changed'
+    'origin_change': 'Inspector stopped: Site changed',
+    'injection_failed': 'Injection failed - please reload page'
   };
   banner.textContent = messages[reason] || 'Inspector stopped';
   banner.classList.add('visible');
@@ -419,16 +455,47 @@ function renderGUMStats(data) {
   container.innerHTML = html;
 }
 
-// Determine AudioContext purpose based on features
+// Determine AudioContext purpose based on evidence-based model
+// IMPORTANT: We do NOT show "Recording" label here - that's misleading
+// Recording status is shown ONLY in MediaRecorder section where we have real evidence
+// AudioContext can only show what it's configured for, not what's actually happening
+// Note: WASM encoder is shown as independent signal, not attached to context
+// Tooltip explains the detection is point-in-time, not guaranteed current
 function getContextPurpose(ctx) {
-  if (ctx.hasAnalyser) return { icon: '📊', label: 'VU Meter' };
-  if (ctx.destinationType === DESTINATION_TYPES.MEDIA_STREAM) return { icon: '🎙️', label: 'Recording' };
-  if (ctx.wasmEncoder) return { icon: '🔧', label: 'Encoding' };
-  return { icon: '🔊', label: 'Playback' };
+  // 1. MediaStreamDestination = audio routed to stream (could be WebRTC, MediaRecorder, etc.)
+  // We say "Stream Output" not "Recording" - we don't know the actual usage
+  if (ctx.destinationType === DESTINATION_TYPES.MEDIA_STREAM) {
+    return {
+      icon: '📤',
+      label: 'Stream Output',
+      tooltip: 'MediaStreamDestination created - audio routed to stream'
+    };
+  }
+
+  // 2. Mikrofon bagli (WebRTC, VAD, efekt icin olabilir - Recording DEGIL)
+  if (ctx.hasMediaStreamSource || ctx.inputSource === 'microphone') {
+    return {
+      icon: '🎤',
+      label: 'Mic Input',
+      tooltip: 'MediaStreamSource detected - microphone connected'
+    };
+  }
+
+  // 3. AnalyserNode = VU Meter / visualizer (flag kalici, dikkatli ol)
+  if (ctx.hasAnalyser) {
+    return {
+      icon: '📊',
+      label: 'VU Meter',
+      tooltip: 'AnalyserNode detected - audio visualization'
+    };
+  }
+
+  // 4. Default → Playback
+  return { icon: '🔊', label: 'Playback', tooltip: null };
 }
 
 // Render AudioContext stats - supports multiple contexts
-function renderACStats(contexts) {
+function renderACStats(contexts, wasmEncoderData = null) {
   const container = document.getElementById('acContent');
   const timestamp = document.getElementById('acTimestamp');
 
@@ -456,15 +523,20 @@ function renderACStats(contexts) {
     const latencyMs = ctx.baseLatency ? `${(ctx.baseLatency * 1000).toFixed(1)}ms` : '-';
     const stateClass = ctx.state === 'running' ? 'good' : (ctx.state === 'suspended' ? 'warning' : '');
 
-    // Context header with purpose
+    // Context header with purpose (tooltip if available)
     html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
-    html += `<div class="context-purpose">${purpose.icon} ${purpose.label}</div>`;
+    if (purpose.tooltip) {
+      html += `<div class="context-purpose">${purpose.icon} ${purpose.label} <span class="has-tooltip has-tooltip--info" data-tooltip="${purpose.tooltip}">ⓘ</span></div>`;
+    } else {
+      html += `<div class="context-purpose">${purpose.icon} ${purpose.label}</div>`;
+    }
 
     // Main info
     html += `
       <table class="ac-main-table">
         <tbody>
           <tr><td>Rate</td><td class="metric-value">${ctx.sampleRate || '-'} Hz</td></tr>
+          <tr><td>Channels</td><td class="metric-value">${ctx.channelCount || '-'}</td></tr>
           <tr><td>State</td><td class="${stateClass}"><span class="badge badge-code">${ctx.state || '-'}</span></td></tr>
           <tr><td>Latency</td><td>${latencyMs}</td></tr>
         </tbody>
@@ -474,10 +546,19 @@ function renderACStats(contexts) {
     // Processing Sub-section
     const hasScriptProcessor = ctx.scriptProcessors && ctx.scriptProcessors.length > 0;
     const hasAudioWorklet = ctx.audioWorklets && ctx.audioWorklets.length > 0;
-    const hasWasmEncoder = ctx.wasmEncoder;
+    const hasInputSource = ctx.inputSource || ctx.hasMediaStreamSource;
 
-    if (hasScriptProcessor || hasAudioWorklet || hasWasmEncoder || ctx.destinationType) {
+    if (hasScriptProcessor || hasAudioWorklet || ctx.destinationType || hasInputSource) {
       html += `<div class="processing-section">`;
+
+      // Input Source (microphone)
+      if (hasInputSource) {
+        html += `
+          <div class="processing-item sub-item">
+            <span class="detail-label">Input</span>
+            <span class="detail-value">${ctx.inputSource || 'MediaStream'}</span>
+          </div>`;
+      }
 
       // ScriptProcessor (deprecated)
       if (hasScriptProcessor) {
@@ -499,17 +580,6 @@ function renderACStats(contexts) {
           </div>`;
       }
 
-      // WASM Encoder
-      if (hasWasmEncoder) {
-        const encoder = ctx.wasmEncoder;
-        const bitrateKbps = encoder.bitRate ? `${encoder.bitRate / 1000}kbps` : '?';
-        html += `
-          <div class="processing-item sub-item">
-            <span class="detail-label">Encoder</span>
-            <span class="detail-value">WASM ${encoder.type || 'opus'} (${bitrateKbps})</span>
-          </div>`;
-      }
-
       // Output
       if (ctx.destinationType) {
         html += `
@@ -525,7 +595,58 @@ function renderACStats(contexts) {
     html += `</div>`;
   });
 
+  // WASM Encoder - independent signal (not attached to any specific context)
+  // Uses pre-filtered wasmEncoderData parameter (tab-filtered in updateUI)
+  if (wasmEncoderData) {
+    const wasmEncoder = wasmEncoderData;
+    const bitrateKbps = wasmEncoder.bitRate ? `${wasmEncoder.bitRate / 1000}` : '?';
+    const appNames = { 2048: 'Voice', 2049: 'Audio', 2051: 'LowDelay' };
+    const appName = appNames[wasmEncoder.application] || '';
+
+    // Only Opus WASM encoder is supported (high confidence detection)
+    const codecType = 'OPUS';
+
+    // NEW: Show status (initialized vs encoding) to prevent false positives
+    const status = wasmEncoder.status || 'initialized';
+    const statusClass = status === 'encoding' ? 'good' : 'warning';
+    const statusLabel = status === 'encoding' ? 'Encoding' : 'Initialized';
+    const statusTooltip = status === 'encoding'
+      ? 'Encoder actively processing audio data'
+      : 'Encoder initialized but no data processed yet';
+
+    html += `
+      <div class="encoder-section">
+        <div class="encoder-header">🔧 WASM Encoder</div>
+        <table>
+          <tbody>
+            <tr><td>Codec</td><td class="metric-value">${codecType}</td></tr>
+            <tr><td>Status</td><td class="${statusClass}"><span class="has-tooltip" data-tooltip="${statusTooltip}">${statusLabel}</span></td></tr>
+            <tr><td>Bitrate</td><td class="metric-value">${bitrateKbps} kbps</td></tr>
+            <tr><td>Rate</td><td>${wasmEncoder.sampleRate || '?'} Hz</td></tr>
+            <tr><td>Channels</td><td>${wasmEncoder.channels || 1}${appName ? ` (${appName})` : ''}</td></tr>
+          </tbody>
+        </table>
+      </div>`;
+  }
+
   container.innerHTML = html;
+}
+
+// Get audio source display info
+function getAudioSourceInfo(data) {
+  if (!data.hasAudioTrack) {
+    return { icon: '🔇', label: 'No Audio', class: 'warning' };
+  }
+  switch (data.audioSource) {
+    case 'microphone':
+      return { icon: '🎤', label: 'Microphone', class: 'good' };
+    case 'system':
+      return { icon: '🔊', label: 'System Audio', class: '' };
+    case 'synthesized':
+      return { icon: '🎹', label: 'Synthesized', class: '' };
+    default:
+      return { icon: '❓', label: 'Unknown', class: '' };
+  }
 }
 
 // Render MediaRecorder stats (fixed layout)
@@ -538,6 +659,7 @@ function renderMRStats(data) {
   if (!data) {
     html += `<tr><td>Format</td><td>-</td></tr>`;
     html += `<tr><td>State</td><td>-</td></tr>`;
+    html += `<tr><td>Source</td><td>-</td></tr>`;
     html += `<tr><td>Bitrate</td><td>-</td></tr>`;
     html += `</tbody></table>`;
     container.innerHTML = html;
@@ -554,12 +676,22 @@ function renderMRStats(data) {
   // State with color
   const stateClass = data.state === 'recording' ? 'good' : (data.state === 'paused' ? 'warning' : '');
 
-  // Bitrate if available
-  const bitrateText = data.audioBitsPerSecond ? `${Math.round(data.audioBitsPerSecond / 1000)} kbps` : '-';
+  // Audio source info (NEW: prevents false "recording" assumption)
+  const sourceInfo = getAudioSourceInfo(data);
+
+  // Bitrate if available (note: this is TARGET, not measured)
+  const bitrateText = data.audioBitsPerSecond
+    ? `${Math.round(data.audioBitsPerSecond / 1000)} kbps`
+    : '-';
+  // Add tooltip to clarify it's a target, not measured value
+  const bitrateHtml = data.audioBitsPerSecond
+    ? `<span class="has-tooltip has-tooltip--info" data-tooltip="Target bitrate (not measured)">${bitrateText}</span>`
+    : '-';
 
   html += `<tr><td>Format</td><td class="metric-value">${format}</td></tr>`;
   html += `<tr><td>State</td><td class="${stateClass}"><span class="badge badge-code">${data.state || '-'}</span></td></tr>`;
-  html += `<tr><td>Bitrate</td><td>${bitrateText}</td></tr>`;
+  html += `<tr><td>Source</td><td class="${sourceInfo.class}">${sourceInfo.icon} ${sourceInfo.label}</td></tr>`;
+  html += `<tr><td>Bitrate</td><td>${bitrateHtml}</td></tr>`;
   html += `</tbody></table>`;
   container.innerHTML = html;
 }
@@ -658,7 +790,20 @@ function exportData() {
 
 // Clear data
 async function clearData() {
-  // Clear all storage
+  // First stop inspector if running (prevents collector from refilling data)
+  const result = await chrome.storage.local.get(['inspectorEnabled', 'lockedTab']);
+  if (result.inspectorEnabled && result.lockedTab) {
+    try {
+      await chrome.tabs.sendMessage(result.lockedTab.id, {
+        type: 'SET_ENABLED',
+        enabled: false
+      });
+    } catch (e) {
+      // Tab may be closed, continue with clear
+    }
+  }
+
+  // Then clear all storage
   await chrome.storage.local.clear();
   location.reload();
 }
@@ -738,7 +883,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === 'local') {
     // Only update UI if relevant keys changed
     // Note: audioWorklet data is now merged into audio_contexts
-    const relevantKeys = ['rtc_stats', 'user_media', 'audio_contexts', 'media_recorder'];
+    const relevantKeys = ['rtc_stats', 'user_media', 'audio_contexts', 'media_recorder', 'wasm_encoder'];
     const shouldUpdate = Object.keys(changes).some(key => relevantKeys.includes(key));
 
     if (shouldUpdate) {
@@ -799,7 +944,7 @@ loadEnabledState().then(async () => {
 
   // If inspector is not enabled on initial load, clear any old data
   if (!enabled) {
-    await chrome.storage.local.remove(['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder']);
+    await chrome.storage.local.remove(DATA_STORAGE_KEYS);
   }
   updateUI();
 });
