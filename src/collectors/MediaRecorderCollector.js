@@ -101,7 +101,18 @@ class MediaRecorderCollector extends BaseCollector {
         metadata.events.shift();
       }
       metadata.events.push(eventData);
+
+      // Signal content.js to clear all audio data when a new recording starts
+      if (eventType === 'start') {
+        metadata.resetData = true;
+      }
+
       this.emit(EVENTS.DATA, metadata);  // Emit metadata directly
+
+      // Clear resetData flag after emit to prevent repeated resets
+      if (metadata.resetData) {
+        delete metadata.resetData;
+      }
       
       if (eventType === 'dataavailable') {
         logger.info(this.logPrefix, `MediaRecorder ${eventName}: size=${event.data.size}, type=${event.data.type}`);
@@ -234,6 +245,29 @@ class MediaRecorderCollector extends BaseCollector {
     // Sadece yeni oluşturulan MediaRecorder'ları izle
     // Bu, profil değişikliğinde eski verilerin görünmesini önler
     logger.info(this.logPrefix, 'Started - listening for new MediaRecorder instances only');
+  }
+
+  /**
+   * Re-emit current data from active recorders
+   * Called when UI needs to be refreshed (e.g., after data reset)
+   */
+  reEmit() {
+    if (!this.active) return;
+
+    let emittedCount = 0;
+    for (const [recorder, metadata] of this.activeRecorders.entries()) {
+      // Skip inactive recorders (already stopped)
+      if (recorder.state === 'inactive') continue;
+
+      // Update state before emit
+      metadata.state = recorder.state;
+      this.emit(EVENTS.DATA, metadata);
+      emittedCount++;
+    }
+
+    if (emittedCount > 0) {
+      logger.info(this.logPrefix, `Re-emitted ${emittedCount} recorder(s)`);
+    }
   }
 
   /**

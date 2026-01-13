@@ -139,8 +139,34 @@ this.emit(EVENTS.DATA, {
 ## Lifecycle
 
 ```
-initialize() → start() → [emit('data')] → stop()
+initialize() → start() → [emit('data')] → reEmit() → stop()
 ```
+
+## reEmit() Pattern
+
+Tüm collector'larda UI yenileme için kullanılır (örn: storage reset sonrası yeni kayıt başladığında).
+
+```javascript
+reEmit() {
+  if (!this.active) return;
+
+  let emittedCount = 0;
+  for (const [item, metadata] of this.activeXXX.entries()) {
+    // Skip closed/inactive items
+    if (item.state === 'closed' || item.state === 'inactive') continue;
+
+    metadata.state = item.state;
+    this.emit(EVENTS.DATA, metadata);
+    emittedCount++;
+  }
+
+  if (emittedCount > 0) {
+    logger.info(this.logPrefix, `Re-emitted ${emittedCount} item(s)`);
+  }
+}
+```
+
+**Tetikleyici:** `RE_EMIT_ALL` mesajı (content.js → page.js)
 
 ## Early Hook System
 

@@ -135,6 +135,7 @@ popup.js reads → displays UI
 
 **content.js → page.js** (State restoration)
 - `SET_ENABLED` - Restore inspector state after INSPECTOR_READY signal (tab ID + origin kontrolü ile)
+- `RE_EMIT_ALL` - Signal collectors to re-emit current data (after storage reset on new recording)
 
 ## Skill Routing
 

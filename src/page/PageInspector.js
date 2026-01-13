@@ -173,7 +173,26 @@ class PageInspector {
             logger.setEnabled(false); // Disable logging AFTER stopped message
         }
       }
+
+      // Handle RE_EMIT_ALL signal (triggered when new recording starts)
+      if (event.data.type === 'RE_EMIT_ALL') {
+        logger.info(LOG_PREFIX.INSPECTOR, '🔄 RE_EMIT_ALL received - re-emitting all collector data');
+        this._reEmitAllCollectors();
+      }
     });
+  }
+
+  /**
+   * Re-emit current data from all collectors
+   * Called when a new recording starts to restore UI state after reset
+   * @private
+   */
+  _reEmitAllCollectors() {
+    for (const collector of this.collectors) {
+      if (typeof collector.reEmit === 'function') {
+        collector.reEmit();
+      }
+    }
   }
 
   /**

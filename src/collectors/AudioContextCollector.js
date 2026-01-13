@@ -232,7 +232,7 @@ class AudioContextCollector extends BaseCollector {
             ctxData.scriptProcessors = [spData];
             // Re-emit updated context data
             this.emit(EVENTS.DATA, ctxData);
-            logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch`);
+            logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch (context: ${ctxData.contextId})`);
           }
       } else {
            // Context gerçekten null veya undefined (iframe/cross-origin)
@@ -344,7 +344,7 @@ class AudioContextCollector extends BaseCollector {
               ctxData.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
               // Re-emit updated context data
               this.emit(EVENTS.DATA, ctxData);
-              logger.info(this.logPrefix, 'MediaStreamDestination created - audio routed to stream');
+              logger.info(this.logPrefix, `MediaStreamDestination created - audio routed to stream (context: ${ctxData.contextId})`);
           }
       } else {
           logger.warn(this.logPrefix, `MediaStreamDestination created but context is ${ctx === null ? 'null' : 'undefined'}`);
@@ -526,6 +526,31 @@ class AudioContextCollector extends BaseCollector {
     }
 
     logger.info(this.logPrefix, 'Started - ready to capture new audio activity');
+  }
+
+  /**
+   * Re-emit current data from active contexts
+   * Called when UI needs to be refreshed (e.g., after data reset)
+   */
+  reEmit() {
+    if (!this.active) return;
+
+    let emittedCount = 0;
+    for (const [ctx, metadata] of this.activeContexts.entries()) {
+      // Skip and clean up closed contexts
+      if (ctx.state === 'closed') {
+        this.activeContexts.delete(ctx);
+        continue;
+      }
+      // Update state in case it changed
+      metadata.state = ctx.state;
+      this.emit(EVENTS.DATA, metadata);
+      emittedCount++;
+    }
+
+    if (emittedCount > 0) {
+      logger.info(this.logPrefix, `Re-emitted ${emittedCount} AudioContext(s)`);
+    }
   }
 
   /**

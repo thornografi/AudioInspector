@@ -46,6 +46,26 @@ await chrome.scripting.executeScript({
   chrome.storage.local.get() → UI
 ```
 
+### Data Reset Flow (MediaRecorder.start())
+
+Yeni kayıt başladığında tüm veriler temizlenip yeniden emit edilir:
+
+```
+MediaRecorder.start() → resetData=true
+         ↓
+content.js: storage.remove(DATA_STORAGE_KEYS)
+         ↓
+content.js: storage.set(media_recorder)
+         ↓
+content.js → page.js: RE_EMIT_ALL
+         ↓
+PageInspector._reEmitAllCollectors()
+         ↓
+Collectors.reEmit() → storage.set()
+         ↓
+popup.js: storage.onChanged → updateUI()
+```
+
 ## Tab Kilitleme
 
 Inspector başlatıldığında sadece o tab'da çalışır.

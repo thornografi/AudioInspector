@@ -75,10 +75,14 @@ async function updateUI() {
 
   // Render each section with validated data
   // Data from different tabs is filtered out to prevent stale data display
-  renderRTCStats(isValidData(result.rtc_stats) ? result.rtc_stats : null);
+  const validRtcStats = isValidData(result.rtc_stats) ? result.rtc_stats : null;
+  const validMediaRecorder = isValidData(result.media_recorder) ? result.media_recorder : null;
+
+  renderRTCStats(validRtcStats);
   renderGUMStats(isValidData(result.user_media) ? result.user_media : null);
-  renderACStats(validAudioContexts?.length > 0 ? validAudioContexts : null, validWasmEncoder);
-  renderMRStats(isValidData(result.media_recorder) ? result.media_recorder : null);
+  renderACStats(validAudioContexts?.length > 0 ? validAudioContexts : null);
+  renderMRStats(validMediaRecorder);
+  renderEncodingSection(validWasmEncoder, validRtcStats, validMediaRecorder);
   renderDebugLogs(result.debug_logs);
 }
 
@@ -462,22 +466,21 @@ function renderGUMStats(data) {
 // Note: WASM encoder is shown as independent signal, not attached to context
 // Tooltip explains the detection is point-in-time, not guaranteed current
 function getContextPurpose(ctx) {
-  // 1. MediaStreamDestination = audio routed to stream (could be WebRTC, MediaRecorder, etc.)
-  // We say "Stream Output" not "Recording" - we don't know the actual usage
-  if (ctx.destinationType === DESTINATION_TYPES.MEDIA_STREAM) {
-    return {
-      icon: '📤',
-      label: 'Stream Output',
-      tooltip: 'MediaStreamDestination created - audio routed to stream'
-    };
-  }
-
-  // 2. Mikrofon bagli (WebRTC, VAD, efekt icin olabilir - Recording DEGIL)
+  // 1. Mikrofon bagli - INPUT SOURCE öncelikli (asıl amaç: kayıt)
   if (ctx.hasMediaStreamSource || ctx.inputSource === 'microphone') {
     return {
       icon: '🎤',
       label: 'Mic Input',
       tooltip: 'MediaStreamSource detected - microphone connected'
+    };
+  }
+
+  // 2. MediaStreamDestination = audio routed to stream (no mic input)
+  if (ctx.destinationType === DESTINATION_TYPES.MEDIA_STREAM) {
+    return {
+      icon: '📤',
+      label: 'Stream Output',
+      tooltip: 'MediaStreamDestination created - audio routed to stream'
     };
   }
 
@@ -490,12 +493,12 @@ function getContextPurpose(ctx) {
     };
   }
 
-  // 4. Default → Playback
-  return { icon: '🔊', label: 'Playback', tooltip: null };
+  // 4. Default → Other (lowest priority - no specific input/output detected)
+  return { icon: '🔉', label: 'Other', tooltip: 'No microphone, MediaStream or VU meter detected' };
 }
 
 // Render AudioContext stats - supports multiple contexts
-function renderACStats(contexts, wasmEncoderData = null) {
+function renderACStats(contexts) {
   const container = document.getElementById('acContent');
   const timestamp = document.getElementById('acTimestamp');
 
@@ -539,6 +542,7 @@ function renderACStats(contexts, wasmEncoderData = null) {
           <tr><td>Channels</td><td class="metric-value">${ctx.channelCount || '-'}</td></tr>
           <tr><td>State</td><td class="${stateClass}"><span class="badge badge-code">${ctx.state || '-'}</span></td></tr>
           <tr><td>Latency</td><td>${latencyMs}</td></tr>
+          <tr><td>Output</td><td>${ctx.destinationType || 'Speakers'}</td></tr>
         </tbody>
       </table>
     `;
@@ -548,7 +552,7 @@ function renderACStats(contexts, wasmEncoderData = null) {
     const hasAudioWorklet = ctx.audioWorklets && ctx.audioWorklets.length > 0;
     const hasInputSource = ctx.inputSource || ctx.hasMediaStreamSource;
 
-    if (hasScriptProcessor || hasAudioWorklet || ctx.destinationType || hasInputSource) {
+    if (hasScriptProcessor || hasAudioWorklet || hasInputSource) {
       html += `<div class="processing-section">`;
 
       // Input Source (microphone)
@@ -580,56 +584,50 @@ function renderACStats(contexts, wasmEncoderData = null) {
           </div>`;
       }
 
-      // Output
-      if (ctx.destinationType) {
-        html += `
-          <div class="processing-item sub-item">
-            <span class="detail-label">Output</span>
-            <span class="detail-value">${escapeHtml(ctx.destinationType)}</span>
-          </div>`;
-      }
-
       html += `</div>`;
     }
 
     html += `</div>`;
   });
 
-  // WASM Encoder - independent signal (not attached to any specific context)
-  // Uses pre-filtered wasmEncoderData parameter (tab-filtered in updateUI)
-  if (wasmEncoderData) {
-    const wasmEncoder = wasmEncoderData;
+  container.innerHTML = html;
+}
+
+// Render Encoding section - combines all encoder sources
+function renderEncodingSection(wasmEncoder, rtcStats, mediaRecorder) {
+  const container = document.getElementById('encodingContent');
+  if (!container) return;
+
+  const items = [];
+
+  // 1. WASM Encoder (from AudioContext)
+  if (wasmEncoder) {
     const bitrateKbps = wasmEncoder.bitRate ? `${wasmEncoder.bitRate / 1000}` : '?';
-    const appNames = { 2048: 'Voice', 2049: 'Audio', 2051: 'LowDelay' };
-    const appName = appNames[wasmEncoder.application] || '';
-
-    // Only Opus WASM encoder is supported (high confidence detection)
-    const codecType = 'OPUS';
-
-    // NEW: Show status (initialized vs encoding) to prevent false positives
-    const status = wasmEncoder.status || 'initialized';
-    const statusClass = status === 'encoding' ? 'good' : 'warning';
-    const statusLabel = status === 'encoding' ? 'Encoding' : 'Initialized';
-    const statusTooltip = status === 'encoding'
-      ? 'Encoder actively processing audio data'
-      : 'Encoder initialized but no data processed yet';
-
-    html += `
-      <div class="encoder-section">
-        <div class="encoder-header">🔧 WASM Encoder</div>
-        <table>
-          <tbody>
-            <tr><td>Codec</td><td class="metric-value">${codecType}</td></tr>
-            <tr><td>Status</td><td class="${statusClass}"><span class="has-tooltip" data-tooltip="${statusTooltip}">${statusLabel}</span></td></tr>
-            <tr><td>Bitrate</td><td class="metric-value">${bitrateKbps} kbps</td></tr>
-            <tr><td>Rate</td><td>${wasmEncoder.sampleRate || '?'} Hz</td></tr>
-            <tr><td>Channels</td><td>${wasmEncoder.channels || 1}${appName ? ` (${appName})` : ''}</td></tr>
-          </tbody>
-        </table>
-      </div>`;
+    const sampleRateKhz = wasmEncoder.sampleRate ? `${wasmEncoder.sampleRate / 1000}k` : '?';
+    items.push(`<tr><td>WASM</td><td class="metric-value">OPUS @ ${bitrateKbps}kbps, ${sampleRateKhz}Hz</td></tr>`);
   }
 
-  container.innerHTML = html;
+  // 2. WebRTC Codec (outgoing)
+  if (rtcStats?.send?.codec) {
+    const codec = rtcStats.send.codec.split('/')[1] || rtcStats.send.codec;
+    const bitrate = rtcStats.send.bitrateKbps ? `${rtcStats.send.bitrateKbps}kbps` : '';
+    items.push(`<tr><td>WebRTC</td><td class="metric-value">${codec}${bitrate ? ' @ ' + bitrate : ''}</td></tr>`);
+  }
+
+  // 3. MediaRecorder Format
+  if (mediaRecorder?.mimeType) {
+    const codec = mediaRecorder.parsedMimeType?.codec || mediaRecorder.mimeType.split('codecs=')[1]?.replace(/['"]/g, '') || '';
+    const container_fmt = mediaRecorder.parsedMimeType?.container || '';
+    const format = container_fmt ? `${codec}/${container_fmt}` : (codec || mediaRecorder.mimeType);
+    items.push(`<tr><td>Recorder</td><td class="metric-value">${format}</td></tr>`);
+  }
+
+  // Render
+  if (items.length === 0) {
+    container.innerHTML = '<div class="no-data">No encoder</div>';
+  } else {
+    container.innerHTML = `<table><tbody>${items.join('')}</tbody></table>`;
+  }
 }
 
 // Get audio source display info

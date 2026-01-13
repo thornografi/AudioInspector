@@ -91,6 +91,21 @@ class RTCPeerConnectionCollector extends PollingCollector {
   }
 
   /**
+   * Re-emit current data from active peer connections
+   * Called when UI needs to be refreshed (e.g., after data reset)
+   */
+  reEmit() {
+    if (!this.active) return;
+
+    // Use existing collectData method which emits current stats
+    this.collectData().then(() => {
+      if (this.peerConnections.size > 0) {
+        logger.info(this.logPrefix, `Re-emitted ${this.peerConnections.size} PeerConnection(s)`);
+      }
+    });
+  }
+
+  /**
    * Stop collecting stats and cleanup
    * @returns {Promise<void>}
    */

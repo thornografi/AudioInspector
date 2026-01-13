@@ -254,20 +254,29 @@
       min-height: 0; /* Grid/flex içinde scroll çalışması için gerekli */
     }
 
-    .card-content::-webkit-scrollbar {
+    /* Unified scrollbar styles */
+    .card-content::-webkit-scrollbar,
+    .rtc-column::-webkit-scrollbar,
+    #debugContent::-webkit-scrollbar {
       width: 6px;
     }
 
-    .card-content::-webkit-scrollbar-track {
+    .card-content::-webkit-scrollbar-track,
+    .rtc-column::-webkit-scrollbar-track,
+    #debugContent::-webkit-scrollbar-track {
       background: transparent;
     }
 
-    .card-content::-webkit-scrollbar-thumb {
+    .card-content::-webkit-scrollbar-thumb,
+    .rtc-column::-webkit-scrollbar-thumb,
+    #debugContent::-webkit-scrollbar-thumb {
       background: var(--border-primary);
       border-radius: 3px;
     }
 
-    .card-content::-webkit-scrollbar-thumb:hover {
+    .card-content::-webkit-scrollbar-thumb:hover,
+    .rtc-column::-webkit-scrollbar-thumb:hover,
+    #debugContent::-webkit-scrollbar-thumb:hover {
       background: var(--text-muted);
     }
 
@@ -304,23 +313,6 @@
 
     .rtc-column:last-child {
       padding-right: 0;
-    }
-
-    .rtc-column::-webkit-scrollbar {
-      width: 6px;
-    }
-
-    .rtc-column::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    .rtc-column::-webkit-scrollbar-thumb {
-      background: var(--border-primary);
-      border-radius: 3px;
-    }
-
-    .rtc-column::-webkit-scrollbar-thumb:hover {
-      background: var(--text-muted);
     }
 
     .rtc-column-header {
@@ -426,23 +418,6 @@
       padding-right: 4px;
     }
 
-    #debugContent::-webkit-scrollbar {
-      width: 6px;
-    }
-
-    #debugContent::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    #debugContent::-webkit-scrollbar-thumb {
-      background: var(--border-primary);
-      border-radius: 3px;
-    }
-
-    #debugContent::-webkit-scrollbar-thumb:hover {
-      background: var(--text-muted);
-    }
-
     .log-line {
       padding: 3px 0;
       display: flex;
@@ -502,22 +477,17 @@
       margin-top: 8px;
     }
 
-    /* WASM Encoder - independent section */
-    .encoder-section {
-      margin-top: 12px;
-      padding-top: 10px;
-      border-top: 1px solid var(--accent-purple);
+    /* Encoding subsection */
+    .card-subsection {
+      border-top: 1px solid var(--border-subtle);
     }
-
-    .encoder-header {
-      font-size: 11px;
+    .subsection-header {
+      font-size: 10px;
       font-weight: 600;
-      color: var(--accent-purple);
-      margin-bottom: 6px;
-    }
-
-    .encoder-section table {
-      width: 100%;
+      color: var(--text-secondary);
+      padding: 6px 10px 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
     .context-purpose {
@@ -877,6 +847,13 @@
         </div>
         <div class="card-content" id="gumContent">
           <div class="no-data">No stream</div>
+        </div>
+        <!-- Encoding alt bölümü -->
+        <div class="card-subsection">
+          <div class="subsection-header">ENCODING</div>
+          <div class="card-content" id="encodingContent">
+            <div class="no-data">No encoder</div>
+          </div>
         </div>
       </div>
       <div class="card" id="acSection">

@@ -101,6 +101,24 @@ class GetUserMediaCollector extends BaseCollector {
   }
 
   /**
+   * Re-emit current data from active streams
+   * Called when UI needs to be refreshed (e.g., after data reset)
+   */
+  reEmit() {
+    if (!this.active) return;
+
+    let emittedCount = 0;
+    for (const [streamId, metadata] of this.activeStreams.entries()) {
+      this.emit(EVENTS.DATA, metadata);
+      emittedCount++;
+    }
+
+    if (emittedCount > 0) {
+      logger.info(this.logPrefix, `Re-emitted ${emittedCount} stream(s)`);
+    }
+  }
+
+  /**
    * Stop collector and cleanup
    * @returns {Promise<void>}
    */

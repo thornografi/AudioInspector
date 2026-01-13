@@ -317,15 +317,35 @@ window.addEventListener('message', (event) => {
     if (!result) return; // Handler handled it internally (like LOG_ENTRY)
 
     const { key, logMsg, logData } = result;
-    const dataToStore = {
+
+    // Helper to create storage data object (DRY)
+    const createDataToStore = () => ({
       [key]: { ...payload, sourceTabId: currentTabId },
       lastUpdate: Date.now()
-    };
+    });
 
-    // Log data being stored
+    // Check if new recording started - clear all audio data first
+    if (payload.resetData) {
+      chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+        logContent('🧹 New recording started - cleared all audio data');
+
+        logContent(logMsg, logData || payload);
+        chrome.storage.local.set(createDataToStore());
+
+        // Signal collectors to re-emit their current data
+        window.postMessage({
+          __audioPipelineInspector: true,
+          type: 'RE_EMIT_ALL'
+        }, '*');
+        logContent('📤 Sent RE_EMIT_ALL signal to collectors');
+      });
+      return; // Early return - async callback handles the rest
+    }
+
+    // Normal flow (no reset needed)
     logContent(logMsg, logData || payload);
 
-    chrome.storage.local.set(dataToStore, () => {
+    chrome.storage.local.set(createDataToStore(), () => {
       if (chrome.runtime.lastError) {
         logContent('❌ Error storing data:', chrome.runtime.lastError);
       }
