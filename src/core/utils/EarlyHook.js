@@ -169,27 +169,29 @@ export function installEarlyHooks() {
         isEncodeData = true;
       }
 
-      // If encoder detected (init), store and notify
+      // If encoder detected (init), notify handler if active
+      // IMPORTANT: Only store globally if handler is registered (collector is active)
+      // This prevents stale encoder data from appearing after inspector restart
       if (encoderInfo) {
-        // Store globally for late-discovery
-        // @ts-ignore
-        window.__wasmEncoderDetected = encoderInfo;
-
-        // Notify handler if registered
-        // @ts-ignore
+        // @ts-ignore - Only notify if handler is registered (collector active)
         if (window.__wasmEncoderHandler) {
+          // Store globally for late-discovery ONLY when collector is active
+          // @ts-ignore
+          window.__wasmEncoderDetected = encoderInfo;
           // @ts-ignore
           window.__wasmEncoderHandler(encoderInfo);
-        }
 
-        logger.info(
-          LOG_PREFIX.INSPECTOR,
-          `🔧 WASM Opus encoder INITIALIZED (${encoderInfo.pattern}): ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels}ch`
-        );
+          logger.info(
+            LOG_PREFIX.INSPECTOR,
+            `🔧 WASM Opus encoder INITIALIZED (${encoderInfo.pattern}): ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels}ch`
+          );
+        }
+        // If handler not registered, don't store - this is likely during inspector stopped state
       }
 
       // If encode data detected, update status to 'encoding'
-      if (isEncodeData && window.__wasmEncoderDetected) {
+      // @ts-ignore - Only process if handler is active and encoder was detected
+      if (isEncodeData && window.__wasmEncoderDetected && window.__wasmEncoderHandler) {
         // @ts-ignore
         if (window.__wasmEncoderDetected.status !== 'encoding') {
           // @ts-ignore
@@ -199,10 +201,7 @@ export function installEarlyHooks() {
 
           // Notify handler of status change
           // @ts-ignore
-          if (window.__wasmEncoderHandler) {
-            // @ts-ignore
-            window.__wasmEncoderHandler(window.__wasmEncoderDetected);
-          }
+          window.__wasmEncoderHandler(window.__wasmEncoderDetected);
 
           logger.info(LOG_PREFIX.INSPECTOR, '🔧 WASM Opus encoder ACTIVELY ENCODING');
         }
@@ -212,7 +211,93 @@ export function installEarlyHooks() {
   };
   logger.info(LOG_PREFIX.INSPECTOR, '✅ Hooked Worker.postMessage for WASM encoder detection');
 
+  // Install method hooks for AudioContext pipeline capture
+  installMethodHooks();
+
   logger.info(LOG_PREFIX.INSPECTOR, '✅ Early hooks installed successfully');
+}
+
+/**
+ * Method hook configurations - OCP: Add new hooks here without modifying factory
+ * @type {Array<{methodName: string, registryKey: string, extractMetadata: Function, getLogMessage: Function}>}
+ */
+const METHOD_HOOK_CONFIGS = [
+  {
+    methodName: 'createScriptProcessor',
+    registryKey: 'scriptProcessor',
+    extractMetadata: (args) => ({
+      bufferSize: args[0],
+      inputChannels: args[1],
+      outputChannels: args[2],
+      timestamp: Date.now()
+    }),
+    getLogMessage: (args) => `📡 Early hook: createScriptProcessor(${args[0]}) captured`
+  },
+  {
+    methodName: 'createAnalyser',
+    registryKey: 'analyser',
+    extractMetadata: () => ({ timestamp: Date.now() }),
+    getLogMessage: () => '📡 Early hook: createAnalyser() captured'
+  },
+  {
+    methodName: 'createMediaStreamSource',
+    registryKey: 'mediaStreamSource',
+    extractMetadata: (args) => ({
+      streamId: args[0]?.id,
+      timestamp: Date.now()
+    }),
+    getLogMessage: (args) => `📡 Early hook: createMediaStreamSource(${args[0]?.id}) captured`
+  },
+  {
+    methodName: 'createMediaStreamDestination',
+    registryKey: 'mediaStreamDestination',
+    extractMetadata: () => ({ timestamp: Date.now() }),
+    getLogMessage: () => '📡 Early hook: createMediaStreamDestination() captured'
+  }
+];
+
+/**
+ * Factory function to create method hooks - DRY pattern
+ * @param {Object} proto - Prototype to hook (AudioContext.prototype or webkitAudioContext.prototype)
+ * @param {Object} config - Hook configuration
+ * @param {string} protoName - Name for logging (e.g., 'AudioContext', 'webkitAudioContext')
+ */
+function createMethodHook(proto, config, protoName) {
+  const { methodName, registryKey, extractMetadata, getLogMessage } = config;
+
+  if (!proto[methodName]) return;
+
+  const original = proto[methodName];
+  proto[methodName] = function(...args) {
+    const node = original.apply(this, args);
+    const entry = instanceRegistry.audioContexts.find(e => e.instance === this);
+    if (entry) {
+      entry.methodCalls = entry.methodCalls || {};
+      entry.methodCalls[registryKey] = extractMetadata(args);
+      logger.info(LOG_PREFIX.INSPECTOR, getLogMessage(args));
+    }
+    return node;
+  };
+  logger.info(LOG_PREFIX.INSPECTOR, `✅ Hooked ${protoName}.prototype.${methodName}`);
+}
+
+/**
+ * Install method hooks for AudioContext to capture pipeline info
+ * These hooks save method calls to registry (not emit) so they can be synced on start()
+ */
+function installMethodHooks() {
+  // @ts-ignore - webkit fallback
+  const prototypes = [
+    { proto: AudioContext.prototype, name: 'AudioContext' },
+    { proto: window.webkitAudioContext?.prototype, name: 'webkitAudioContext' }
+  ].filter(p => p.proto);
+
+  // Apply all hooks to all prototypes (DRY + webkit support)
+  for (const { proto, name } of prototypes) {
+    METHOD_HOOK_CONFIGS.forEach(config => createMethodHook(proto, config, name));
+  }
+
+  logger.info(LOG_PREFIX.INSPECTOR, `✅ Method hooks installed on ${prototypes.length} prototype(s)`);
 }
 
 /**
@@ -243,4 +328,21 @@ export function clearRegistryKey(key) {
     instanceRegistry[key] = [];
     logger.info(LOG_PREFIX.INSPECTOR, `Registry key '${key}' cleared`);
   }
+}
+
+/**
+ * Remove closed AudioContexts from the registry
+ * Prevents memory leaks and stale data accumulation
+ * @returns {number} Number of closed contexts removed
+ */
+export function cleanupClosedAudioContexts() {
+  const before = instanceRegistry.audioContexts.length;
+  instanceRegistry.audioContexts = instanceRegistry.audioContexts.filter(
+    entry => entry.instance.state !== 'closed'
+  );
+  const removed = before - instanceRegistry.audioContexts.length;
+  if (removed > 0) {
+    logger.info(LOG_PREFIX.INSPECTOR, `Cleaned up ${removed} closed AudioContext(s) from registry`);
+  }
+  return removed;
 }

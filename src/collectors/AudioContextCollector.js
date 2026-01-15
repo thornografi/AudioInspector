@@ -1,10 +1,40 @@
 // @ts-check
 
 import BaseCollector from './BaseCollector.js';
-import { EVENTS, DATA_TYPES, DESTINATION_TYPES } from '../core/constants.js';
+import { EVENTS, DATA_TYPES, DESTINATION_TYPES, streamRegistry } from '../core/constants.js';
 import { logger } from '../core/Logger.js';
 import { hookAsyncMethod, hookMethod } from '../core/utils/ApiHook.js';
-import { getInstanceRegistry } from '../core/utils/EarlyHook.js';
+import { getInstanceRegistry, cleanupClosedAudioContexts } from '../core/utils/EarlyHook.js';
+
+/**
+ * Sync handlers for methodCalls - OCP: Add new handlers without modifying sync loop
+ * Maps registry keys to pipeline sync functions
+ * @type {Object<string, Function>}
+ */
+const METHOD_CALL_SYNC_HANDLERS = {
+  scriptProcessor: (data, pipeline) => {
+    pipeline.processors.push({
+      type: 'scriptProcessor',
+      bufferSize: data.bufferSize,
+      inputChannels: data.inputChannels,
+      outputChannels: data.outputChannels,
+      timestamp: data.timestamp
+    });
+  },
+  analyser: (data, pipeline) => {
+    pipeline.processors.push({
+      type: 'analyser',
+      timestamp: data.timestamp
+    });
+  },
+  mediaStreamSource: (data, pipeline) => {
+    // TODO: Determine from streamId using streamRegistry
+    pipeline.inputSource = 'microphone';
+  },
+  mediaStreamDestination: (data, pipeline) => {
+    pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+  }
+};
 
 /**
  * Collects AudioContext stats (sample rate, latency).
@@ -13,9 +43,6 @@ import { getInstanceRegistry } from '../core/utils/EarlyHook.js';
 class AudioContextCollector extends BaseCollector {
   constructor(options = {}) {
     super('audio-context', options);
-
-    /** @type {Function|null} */
-    this.originalAudioContext = null;
 
     /** @type {Map<any, Object>} */
     this.activeContexts = new Map();
@@ -156,19 +183,26 @@ class AudioContextCollector extends BaseCollector {
       this.contextIdCounter++;
       const contextId = `ctx_${this.contextIdCounter}`;
 
+      const now = Date.now();
       const metadata = {
         type: DATA_TYPES.AUDIO_CONTEXT,
         contextId,
-        timestamp: Date.now(),
-        sampleRate: ctx.sampleRate,
-        channelCount: ctx.destination.maxChannelCount,
-        baseLatency: ctx.baseLatency,
-        outputLatency: ctx.outputLatency,
-        state: ctx.state,
-        scriptProcessors: [],
-        audioWorklets: [],
-        hasAnalyser: false,
-        destinationType: DESTINATION_TYPES.SPEAKERS  // Default - ctx.destination
+        // Statik özellikler - context oluşturulduğunda belirlenir
+        static: {
+          timestamp: now,
+          sampleRate: ctx.sampleRate,
+          channelCount: ctx.destination.maxChannelCount,
+          baseLatency: ctx.baseLatency,
+          outputLatency: ctx.outputLatency,
+          state: ctx.state
+        },
+        // Audio pipeline - dinamik olarak güncellenir
+        pipeline: {
+          timestamp: now,
+          inputSource: null,
+          processors: [],
+          destinationType: DESTINATION_TYPES.SPEAKERS  // Default - ctx.destination
+        }
       };
 
       this.activeContexts.set(ctx, metadata);
@@ -228,8 +262,21 @@ class AudioContextCollector extends BaseCollector {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
             // Single active processor - replace instead of accumulate
-            // (eski processor disconnect olduğunda collector'dan silinmiyor, bu yüzden sadece son processor'ı tutuyoruz)
-            ctxData.scriptProcessors = [spData];
+            const processorEntry = {
+              type: 'scriptProcessor',
+              bufferSize: spData.bufferSize,
+              inputChannels: spData.inputChannels,
+              outputChannels: spData.outputChannels,
+              timestamp: spData.timestamp
+            };
+            // Mevcut scriptProcessor varsa güncelle, yoksa ekle
+            const existingIdx = ctxData.pipeline.processors.findIndex(p => p.type === 'scriptProcessor');
+            if (existingIdx >= 0) {
+              ctxData.pipeline.processors[existingIdx] = processorEntry;
+            } else {
+              ctxData.pipeline.processors.push(processorEntry);
+            }
+            ctxData.pipeline.timestamp = Date.now();
             // Re-emit updated context data
             this.emit(EVENTS.DATA, ctxData);
             logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch (context: ${ctxData.contextId})`);
@@ -238,14 +285,31 @@ class AudioContextCollector extends BaseCollector {
            // Context gerçekten null veya undefined (iframe/cross-origin)
            logger.warn(this.logPrefix, `ScriptProcessor created but context is ${ctx === null ? 'null' : 'undefined'}`);
 
-           // Emit as orphan data
+           // Emit as orphan data (yeni yapıda)
+           const now = Date.now();
            this.emit(EVENTS.DATA, {
                type: DATA_TYPES.AUDIO_CONTEXT,
-               timestamp: Date.now(),
-               state: 'unknown',
-               sampleRate: 0,
-               scriptProcessors: [spData],
-               audioWorklets: [],
+               contextId: 'orphan',
+               static: {
+                 timestamp: now,
+                 sampleRate: 0,
+                 channelCount: 0,
+                 baseLatency: 0,
+                 outputLatency: 0,
+                 state: 'unknown'
+               },
+               pipeline: {
+                 timestamp: now,
+                 inputSource: null,
+                 processors: [{
+                   type: 'scriptProcessor',
+                   bufferSize: spData.bufferSize,
+                   inputChannels: spData.inputChannels,
+                   outputChannels: spData.outputChannels,
+                   timestamp: spData.timestamp
+                 }],
+                 destinationType: DESTINATION_TYPES.SPEAKERS
+               },
                isOrphan: true
            });
       }
@@ -289,20 +353,34 @@ class AudioContextCollector extends BaseCollector {
       }
 
       if (matchedContextData) {
-          // Add worklet to matched context's audioWorklets array
-          if (!matchedContextData.audioWorklets) {
-              matchedContextData.audioWorklets = [];
-          }
-          matchedContextData.audioWorklets.push(workletData);
+          // Add worklet to pipeline.processors array
+          const processorEntry = {
+            type: 'audioWorklet',
+            moduleUrl: workletData.url,
+            timestamp: workletData.timestamp
+          };
+          matchedContextData.pipeline.processors.push(processorEntry);
+          matchedContextData.pipeline.timestamp = Date.now();
 
-          // If encoder pattern detected, mark as WASM encoder
+          // If encoder pattern detected, emit to canonical wasm_encoder storage
           if (isEncoder) {
-              matchedContextData.wasmEncoder = {
-                  type: 'opus',
-                  source: 'audioworklet',
+              // Emit to canonical wasm_encoder storage (not attached to audioContext)
+              this.emit(EVENTS.DATA, {
+                  type: DATA_TYPES.WASM_ENCODER,
+                  timestamp: Date.now(),
+                  codec: 'opus',
+                  source: 'audioworklet',  // URL pattern detection
                   moduleUrl: moduleUrl,
-                  timestamp: Date.now()
-              };
+                  linkedContextId: matchedContextId,  // Context bağlantısı
+                  // URL pattern'den bitRate/channels alınamaz
+                  sampleRate: matchedContextData.static?.sampleRate || null,
+                  bitRate: null,
+                  channels: null
+              });
+
+              // Context'e sadece referans ekle (optional - UI enhancement için)
+              matchedContextData.wasmEncoder = { ref: true };
+
               logger.info(this.logPrefix, `🔧 WASM Encoder detected via AudioWorklet: ${moduleUrl}`);
           }
 
@@ -340,8 +418,9 @@ class AudioContextCollector extends BaseCollector {
       if (this.activeContexts.has(ctx)) {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
-              // @ts-ignore - sadece gerçeği söyle, varsayım yapma
-              ctxData.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+              // @ts-ignore - pipeline.destinationType güncelle
+              ctxData.pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+              ctxData.pipeline.timestamp = Date.now();
               // Re-emit updated context data
               this.emit(EVENTS.DATA, ctxData);
               logger.info(this.logPrefix, `MediaStreamDestination created - audio routed to stream (context: ${ctxData.contextId})`);
@@ -365,7 +444,14 @@ class AudioContextCollector extends BaseCollector {
       if (this.activeContexts.has(ctx)) {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
-              ctxData.hasAnalyser = true;
+              // Analyser'ı processor olarak ekle (duplicate check)
+              if (!ctxData.pipeline.processors.some(p => p.type === 'analyser')) {
+                ctxData.pipeline.processors.push({
+                  type: 'analyser',
+                  timestamp: Date.now()
+                });
+                ctxData.pipeline.timestamp = Date.now();
+              }
               // Re-emit updated context data
               this.emit(EVENTS.DATA, ctxData);
               logger.info(this.logPrefix, `AnalyserNode created - VU meter/visualizer detected (context: ${ctxData.contextId})`);
@@ -376,12 +462,14 @@ class AudioContextCollector extends BaseCollector {
   }
 
   /**
-   * Handle createMediaStreamSource calls - indicates microphone input connected to AudioContext
+   * Handle createMediaStreamSource calls - indicates audio input connected to AudioContext
+   * Uses streamRegistry to determine if source is microphone (outgoing) or remote (incoming)
    * @private
    * @param {MediaStreamAudioSourceNode} node
    * @param {any[]} args - First argument is the MediaStream
    */
   _handleMediaStreamSource(node, args) {
+      const stream = args[0];
       const ctx = node.context;
 
       // Late-discovery: register context if not already known
@@ -390,11 +478,27 @@ class AudioContextCollector extends BaseCollector {
       if (this.activeContexts.has(ctx)) {
           const ctxData = this.activeContexts.get(ctx);
           if (ctxData) {
-              ctxData.hasMediaStreamSource = true;
-              ctxData.inputSource = 'microphone';
+              // Determine stream source using registry
+              let inputSource = 'unknown';
+              if (stream && stream.id) {
+                  if (streamRegistry.microphone.has(stream.id)) {
+                      inputSource = 'microphone';
+                  } else if (streamRegistry.remote.has(stream.id)) {
+                      inputSource = 'remote';
+                  } else {
+                      // Fallback: check deviceId (microphone streams have deviceId)
+                      const track = stream.getAudioTracks()[0];
+                      const deviceId = track?.getSettings?.()?.deviceId;
+                      inputSource = deviceId ? 'microphone' : 'remote';
+                      logger.info(this.logPrefix, `Stream ${stream.id} not in registry, using deviceId fallback: ${inputSource}`);
+                  }
+              }
+
+              ctxData.pipeline.inputSource = inputSource;
+              ctxData.pipeline.timestamp = Date.now();
               // Re-emit updated context data
               this.emit(EVENTS.DATA, ctxData);
-              logger.info(this.logPrefix, `MediaStreamSource created - microphone connected to AudioContext (context: ${ctxData.contextId})`);
+              logger.info(this.logPrefix, `MediaStreamSource created - ${inputSource} connected to AudioContext (context: ${ctxData.contextId}, stream: ${stream?.id})`);
           }
       } else {
           logger.warn(this.logPrefix, `MediaStreamSource created but context is ${ctx === null ? 'null' : 'undefined'}`);
@@ -402,30 +506,57 @@ class AudioContextCollector extends BaseCollector {
   }
 
   /**
+   * Best-effort context matching for WASM encoder
+   * Used by both URL pattern detection and opus hook detection
+   * @private
+   * @param {number} sampleRate - Encoder's sample rate
+   * @returns {string|null} - Context ID or null if no match
+   */
+  _findBestMatchingContextId(sampleRate) {
+      const candidates = [];
+
+      for (const [ctx, ctxData] of this.activeContexts.entries()) {
+          if (ctx.state !== 'closed' && ctx.sampleRate === sampleRate) {
+              candidates.push(ctxData);
+          }
+      }
+
+      if (candidates.length === 0) return null;
+      if (candidates.length === 1) return candidates[0].contextId;
+
+      // Multiple matches - return most recent (by pipeline timestamp)
+      candidates.sort((a, b) => b.pipeline.timestamp - a.pipeline.timestamp);
+      return candidates[0].contextId;
+  }
+
+  /**
    * Handle WASM encoder detection (from Worker.postMessage hook)
-   * Emits encoder as INDEPENDENT signal - no AudioContext matching attempted
-   * Reason: Worker.postMessage has no reliable way to know which AudioContext owns the data
+   * Emits encoder to canonical wasm_encoder storage with optional context linking
    * @private
    * @param {Object} encoderInfo - { type, sampleRate, bitRate, channels, application, timestamp, pattern, status, originalSampleRate?, frameSize?, bufferLength? }
    */
   _handleWasmEncoder(encoderInfo) {
       logger.info(this.logPrefix, 'WASM encoder detected:', encoderInfo);
 
-      // Emit as independent signal - DO NOT attach to AudioContext
-      // Context matching is unreliable (sampleRate 48000Hz is common to all)
+      // Best-effort context matching (may return null if no match)
+      const linkedContextId = this._findBestMatchingContextId(encoderInfo.sampleRate);
+
+      // Emit to canonical wasm_encoder storage with context linking
       this.emit(EVENTS.DATA, {
           type: DATA_TYPES.WASM_ENCODER,
           timestamp: Date.now(),
-          encoderType: encoderInfo.type || 'opus',
+          codec: encoderInfo.type || 'opus',
+          source: 'direct',  // opus_encoder_create hook
           sampleRate: encoderInfo.sampleRate,
           originalSampleRate: encoderInfo.originalSampleRate,
           bitRate: encoderInfo.bitRate,
           channels: encoderInfo.channels || 1,
           application: encoderInfo.application, // 2048=Voice, 2049=FullBand, 2051=LowDelay
           pattern: encoderInfo.pattern, // 'direct' or 'nested'
-          status: encoderInfo.status || 'initialized', // NEW: 'initialized' or 'encoding'
+          status: encoderInfo.status || 'initialized',
           frameSize: encoderInfo.frameSize,
-          bufferLength: encoderInfo.bufferLength
+          bufferLength: encoderInfo.bufferLength,
+          linkedContextId  // Context bağlantısı (null olabilir)
       });
 
       // Human-readable application name
@@ -439,91 +570,94 @@ class AudioContextCollector extends BaseCollector {
   }
 
   /**
-   * Reset node detection flags on a context (for fresh start)
-   * @private
-   * @param {Object} metadata - Context metadata object
-   */
-  _resetNodeFlags(metadata) {
-    // Reset all "was created" flags to prevent stale data
-    // These will be set again if nodes are created during this session
-    metadata.scriptProcessors = [];
-    metadata.audioWorklets = [];
-    metadata.hasAnalyser = false;
-    metadata.hasMediaStreamSource = false;
-    metadata.inputSource = null;
-    // Keep destinationType - this is more persistent (attached to destination)
-  }
-
-  /**
    * Start collector
    * @returns {Promise<void>}
    */
   async start() {
     this.active = true;
 
-    // Reset node flags on existing contexts to prevent stale "was created" data
-    // This ensures we only show nodes created during THIS monitoring session
-    for (const [ctx, metadata] of this.activeContexts.entries()) {
-      if (ctx.state !== 'closed') {
-        this._resetNodeFlags(metadata);
-        logger.info(this.logPrefix, `Reset node flags for context ${metadata.contextId}`);
-      }
-    }
+    // ═══════════════════════════════════════════════════════════════════
+    // CLEAN SLATE: Clear ALL previous state on start
+    // This prevents stale data issues and simplifies state management
+    // ═══════════════════════════════════════════════════════════════════
 
-    // Sync pre-existing instances from early hook registry
-    const registry = getInstanceRegistry();
-    if (registry.audioContexts.length > 0) {
-      logger.info(
-        this.logPrefix,
-        `Found ${registry.audioContexts.length} pre-existing AudioContext(s) from early hook`
-      );
+    // 1. Clear activeContexts Map (our internal state)
+    const previousSize = this.activeContexts.size;
+    this.activeContexts.clear();
+    this.contextIdCounter = 0; // Reset ID counter for fresh start
+    logger.info(this.logPrefix, `Cleared ${previousSize} previous context(s) from activeContexts`);
 
-      for (const { instance } of registry.audioContexts) {
-        // Ensure instance is registered (handler may have already added it)
-        if (!this.activeContexts.has(instance)) {
-          this._handleNewContext(instance, false); // Silent add to Map
-          logger.info(this.logPrefix, 'Registered pre-existing AudioContext (was missed by handler)');
-        }
-      }
-    }
+    // 2. Clean up closed contexts from EarlyHook registry
+    cleanupClosedAudioContexts();
 
-    // Now that we're active, emit all contexts in activeContexts
-    // This handles both:
-    // - Contexts added by handler (before start, blocked by active=false)
-    // - Contexts just synced from registry
-    if (this.activeContexts.size > 0) {
-      logger.info(
-        this.logPrefix,
-        `Emitting ${this.activeContexts.size} existing AudioContext(s) on start`
-      );
-
-      for (const [ctx, metadata] of this.activeContexts.entries()) {
-        // Skip and clean up closed contexts
-        if (ctx.state === 'closed') {
-          this.activeContexts.delete(ctx);
-          continue;
-        }
-        // Update state in case it changed while stopped
-        metadata.state = ctx.state;
-        this.emit(EVENTS.DATA, metadata);
-        logger.info(this.logPrefix, 'Emitted existing AudioContext:', {
-          sampleRate: metadata.sampleRate,
-          state: metadata.state,
-          hasScriptProcessors: metadata.scriptProcessors.length > 0,
-          hasWasmEncoder: !!metadata.wasmEncoder
-        });
-      }
-    }
-
-    // Check for WASM encoder detected BEFORE start (late-discovery)
-    // Process AFTER registry sync and emit so activeContexts is populated
+    // 3. Re-register WASM encoder handler
     // @ts-ignore
-    if (window.__wasmEncoderDetected) {
-      logger.info(this.logPrefix, 'Found pre-existing WASM encoder detection (deferred processing)');
-      this._handleWasmEncoder(window.__wasmEncoderDetected);
-      // @ts-ignore
-      window.__wasmEncoderDetected = null; // Clear flag to avoid reprocessing
+    window.__wasmEncoderHandler = (encoderInfo) => {
+      this._handleWasmEncoder(encoderInfo);
+    };
+
+    // 4. Clear any stale WASM encoder detection
+    // @ts-ignore
+    window.__wasmEncoderDetected = null;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Now sync RUNNING contexts from registry (ignore closed ones)
+    // ═══════════════════════════════════════════════════════════════════
+    const registry = getInstanceRegistry();
+    logger.info(this.logPrefix, `Registry has ${registry.audioContexts.length} AudioContext(s) (after cleanup)`);
+
+    // Sync ONLY running contexts from registry and emit them
+    // Also sync methodCalls for late capture support
+    let syncedCount = 0;
+    let pipelineSyncedCount = 0;
+    for (const entry of registry.audioContexts) {
+      const { instance, methodCalls } = entry;
+
+      // Skip closed contexts - we only want active ones
+      if (instance.state === 'closed') {
+        logger.info(this.logPrefix, `Skipping closed context from registry (${instance.sampleRate}Hz)`);
+        continue;
+      }
+
+      // Add running context to activeContexts and emit
+      this._handleNewContext(instance, true); // true = emit immediately
+      syncedCount++;
+
+      // Sync methodCalls to pipeline (late capture) - data-driven via METHOD_CALL_SYNC_HANDLERS
+      if (methodCalls && Object.keys(methodCalls).length > 0) {
+        const ctxData = this.activeContexts.get(instance);
+        if (ctxData) {
+          // Apply all registered handlers for this methodCalls object
+          Object.entries(methodCalls).forEach(([key, data]) => {
+            const handler = METHOD_CALL_SYNC_HANDLERS[key];
+            if (handler) {
+              handler(data, ctxData.pipeline);
+            }
+          });
+          ctxData.pipeline.timestamp = Date.now();
+          this.emit(EVENTS.DATA, ctxData);
+          pipelineSyncedCount++;
+          logger.info(this.logPrefix, `Synced pipeline data for ${ctxData.contextId}:`, Object.keys(methodCalls));
+        }
+      }
+
+      // SONRA temizle - stale data prevention for next start()
+      // Inspector çalışırken yeni method çağrıları hem emit() hem registry'ye gider
+      entry.methodCalls = {};
     }
+
+    if (syncedCount > 0) {
+      logger.info(this.logPrefix, `Synced ${syncedCount} running AudioContext(s) from registry`);
+      if (pipelineSyncedCount > 0) {
+        logger.info(this.logPrefix, `Synced pipeline data for ${pipelineSyncedCount} context(s) (late capture)`);
+      }
+    } else {
+      logger.info(this.logPrefix, 'No running AudioContexts to sync (will capture new ones)');
+    }
+    logger.info(this.logPrefix, 'Cleared methodCalls from registry (fresh for next start)');
+
+    // NOTE: __wasmEncoderDetected was cleared at start (clean slate approach)
+    // WASM encoder will be detected fresh when encoding actually starts
 
     logger.info(this.logPrefix, 'Started - ready to capture new audio activity');
   }
@@ -543,7 +677,7 @@ class AudioContextCollector extends BaseCollector {
         continue;
       }
       // Update state in case it changed
-      metadata.state = ctx.state;
+      metadata.static.state = ctx.state;
       this.emit(EVENTS.DATA, metadata);
       emittedCount++;
     }
@@ -560,12 +694,23 @@ class AudioContextCollector extends BaseCollector {
   async stop() {
     this.active = false;
 
-    // Handler remains registered (initialized in initialize())
-    // Just stop emitting by setting active=false
-    // Note: Reverting global objects in a running page is risky/complex.
+    // Clear WASM encoder handler to prevent EarlyHook from re-setting __wasmEncoderDetected
+    // This is critical - without this, EarlyHook continues to detect and store encoder info
+    // even when inspector is stopped, causing stale data on restart
+    // @ts-ignore
+    window.__wasmEncoderHandler = null;
+    logger.info(this.logPrefix, 'Cleared __wasmEncoderHandler on stop');
+
+    // Clear stale WASM encoder detection
+    // @ts-ignore
+    if (window.__wasmEncoderDetected) {
+      // @ts-ignore
+      window.__wasmEncoderDetected = null;
+      logger.info(this.logPrefix, 'Cleared __wasmEncoderDetected on stop');
+    }
 
     // Only clean up closed contexts to prevent memory leak
-    // Keep metadata for running contexts (preserves hasAnalyser, destinationType, etc.)
+    // Keep metadata for running contexts (preserves pipeline info)
     for (const [ctx] of this.activeContexts.entries()) {
       if (ctx.state === 'closed') {
         this.activeContexts.delete(ctx);

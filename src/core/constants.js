@@ -69,3 +69,37 @@ export const DESTINATION_TYPES = {
 export const UI_LIMITS = {
   MAX_AUDIO_CONTEXTS: 4
 };
+
+/**
+ * Storage keys for collected measurement data
+ * Used for cleanup operations (tab close, browser restart, origin change, etc.)
+ *
+ * IMPORTANT: This is the single source of truth.
+ * The following files have inline copies that MUST be kept in sync:
+ * - scripts/background.js (cannot import ES modules)
+ * - scripts/popup.js (cannot import ES modules)
+ * - scripts/content.js (cannot import ES modules)
+ */
+export const DATA_STORAGE_KEYS = [
+  'rtc_stats',
+  'user_media',
+  'audio_contexts',
+  'audio_worklet',
+  'media_recorder',
+  'wasm_encoder'
+];
+
+/**
+ * Stream source registry
+ * GetUserMediaCollector ve RTCPeerConnectionCollector tarafından doldurulur
+ * AudioContextCollector tarafından sorgulanır
+ *
+ * Amaç: createMediaStreamSource() çağrıldığında stream'in
+ * mikrofon mu (giden ses) yoksa remote mu (gelen ses) olduğunu ayırt etmek
+ */
+export const streamRegistry = {
+  /** @type {Set<string>} getUserMedia stream ID'leri (mikrofon) */
+  microphone: new Set(),
+  /** @type {Set<string>} RTCPeerConnection remote stream ID'leri */
+  remote: new Set()
+};

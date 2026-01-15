@@ -17,16 +17,6 @@ function createLog(prefix, message, level = 'info') {
     };
 }
 
-// Helper to log wasmEncoder info (DRY - used in multiple handlers)
-function logWasmEncoder(encoder, prefix = '🔊') {
-    if (!encoder) return;
-    logContent(`${prefix} [WITH WASM ENCODER]`, {
-        type: encoder.type,
-        bitRate: encoder.bitRate,
-        sampleRate: encoder.sampleRate
-    });
-}
-
 // Debug logging
 const contentLogs = [];
 function logContent(msg, data) {
@@ -55,11 +45,10 @@ async function injectPageScript(attempt = 1) {
       injected = true; // Only set on success
       logContent('✅ AudioInspector: page script injected via background script');
 
-      // Get tab ID early for sourceTabId tagging
-      chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (tabResponse) => {
-        currentTabId = tabResponse?.tabId || null;
-        logContent(`📍 Tab ID acquired: ${currentTabId}`);
-      });
+      // Get tab ID from injection response (sync - prevents race condition)
+      // Previously used separate GET_TAB_ID message which could arrive late
+      currentTabId = response.tabId || null;
+      logContent(`📍 Tab ID acquired (sync): ${currentTabId}`);
 
       // Add initialization log to storage
       persistLogs(createLog('Inspector', '🚀 AudioInspector initialized'));
@@ -87,10 +76,13 @@ async function injectPageScript(attempt = 1) {
 
 // --- Message Handlers (All payloads now have consistent 'type' field) ---
 
-// Storage keys for collected data (DRY - used in multiple places)
+// Measurement data storage keys
+// SOURCE OF TRUTH: src/core/constants.js → DATA_STORAGE_KEYS
+// (Duplicated here because content.js cannot import ES modules)
 const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder'];
 
 // Queue for audioContext updates to prevent race conditions
+// NOTE: audioWorklet updates also go through this queue to prevent race conditions
 let audioContextQueue = [];
 let isProcessingAudioContext = false;
 
@@ -98,40 +90,83 @@ function processAudioContextQueue() {
   if (isProcessingAudioContext || audioContextQueue.length === 0) return;
 
   isProcessingAudioContext = true;
-  const payload = audioContextQueue.shift();
+  const queueItem = audioContextQueue.shift();
 
   chrome.storage.local.get(['audio_contexts'], (result) => {
     let contexts = result.audio_contexts || [];
 
-    // Find existing context by contextId
-    const existingIndex = contexts.findIndex(c => c.contextId === payload.contextId);
+    // Handle audioWorklet updates (merge into existing context)
+    if (queueItem._isWorkletUpdate) {
+      const { contextId, moduleUrl, timestamp, sourceTabId } = queueItem;
 
-    if (existingIndex >= 0) {
-      // Merge with existing
-      const existing = contexts[existingIndex];
-      contexts[existingIndex] = {
-        ...existing,
-        ...payload,
-        scriptProcessors: payload.scriptProcessors?.length > 0 ? payload.scriptProcessors : existing.scriptProcessors || [],
-        audioWorklets: payload.audioWorklets?.length > 0 ? payload.audioWorklets : existing.audioWorklets || [],
-        wasmEncoder: payload.wasmEncoder || existing.wasmEncoder,
-        hasAnalyser: payload.hasAnalyser || existing.hasAnalyser
-      };
+      if (contextId) {
+        const targetContext = contexts.find(c => c.contextId === contextId);
+
+        if (targetContext) {
+          // Ensure pipeline structure exists
+          if (!targetContext.pipeline) {
+            targetContext.pipeline = { processors: [], timestamp: Date.now() };
+          }
+          if (!targetContext.pipeline.processors) {
+            targetContext.pipeline.processors = [];
+          }
+
+          // Find existing audioWorklet processor by moduleUrl
+          const existingIndex = targetContext.pipeline.processors.findIndex(
+            p => p.type === 'audioWorklet' && p.moduleUrl === moduleUrl
+          );
+
+          const workletEntry = {
+            type: 'audioWorklet',
+            moduleUrl: moduleUrl,
+            timestamp: timestamp
+          };
+
+          if (existingIndex >= 0) {
+            targetContext.pipeline.processors[existingIndex] = workletEntry;
+          } else {
+            targetContext.pipeline.processors.push(workletEntry);
+          }
+          targetContext.pipeline.timestamp = Date.now();
+
+          logContent(`🎛️ AudioWorklet merged into context ${contextId}`, moduleUrl);
+        } else {
+          logContent(`⚠️ AudioWorklet target context not found: ${contextId}`, moduleUrl);
+        }
+      } else {
+        // ORPHAN worklet - context not found, just log
+        logContent('🎛️ AudioWorklet detected (orphan - context not matched)', moduleUrl);
+        persistLogs(createLog('Content', `⚠️ Orphan AudioWorklet: ${moduleUrl} (context unknown)`));
+      }
     } else {
-      // New context
-      contexts.push(payload);
-    }
+      // Standard audioContext update
+      const payload = queueItem;
+      const existingIndex = contexts.findIndex(c => c.contextId === payload.contextId);
 
-    // DEBUG: Log context data before storage
-    console.log('[Content] DEBUG: Saving audio_contexts:', contexts.map(c => ({
-      contextId: c.contextId,
-      sourceTabId: c.sourceTabId,
-      state: c.state,
-      baseLatency: c.baseLatency,
-      audioWorklets: c.audioWorklets,
-      wasmEncoder: c.wasmEncoder,
-      destinationType: c.destinationType
-    })));
+      if (existingIndex >= 0) {
+        // Deep merge with existing (static/pipeline yapısı)
+        const existing = contexts[existingIndex];
+        contexts[existingIndex] = {
+          ...existing,
+          ...payload,
+          // Static: shallow merge (sadece timestamp değişmez, diğerleri güncellenebilir)
+          static: { ...existing.static, ...payload.static },
+          // Pipeline: processors array özel merge
+          pipeline: {
+            ...existing.pipeline,
+            ...payload.pipeline,
+            processors: payload.pipeline?.processors?.length > 0
+              ? payload.pipeline.processors
+              : existing.pipeline?.processors || []
+          },
+          // wasmEncoder root level'da kalır
+          wasmEncoder: payload.wasmEncoder || existing.wasmEncoder
+        };
+      } else {
+        // New context
+        contexts.push(payload);
+      }
+    }
 
     chrome.storage.local.set({
       audio_contexts: contexts,
@@ -139,7 +174,7 @@ function processAudioContextQueue() {
     }, () => {
       if (chrome.runtime.lastError) {
         persistLogs(createLog('Content', `❌ audioContext SET error: ${chrome.runtime.lastError.message}`, 'error'));
-      } else {
+      } else if (!queueItem._isWorkletUpdate) {
         persistLogs(createLog('Content', `✅ audioContext SET: ${contexts.length} context(s)`));
       }
 
@@ -161,7 +196,7 @@ const MESSAGE_HANDLERS = {
 
   // Special handler for audioContext - uses queue to prevent race conditions
   audioContext: (payload) => {
-    persistLogs(createLog('Content', `🔊 audioContext queued: id=${payload?.contextId}, rate=${payload?.sampleRate}`));
+    persistLogs(createLog('Content', `🔊 audioContext queued: id=${payload?.contextId}, rate=${payload?.static?.sampleRate}`));
     audioContextQueue.push({ ...payload, sourceTabId: currentTabId });
     processAudioContextQueue();
     return null; // Handled internally
@@ -169,53 +204,58 @@ const MESSAGE_HANDLERS = {
 
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
-  // WASM encoder - independent signal (not attached to AudioContext)
-  wasmEncoder: storageHandler('wasm_encoder', '🔧', 'WASM Encoder'),
+  // CANONICAL: Tüm WASM encoder tespitleri bu handler'dan geçer
+  // AudioContextCollector hem URL pattern hem opus hook için buraya emit eder
+  // popup.js bu storage key'den okur (tek doğru kaynak)
+  // MERGE STRATEGY: Zengin field'ları koru, null override'i engelle
+  wasmEncoder: (payload) => {
+    chrome.storage.local.get(['wasm_encoder'], (result) => {
+      const existing = result.wasm_encoder || {};
 
-  // Special handler for audioWorklet
-  // NOTE: AudioContextCollector already handles worklets with proper context matching
-  // This handler only receives ORPHAN worklets (context not found)
-  // FIX: Do NOT blindly assign to "most recent context" - that causes false positives
-  // Instead, just log the orphan worklet for debugging
-  audioWorklet: (payload) => {
-    // Check if this worklet has a contextId (properly matched by collector)
-    if (payload.contextId) {
-      // Already matched by collector, merge into correct context
-      chrome.storage.local.get(['audio_contexts'], (result) => {
-        let contexts = result.audio_contexts || [];
-        const targetContext = contexts.find(c => c.contextId === payload.contextId);
+      // Merge: yeni veri önde, ama null'lar eskiyi korur
+      const merged = {
+        ...existing,
+        ...payload,
+        // Zengin field'ları koru (source: 'direct' genelde daha detaylı)
+        bitRate: payload.bitRate ?? existing.bitRate,
+        channels: payload.channels ?? existing.channels,
+        sampleRate: payload.sampleRate ?? existing.sampleRate,
+        application: payload.application ?? existing.application,
+        // Source priority: 'direct' > 'audioworklet' (daha fazla detay içerir)
+        source: payload.source === 'direct' ? 'direct' : (existing.source || payload.source)
+      };
 
-        if (targetContext) {
-          if (!targetContext.audioWorklets) {
-            targetContext.audioWorklets = [];
-          }
-          const existingIndex = targetContext.audioWorklets.findIndex(w => w.moduleUrl === payload.moduleUrl);
-          if (existingIndex >= 0) {
-            targetContext.audioWorklets[existingIndex] = {
-              moduleUrl: payload.moduleUrl,
-              timestamp: payload.timestamp
-            };
-          } else {
-            targetContext.audioWorklets.push({
-              moduleUrl: payload.moduleUrl,
-              timestamp: payload.timestamp
-            });
-          }
-
-          chrome.storage.local.set({
-            audio_contexts: contexts,
-            lastUpdate: Date.now()
-          }, () => {
-            logContent(`🎛️ AudioWorklet merged into context ${payload.contextId}`, payload.moduleUrl);
-          });
+      chrome.storage.local.set({
+        wasm_encoder: { ...merged, sourceTabId: currentTabId },
+        lastUpdate: Date.now()
+      }, () => {
+        if (chrome.runtime.lastError) {
+          persistLogs(createLog('Content', `❌ wasm_encoder SET error: ${chrome.runtime.lastError.message}`, 'error'));
+        } else {
+          const sourceInfo = payload.source === existing.source ? payload.source : `${payload.source} (merged with ${existing.source || 'none'})`;
+          persistLogs(createLog('Content', `🔧 WASM Encoder stored: ${sourceInfo}`));
         }
       });
-    } else {
-      // ORPHAN worklet - context not found
-      // Do NOT assign to random context - just log it
-      logContent('🎛️ AudioWorklet detected (orphan - context not matched)', payload.moduleUrl);
-      persistLogs(createLog('Content', `⚠️ Orphan AudioWorklet: ${payload.moduleUrl} (context unknown)`));
-    }
+    });
+
+    return null; // Handled internally
+  },
+
+  // Special handler for audioWorklet - uses queue to prevent race conditions with audioContext
+  // NOTE: AudioContextCollector already handles worklets with proper context matching
+  // This handler receives worklets and queues them for merge into audio_contexts
+  audioWorklet: (payload) => {
+    persistLogs(createLog('Content', `🎛️ audioWorklet queued: contextId=${payload?.contextId}, url=${payload?.moduleUrl}`));
+
+    // Queue worklet update with special flag for queue processor
+    audioContextQueue.push({
+      _isWorkletUpdate: true,
+      contextId: payload.contextId,
+      moduleUrl: payload.moduleUrl,
+      timestamp: payload.timestamp,
+      sourceTabId: currentTabId
+    });
+    processAudioContextQueue();
 
     return null; // Handled internally
   },
@@ -238,58 +278,57 @@ window.addEventListener('message', (event) => {
   if (event.data.type === 'INSPECTOR_READY') {
       chrome.storage.local.get(['inspectorEnabled', 'lockedTab'], (result) => {
           if (result.inspectorEnabled === true && result.lockedTab) {
-              // Tab ID kontrolü yap
-              chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
-                  const thisTabId = response?.tabId; // Renamed to avoid shadow variable with global currentTabId
-                  const lockedTabId = result.lockedTab.id;
-                  const currentOrigin = window.location.origin;
-                  let lockedOrigin;
-                  try {
-                      lockedOrigin = new URL(result.lockedTab.url).origin;
-                  } catch {
-                      lockedOrigin = null;
-                  }
+              // currentTabId zaten injection'da senkron olarak alındı (line 50)
+              // Async GET_TAB_ID çağrısına gerek yok - DRY prensibi
+              const thisTabId = currentTabId;
+              const lockedTabId = result.lockedTab.id;
+              const thisOrigin = window.location.origin;
+              let lockedOrigin;
+              try {
+                  lockedOrigin = new URL(result.lockedTab.url).origin;
+              } catch {
+                  lockedOrigin = null;
+              }
 
-                  // Debug log - tab ID ve origin karşılaştırması
-                  logContent(`Tab check: current=${thisTabId}, locked=${lockedTabId}, origins: ${currentOrigin} vs ${lockedOrigin}`);
-                  persistLogs(createLog('Content', `Tab check: current=${thisTabId}, locked=${lockedTabId}`));
+              // Debug log - tab ID ve origin karşılaştırması
+              logContent(`Tab check: current=${thisTabId}, locked=${lockedTabId}, origins: ${thisOrigin} vs ${lockedOrigin}`);
+              persistLogs(createLog('Content', `Tab check: current=${thisTabId}, locked=${lockedTabId}`));
 
-                  // Tab ID kontrolü
-                  if (thisTabId !== lockedTabId) {
-                      // Farklı tab, başlatma
-                      logContent('Inspector active but this tab is not locked (not starting)');
-                      persistLogs(createLog('Content', `Different tab (${thisTabId} != ${lockedTabId}) - not starting`));
-                      return;
-                  }
+              // Tab ID kontrolü
+              if (thisTabId !== lockedTabId) {
+                  // Farklı tab, başlatma
+                  logContent('Inspector active but this tab is not locked (not starting)');
+                  persistLogs(createLog('Content', `Different tab (${thisTabId} != ${lockedTabId}) - not starting`));
+                  return;
+              }
 
-                  // Origin kontrolü - aynı tab'da farklı siteye gidilmiş olabilir
-                  if (currentOrigin !== lockedOrigin) {
-                      logContent(`Same tab but different origin: ${currentOrigin} vs ${lockedOrigin} (auto-stopping)`);
-                      persistLogs(createLog('Content', `Origin changed (${currentOrigin}) - inspector auto-stopped`));
+              // Origin kontrolü - aynı tab'da farklı siteye gidilmiş olabilir
+              if (thisOrigin !== lockedOrigin) {
+                  logContent(`Same tab but different origin: ${thisOrigin} vs ${lockedOrigin} (auto-stopping)`);
+                  persistLogs(createLog('Content', `Origin changed (${thisOrigin}) - inspector auto-stopped`));
 
-                      // Auto-stop: Set reason flag first, then clear inspector state
-                      chrome.storage.local.set({ autoStoppedReason: 'origin_change' }, () => {
-                          chrome.storage.local.remove(['inspectorEnabled', 'lockedTab'], () => {
-                              logContent('🛑 Inspector auto-stopped due to origin change');
-                          });
+                  // Auto-stop: Set reason flag first, then clear inspector state AND measurement data
+                  chrome.storage.local.set({ autoStoppedReason: 'origin_change' }, () => {
+                      chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', ...DATA_STORAGE_KEYS], () => {
+                          logContent('🛑 Inspector auto-stopped due to origin change (state + data cleared)');
                       });
-                      return;
-                  }
-
-                  // Hem tab ID hem origin eşleşti, başlat
-                  logContent('🔄 Restoring inspector state (tab + origin match)');
-                  persistLogs(createLog('Content', '🔄 Restoring inspector state'));
-
-                  // Clear stale data before restoring
-                  chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
-                    logContent('🧹 Cleared stale data before restore');
-
-                    window.postMessage({
-                        __audioPipelineInspector: true,
-                        type: 'SET_ENABLED',
-                        enabled: true
-                    }, '*');
                   });
+                  return;
+              }
+
+              // Hem tab ID hem origin eşleşti, başlat
+              logContent('🔄 Restoring inspector state (tab + origin match)');
+              persistLogs(createLog('Content', '🔄 Restoring inspector state'));
+
+              // Clear stale data before restoring
+              chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+                  logContent('🧹 Cleared stale data before restore');
+
+                  window.postMessage({
+                      __audioPipelineInspector: true,
+                      type: 'SET_ENABLED',
+                      enabled: true
+                  }, '*');
               });
           } else {
               logContent('Inspector READY but state is stopped (not restoring)');
@@ -356,30 +395,49 @@ window.addEventListener('message', (event) => {
 });
 
 
+/**
+ * Async handler for SET_ENABLED messages
+ * Ensures storage operations complete before forwarding to page script
+ * @param {Object} message - The message object containing enabled state
+ */
+async function handleSetEnabled(message) {
+  // Persist state (await to ensure completion)
+  await chrome.storage.local.set({ inspectorEnabled: message.enabled });
+
+  // Clear all data storage on start - AWAIT completion to prevent race condition
+  // This ensures old encoding data is fully removed before collectors start emitting new data
+  if (message.enabled) {
+    await new Promise(resolve => {
+      chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+        logContent('🧹 Cleared stale data from storage');
+        resolve();
+      });
+    });
+  }
+
+  // Add explicit log to storage
+  persistLogs(createLog('Content', message.enabled ? '✅ Inspector started' : '⏸️ Inspector stopped'));
+
+  // NOW forward enable/disable command to page script (after storage operations complete)
+  window.postMessage({
+    __audioPipelineInspector: true,
+    type: 'SET_ENABLED',
+    enabled: message.enabled
+  }, '*');
+}
+
 // Listen for messages from popup (main frame only to prevent duplication)
 if (window.self === window.top) {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'SET_ENABLED') {
-      // Persist state
-      chrome.storage.local.set({ inspectorEnabled: message.enabled });
-
-      // Clear all data storage on start to prevent stale data from previous sessions
-      if (message.enabled) {
-        chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
-          logContent('🧹 Cleared stale data from storage');
-        });
-      }
-
-      // Add explicit log to storage
-      persistLogs(createLog('Content', message.enabled ? '✅ Inspector started' : '⏸️ Inspector stopped'));
-
-      // Forward enable/disable command to page script
-      window.postMessage({
-        __audioPipelineInspector: true,
-        type: 'SET_ENABLED',
-        enabled: message.enabled
-      }, '*');
-      sendResponse({success: true});
+      // Handle async operations - return true to keep channel open
+      handleSetEnabled(message).then(() => {
+        sendResponse({ success: true });
+      }).catch(error => {
+        logContent(`❌ Error handling SET_ENABLED: ${error.message}`);
+        sendResponse({ success: false, error: error.message });
+      });
+      return true;  // Keep message channel open for async response
     }
   });
 } else {

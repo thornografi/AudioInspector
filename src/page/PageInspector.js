@@ -152,19 +152,30 @@ class PageInspector {
       if (event.data.type === 'SET_ENABLED') {
         const enabled = event.data.enabled;
 
-        if (this.inspectorEnabled === enabled) {
-            logger.info(LOG_PREFIX.INSPECTOR, `SET_ENABLED = ${enabled} (already in this state, ignoring)`);
-            return;
-        }
-
+        // Control message received
         logger.info(LOG_PREFIX.INSPECTOR, `Control message: SET_ENABLED = ${enabled} (current: ${this.inspectorEnabled})`);
 
+        // If already in the requested state AND trying to enable, force restart
+        // This handles cases where STOP message was lost or collectors are out of sync
+        if (this.inspectorEnabled === enabled && enabled === true) {
+          logger.info(LOG_PREFIX.INSPECTOR, `Already enabled, forcing collector restart for synchronization`);
+          await this._stopAllCollectors();  // Clean stop first
+          // Continue to start below
+        }
+
+        // If trying to disable when already disabled, skip
+        if (this.inspectorEnabled === enabled && enabled === false) {
+          logger.info(LOG_PREFIX.INSPECTOR, `Already disabled, skipping stop`);
+          return;
+        }
+
+        // Normal flow continues...
         this.inspectorEnabled = enabled;
 
         if (enabled) {
+            logger.setEnabled(true); // Enable logging BEFORE start to capture collector logs
             logger.info(LOG_PREFIX.INSPECTOR, 'Starting all collectors...');
             await this._startAllCollectors();
-            logger.setEnabled(true); // Enable logging after start
             logger.info(LOG_PREFIX.INSPECTOR, '✅ Started');
         } else {
             logger.info(LOG_PREFIX.INSPECTOR, 'Stopping all collectors...');

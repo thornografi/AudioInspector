@@ -16,6 +16,20 @@ WebRTC/Audio API'lerini hook edip veri toplayan modüller.
 | AudioContextCollector | `new AudioContext()`, `createScriptProcessor()`, `createMediaStreamSource()`, `createMediaStreamDestination()`, `createAnalyser()`, `AudioWorklet.addModule()`, Worker.postMessage (WASM) | `src/collectors/AudioContextCollector.js` |
 | MediaRecorderCollector | `new MediaRecorder()` | `src/collectors/MediaRecorderCollector.js` |
 
+## UI Encoding Section Priority
+
+Popup'ta Encoding bölümünde tek bir encoder gösterilir. Priority:
+
+```
+WASM Encoder > WebRTC Codec > MediaRecorder
+```
+
+- **WASM:** opus-recorder, Discord/WhatsApp WASM encoder
+- **WebRTC:** RTCPeerConnection send codec (audio/opus vb.)
+- **MediaRecorder:** Fallback - WASM/WebRTC yoksa gösterilir
+
+> **Not:** MediaRecorder ayrı section değil, Encoding section'da fallback olarak gösterilir.
+
 ## Base Class'lar
 
 | Class | Amaç | Dosya |
@@ -117,7 +131,89 @@ UI görüntüleme limitleri:
 |-------|-------|----------|
 | `UI_LIMITS.MAX_AUDIO_CONTEXTS` | `4` | Aynı anda gösterilecek max AudioContext |
 
-### Kullanım
+## streamRegistry (Collector Koordinasyonu)
+
+Stream kaynağını (mikrofon vs remote) ayırt etmek için collector'lar arası koordinasyon sağlar.
+
+```javascript
+import { streamRegistry } from '../core/constants.js';
+
+export const streamRegistry = {
+  microphone: new Set(),  // getUserMedia stream ID'leri
+  remote: new Set()       // RTCPeerConnection remote stream ID'leri
+};
+```
+
+### Veri Akışı
+
+```
+getUserMedia() → streamRegistry.microphone.add(stream.id)
+RTCPeerConnection.ontrack → streamRegistry.remote.add(stream.id)
+createMediaStreamSource() → registry lookup → inputSource = 'microphone' | 'remote'
+```
+
+### Kullanım (GetUserMediaCollector)
+
+```javascript
+// Stream kaydet
+streamRegistry.microphone.add(stream.id);
+
+// Cleanup (memory leak önleme)
+audioTrack.addEventListener('ended', () => {
+  streamRegistry.microphone.delete(stream.id);
+});
+```
+
+### Kullanım (RTCPeerConnectionCollector)
+
+```javascript
+pc.addEventListener('track', (event) => {
+  if (event.track.kind === 'audio') {
+    for (const stream of event.streams) {
+      streamRegistry.remote.add(stream.id);
+    }
+
+    // Cleanup
+    event.track.addEventListener('ended', () => {
+      for (const stream of event.streams) {
+        streamRegistry.remote.delete(stream.id);
+      }
+    });
+  }
+});
+```
+
+### Kullanım (AudioContextCollector)
+
+```javascript
+_handleMediaStreamSource(node, args) {
+  const stream = args[0];
+
+  let inputSource = 'unknown';
+  if (streamRegistry.microphone.has(stream.id)) {
+    inputSource = 'microphone';
+  } else if (streamRegistry.remote.has(stream.id)) {
+    inputSource = 'remote';
+  } else {
+    // Fallback: deviceId kontrolü
+    const track = stream.getAudioTracks()[0];
+    const deviceId = track?.getSettings?.()?.deviceId;
+    inputSource = deviceId ? 'microphone' : 'remote';
+  }
+
+  ctxData.inputSource = inputSource;
+}
+```
+
+### inputSource Değerleri
+
+| Değer | Açıklama | UI'da |
+|-------|----------|-------|
+| `'microphone'` | getUserMedia'dan gelen stream | ✅ Göster (giden ses) |
+| `'remote'` | RTCPeerConnection'dan gelen stream | ❌ Gizle (gelen ses) |
+| `'unknown'` | Registry'de bulunamadı, fallback kullanıldı | Fallback sonucuna göre |
+
+### Kullanım (constants import)
 
 ```javascript
 import { EVENTS, DATA_TYPES } from '../core/constants.js';
@@ -184,6 +280,81 @@ createConstructorHook({
 });
 ```
 
+### Method Hooks (Factory Pattern - DRY)
+
+Method hook'ları da factory pattern ile yönetilir. Yeni hook eklemek için sadece config ekle:
+
+```javascript
+// EarlyHook.js - METHOD_HOOK_CONFIGS array
+const METHOD_HOOK_CONFIGS = [
+  {
+    methodName: 'createScriptProcessor',
+    registryKey: 'scriptProcessor',
+    extractMetadata: (args) => ({ bufferSize: args[0], timestamp: Date.now() }),
+    getLogMessage: (args) => `📡 Early hook: createScriptProcessor(${args[0]}) captured`
+  },
+  // Yeni hook eklemek için buraya config ekle
+];
+
+// Factory fonksiyonu - tüm prototype'lara uygular (webkit dahil)
+function createMethodHook(proto, config, protoName) {
+  const { methodName, registryKey, extractMetadata, getLogMessage } = config;
+  if (!proto[methodName]) return;
+
+  const original = proto[methodName];
+  proto[methodName] = function(...args) {
+    const node = original.apply(this, args);
+    const entry = instanceRegistry.audioContexts.find(e => e.instance === this);
+    if (entry) {
+      entry.methodCalls = entry.methodCalls || {};
+      entry.methodCalls[registryKey] = extractMetadata(args);
+    }
+    return node;
+  };
+}
+
+// installMethodHooks() - webkit + AudioContext'e uygular
+const prototypes = [
+  { proto: AudioContext.prototype, name: 'AudioContext' },
+  { proto: window.webkitAudioContext?.prototype, name: 'webkitAudioContext' }
+].filter(p => p.proto);
+
+prototypes.forEach(({ proto, name }) =>
+  METHOD_HOOK_CONFIGS.forEach(config => createMethodHook(proto, config, name))
+);
+```
+
+### Method Call Sync Handlers (AudioContextCollector)
+
+Late capture için registry'deki methodCalls'ı pipeline'a sync eden handler'lar:
+
+```javascript
+// AudioContextCollector.js - METHOD_CALL_SYNC_HANDLERS
+const METHOD_CALL_SYNC_HANDLERS = {
+  scriptProcessor: (data, pipeline) => {
+    pipeline.processors.push({ type: 'scriptProcessor', ...data });
+  },
+  analyser: (data, pipeline) => {
+    pipeline.processors.push({ type: 'analyser', ...data });
+  },
+  mediaStreamSource: (data, pipeline) => {
+    pipeline.inputSource = 'microphone';
+  },
+  mediaStreamDestination: (data, pipeline) => {
+    pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+  }
+};
+
+// start() içinde data-driven sync:
+Object.entries(methodCalls).forEach(([key, data]) => {
+  METHOD_CALL_SYNC_HANDLERS[key]?.(data, ctxData.pipeline);
+});
+```
+
+**OCP Kazanımı:** Yeni method hook eklemek için:
+1. `METHOD_HOOK_CONFIGS`'a config ekle (EarlyHook.js)
+2. `METHOD_CALL_SYNC_HANDLERS`'a handler ekle (AudioContextCollector.js)
+
 ### Worker.postMessage Hook (WASM Encoder)
 
 opus-recorder ve benzeri WASM encoder'ları tespit eder. **WASM encoder bağımsız sinyal olarak emit edilir** - AudioContext'e bağlanmaz (sampleRate eşleşmesi güvenilir değil). İki farklı message pattern'i desteklenir (yüksek doğruluk için sadece Opus):
@@ -194,43 +365,34 @@ Worker.prototype.postMessage = function(message, ...args) {
   let encoderInfo = null;
 
   // Pattern 1: Direct format (opus-recorder)
-  // { command: 'init', encoderSampleRate: 48000, encoderBitRate: 128000, ... }
   if (message.command === 'init' && message.encoderSampleRate) {
     encoderInfo = {
       type: 'opus',
       sampleRate: message.encoderSampleRate,
       bitRate: message.encoderBitRate || 0,
       channels: message.numberOfChannels || 1,
-      application: message.encoderApplication,
-      timestamp: Date.now(),
-      pattern: 'direct'
+      status: 'initialized'  // Track init vs encoding
     };
   }
 
-  // Pattern 2: Nested config format (örn: WhatsApp, Discord)
-  // { type: "message", message: { command: "encode-init", config: { ... } } }
+  // Pattern 2: Nested config format (WhatsApp, Discord)
   else if (message.type === 'message' &&
            message.message?.command === 'encode-init' &&
            message.message?.config) {
     const config = message.message.config;
-    encoderInfo = {
-      type: 'opus',
-      sampleRate: config.encoderSampleRate || config.sampleRate || 0,
-      bitRate: config.bitRate || config.encoderBitRate || 0,
-      channels: config.numberOfChannels || 1,
-      application: config.encoderApplication || 2048,
-      originalSampleRate: config.originalSampleRate,
-      frameSize: config.encoderFrameSize,
-      bufferLength: config.bufferLength,
-      timestamp: Date.now(),
-      pattern: 'nested'
-    };
+    encoderInfo = { type: 'opus', sampleRate: config.encoderSampleRate, ... };
   }
 
+  // CRITICAL: Only store if handler is registered (collector active)
+  // This prevents stale encoder data from appearing after inspector restart
   if (encoderInfo) {
-    window.__wasmEncoderDetected = encoderInfo;
-    window.__wasmEncoderHandler?.(encoderInfo);
+    if (window.__wasmEncoderHandler) {
+      window.__wasmEncoderDetected = encoderInfo;
+      window.__wasmEncoderHandler(encoderInfo);
+    }
+    // If handler not registered, don't store - inspector is stopped
   }
+
   return originalPostMessage.apply(this, [message, ...args]);
 };
 ```
@@ -241,22 +403,48 @@ Worker.prototype.postMessage = function(message, ...args) {
 
 > **Not:** MP3 (lamejs) ve generic encoder pattern'leri yanlış pozitif riski nedeniyle kaldırıldı.
 
-### Late-Discovery Pattern
+### Clean Slate Approach (AudioContextCollector)
 
-Hook, collector initialize olmadan ÖNCE tetiklenebilir. Bu durumda:
+**Problem:** Tab switch sonrası eski WASM encoder verisi görünüyordu.
 
-1. **EarlyHook.js:** Veriyi global değişkene kaydet (`window.__*Detected`)
-2. **Collector.initialize():** Handler kaydet + mevcut veriyi kontrol et
+**Çözüm:** Start'ta TÜM önceki state temizlenir:
 
 ```javascript
-// AudioContextCollector.js - initialize() sonunda
-window.__wasmEncoderHandler = (info) => this._handleWasmEncoder(info);
+// AudioContextCollector.js - start()
+async start() {
+  this.active = true;
 
-// Late-discovery: handler'dan önce tespit edilmişse
-if (window.__wasmEncoderDetected) {
-  this._handleWasmEncoder(window.__wasmEncoderDetected);
+  // CLEAN SLATE
+  this.activeContexts.clear();
+  this.contextIdCounter = 0;
+  cleanupClosedAudioContexts();  // EarlyHook registry'den closed olanları temizle
+
+  // Re-register handler
+  window.__wasmEncoderHandler = (info) => this._handleWasmEncoder(info);
+  window.__wasmEncoderDetected = null;  // Clear stale detection
+
+  // Sync ONLY running contexts
+  const registry = getInstanceRegistry();
+  for (const { instance } of registry.audioContexts) {
+    if (instance.state !== 'closed') {
+      this._handleNewContext(instance, true);
+    }
+  }
 }
 ```
+
+**Davranış:**
+- **Stop:** Veriler korunur (geçmiş kayıt olarak review)
+- **Start:** Sıfırdan başla (fresh start)
+
+### EarlyHook.js Yardımcı Fonksiyonlar
+
+| Fonksiyon | Amaç |
+|-----------|------|
+| `installEarlyHooks()` | Constructor Proxy'leri + Worker.postMessage hook kur |
+| `getInstanceRegistry()` | Yakalanan instance'ları döndür |
+| `cleanupClosedAudioContexts()` | Registry'den `state=closed` olanları temizle |
+| `clearRegistryKey(key)` | Belirli registry key'ini temizle |
 
 ### Global Handler Pattern
 
@@ -266,3 +454,21 @@ if (window.__wasmEncoderDetected) {
 | `__rtcPeerConnectionCollectorHandler` | RTCPeerConnectionCollector | Yeni PeerConnection |
 | `__mediaRecorderCollectorHandler` | MediaRecorderCollector | Yeni MediaRecorder |
 | `__wasmEncoderHandler` | AudioContextCollector | WASM encoder tespiti |
+
+### Stop'ta Handler Temizleme
+
+```javascript
+// AudioContextCollector.js - stop()
+async stop() {
+  this.active = false;
+
+  // CRITICAL: Clear handler to prevent stale data
+  window.__wasmEncoderHandler = null;
+  window.__wasmEncoderDetected = null;
+
+  // Clean up only closed contexts (keep running ones for next start)
+  for (const [ctx] of this.activeContexts.entries()) {
+    if (ctx.state === 'closed') this.activeContexts.delete(ctx);
+  }
+}
+```

@@ -2,7 +2,7 @@
 
 import { logger } from '../core/Logger.js';
 import PollingCollector from './PollingCollector.js';
-import { EVENTS, DATA_TYPES } from '../core/constants.js';
+import { EVENTS, DATA_TYPES, streamRegistry } from '../core/constants.js';
 import { parseOpusParams } from '../core/utils/CodecParser.js';
 import { getInstanceRegistry } from '../core/utils/EarlyHook.js';
 
@@ -20,9 +20,6 @@ class RTCPeerConnectionCollector extends PollingCollector {
 
     /** @type {Set<RTCPeerConnection>} */
     this.peerConnections = new Set();
-
-    /** @type {Function|null} */
-    this.originalRTCPeerConnection = null;
 
     /** @type {Map<RTCPeerConnection, {bytesSent: number, bytesReceived: number, timestamp: number}>} */
     this.previousStats = new Map();
@@ -60,6 +57,25 @@ class RTCPeerConnectionCollector extends PollingCollector {
 
     logger.info(this.logPrefix, `New RTCPeerConnection created`);
     this.emit(EVENTS.CONNECTION_CREATED, { pc });
+
+    // Track remote audio streams for source detection
+    // AudioContextCollector will query streamRegistry to distinguish microphone vs remote
+    pc.addEventListener('track', (event) => {
+      if (event.track.kind === 'audio') {
+        for (const stream of event.streams) {
+          streamRegistry.remote.add(stream.id);
+          logger.info(this.logPrefix, `Remote audio stream registered: ${stream.id}`);
+        }
+
+        // Track ended olduğunda registry'den temizle (memory leak önleme)
+        event.track.addEventListener('ended', () => {
+          for (const stream of event.streams) {
+            streamRegistry.remote.delete(stream.id);
+            logger.info(this.logPrefix, `Remote audio track ended, stream ${stream.id} removed from registry`);
+          }
+        });
+      }
+    });
 
     // Clean up when closed or failed
     pc.addEventListener('connectionstatechange', () => {

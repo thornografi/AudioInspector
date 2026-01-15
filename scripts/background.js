@@ -1,5 +1,13 @@
 // Background service worker
 
+// Measurement data storage keys
+// SOURCE OF TRUTH: src/core/constants.js → DATA_STORAGE_KEYS
+// (Duplicated here because background.js cannot import ES modules)
+const DATA_STORAGE_KEYS = [
+  'rtc_stats', 'user_media', 'audio_contexts',
+  'audio_worklet', 'media_recorder', 'wasm_encoder'
+];
+
 // Merkezi log yönetimi - race condition önleme
 let logQueue = [];
 let isProcessingLogs = false;
@@ -46,7 +54,8 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('AudioInspector installed');
 
   // Reset inspector state on install/update - default to stopped
-  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab']);
+  // Include autoStoppedReason to prevent stale banner on fresh start
+  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'autoStoppedReason']);
   updateBadge(false);
 
   // Reload test pages immediately on install/update
@@ -101,7 +110,8 @@ chrome.action.onClicked.addListener(async (tab) => {
 // Reset inspector state when browser starts - default to stopped
 chrome.runtime.onStartup.addListener(() => {
   console.log('AudioInspector: Browser started, resetting to stopped state');
-  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'debug_logs']);
+  // Include autoStoppedReason to prevent stale banner from previous session
+  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'autoStoppedReason', 'debug_logs', ...DATA_STORAGE_KEYS]);
   updateBadge(false);
 });
 
@@ -113,11 +123,50 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   // Kilitli tab kontrolü
   chrome.storage.local.get(['lockedTab'], (result) => {
     if (result.lockedTab && result.lockedTab.id === tabId) {
-      console.log('[Background] Kilitli tab kapatıldı, state temizleniyor');
-      chrome.storage.local.remove(['inspectorEnabled', 'lockedTab']);
+      console.log('[Background] Kilitli tab kapatıldı, state ve veriler temizleniyor');
+      chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', ...DATA_STORAGE_KEYS]);
       updateBadge(false);
     }
   });
+});
+
+// Tab değişimi (activation) kontrolü - aktif dinleme varsa otomatik durdur
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  const result = await chrome.storage.local.get(['inspectorEnabled', 'lockedTab']);
+
+  // Dinleme aktif değilse hiçbir şey yapma
+  if (!result.inspectorEnabled || !result.lockedTab) {
+    return;
+  }
+
+  // Aktif tab değişti mi kontrol et
+  const newActiveTabId = activeInfo.tabId;
+  const lockedTabId = result.lockedTab.id;
+
+  if (newActiveTabId !== lockedTabId) {
+    // Farklı tab'a geçildi, otomatik durdur
+    console.log('[Background] Tab switched during monitoring - auto-stopping');
+
+    // Auto-stop reason set et
+    await chrome.storage.local.set({ autoStoppedReason: 'tab_switch' });
+
+    // Inspector'ı durdur (lockedTab kalsın - review için)
+    await chrome.storage.local.remove(['inspectorEnabled']);
+
+    // Badge'i güncelle
+    updateBadge(false);
+
+    // Locked tab'e mesaj gönder (page script'i durdur)
+    try {
+      await chrome.tabs.sendMessage(lockedTabId, {
+        type: 'SET_ENABLED',
+        enabled: false
+      });
+    } catch (e) {
+      // Tab erişilemez olabilir (arka planda, suspended, vb.)
+      console.log('[Background] Could not send stop message to locked tab:', e.message);
+    }
+  }
 });
 
 // Update badge based on inspector state (simpler than icon switching)
@@ -169,8 +218,9 @@ function reloadTestTabs() {
 // Auto-inject page script when content script requests it
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'INJECT_PAGE_SCRIPT' && sender.tab?.id) {
-    handleInjection(sender.tab.id, sender.frameId)
-      .then(() => sendResponse({ success: true }))
+    const tabId = sender.tab.id;
+    handleInjection(tabId, sender.frameId)
+      .then(() => sendResponse({ success: true, tabId })) // Include tabId in response (sync alternative)
       .catch((err) => {
         console.error('Injection failed:', err);
         sendResponse({ success: false, error: err.message });

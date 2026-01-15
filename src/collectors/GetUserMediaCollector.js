@@ -2,7 +2,7 @@
 
 import { logger } from '../core/Logger.js';
 import BaseCollector from './BaseCollector.js';
-import { EVENTS, DATA_TYPES } from '../core/constants.js';
+import { EVENTS, DATA_TYPES, streamRegistry } from '../core/constants.js';
 import { hookAsyncMethod } from '../core/utils/ApiHook.js';
 
 /**
@@ -12,9 +12,6 @@ import { hookAsyncMethod } from '../core/utils/ApiHook.js';
 class GetUserMediaCollector extends BaseCollector {
   constructor(options = {}) {
     super('get-user-media', options);
-
-    /** @type {Function|null} */
-    this.originalGetUserMedia = null;
 
     /** @type {Map<string, Object>} */
     this.activeStreams = new Map();
@@ -84,10 +81,20 @@ class GetUserMediaCollector extends BaseCollector {
         capabilities: capabilities
       };
 
+      // Stream'i mikrofon registry'sine kaydet (AudioContextCollector tarafından sorgulanacak)
+      streamRegistry.microphone.add(stream.id);
+
+      // Track ended olduğunda registry'den temizle (memory leak önleme)
+      audioTrack.addEventListener('ended', () => {
+        streamRegistry.microphone.delete(stream.id);
+        this.activeStreams.delete(stream.id);
+        logger.info(this.logPrefix, `Audio track ended, stream ${stream.id} removed from registry`);
+      });
+
       this.activeStreams.set(stream.id, metadata);
       this.emit(EVENTS.DATA, metadata);
 
-      logger.info(this.logPrefix, `Audio track detected:`, metadata);
+      logger.info(this.logPrefix, `Audio track detected (stream ${stream.id} registered as microphone):`, metadata);
     }
   }
 

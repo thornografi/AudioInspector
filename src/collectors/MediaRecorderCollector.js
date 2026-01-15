@@ -14,9 +14,6 @@ class MediaRecorderCollector extends BaseCollector {
   constructor(options = {}) {
     super('media-recorder', options);
 
-    /** @type {Function|null} */
-    this.originalMediaRecorder = null;
-    
     /** @type {Map<any, any>} */
     this.activeRecorders = new Map();
 

@@ -1,143 +1,147 @@
-# AudioInspector - Project Guidelines
+# AudioInspector - Proje Rehberi
 
 ## Klasör Yapısı
 
 ```
 audio-inspector/
-├── .claude/              # Claude Code configuration & skills
-│   ├── settings.json     # Skill registration
-│   ├── README.md         # Skill index
-│   └── skills/           # Custom skills
+├── .claude/              # Claude Code yapılandırma ve skill'ler
+│   ├── settings.json     # Skill kayıtları
+│   ├── README.md         # Skill dizini
+│   └── skills/           # Özel skill'ler
 │       ├── architecture/SKILL.md
 │       └── collectors/SKILL.md
 │
-├── src/                  # Modular application code
-│   ├── core/             # Utilities & constants
-│   │   ├── utils/ApiHook.js
-│   │   ├── Logger.js
-│   │   └── constants.js
-│   ├── collectors/       # Data collection modules
+├── src/                  # Modüler uygulama kodu
+│   ├── core/             # Yardımcılar ve sabitler
+│   │   ├── utils/
+│   │   │   ├── ApiHook.js      # API hooking yardımcısı
+│   │   │   ├── CodecParser.js  # Codec ayrıştırma
+│   │   │   └── EarlyHook.js    # Erken hook mekanizması
+│   │   ├── Logger.js           # Merkezi loglama
+│   │   └── constants.js        # Sabitler
+│   ├── collectors/       # Veri toplama modülleri
 │   │   ├── BaseCollector.js
+│   │   ├── PollingCollector.js
 │   │   ├── RTCPeerConnectionCollector.js
 │   │   ├── GetUserMediaCollector.js
 │   │   ├── AudioContextCollector.js
 │   │   └── MediaRecorderCollector.js
-│   ├── detectors/        # Platform detection
+│   ├── detectors/        # Platform algılama
+│   │   ├── BaseDetector.js
 │   │   ├── RegexDetector.js
 │   │   └── platforms/
 │   │       └── StandardDetectors.js
-│   └── page/             # Main orchestrator
+│   └── page/             # Ana orkestratör
 │       └── PageInspector.js
 │
-├── scripts/              # Extension script files
+├── scripts/              # Extension script dosyaları
 │   ├── background.js     # Service worker (Manifest V3)
 │   ├── content.js        # Content script (ISOLATED world)
-│   ├── page.js           # Page script (MAIN world - hooks & APIs)
-│   ├── popup.js          # Popup UI logic
+│   ├── page.js           # Page script (MAIN world - hook'lar ve API'ler)
+│   └── popup.js          # Popup UI mantığı
 │
-├── views/                # HTML templates
-│   └── popup.html        # Popup interface
+├── views/                # HTML şablonları
+│   └── popup.html        # Popup arayüzü
 │
-├── images/               # Icons & visual assets
+├── images/               # İkonlar ve görsel varlıklar
 │   ├── icon16.png
 │   ├── icon48.png
 │   └── icon128.png
 │
-├── tests/                # Test files
-│   └── test.html
+├── tests/                # Test dosyaları
+│   ├── test.html
+│   └── ui-test.html
 │
 ├── manifest.json         # Extension manifest (Manifest V3)
-├── README.md             # Main documentation
-├── INSTALL.md            # Installation guide
-├── ICONS.md              # Icon documentation
-└── CLAUDE.md             # This file (project guidelines)
+├── AGENTS.md             # Agent rehberi
+└── CLAUDE.md             # Bu dosya (proje rehberi)
 ```
 
 ## Dosya Amaçları
 
-### Extension Scripts (`/scripts`)
-- **background.js** - Service worker, API injection, event handling
-- **content.js** - Content script bridge (ISOLATED world), message relay
-- **page.js** - Page script (MAIN world), WebRTC API hooks, data collection
-- **popup.js** - Popup UI logic, state management, event handlers
+### Extension Script'leri (`/scripts`)
+- **background.js** - Service worker, API enjeksiyonu, olay yönetimi
+- **content.js** - Content script köprüsü (ISOLATED world), mesaj aktarımı
+- **page.js** - Page script (MAIN world), WebRTC API hook'ları, veri toplama
+- **popup.js** - Popup UI mantığı, durum yönetimi, olay işleyicileri
 
-### Views & Assets (`/views`, `/images`)
-- **popup.html** - Extension popup template
-- **icon*.png** - Extension icons (16x16, 48x48, 128x128)
+### Görünümler ve Varlıklar (`/views`, `/images`)
+- **popup.html** - Extension popup şablonu
+- **icon*.png** - Extension ikonları (16x16, 48x48, 128x128)
 
-### Core Application (`/src`)
-- **PageInspector** - Main orchestrator. Instantiates collectors and handles direct reporting via `postMessage`.
-- **Collectors** - API hooks (RTCPeerConnection, getUserMedia, AudioContext, MediaRecorder)
-- **Detectors** - Platform detection (Teams, Discord, Zoom, etc.)
+### Çekirdek Uygulama (`/src`)
+- **PageInspector** - Ana orkestratör. Collector'ları başlatır ve `postMessage` ile doğrudan raporlama yapar.
+- **Collectors** - API hook'ları (RTCPeerConnection, getUserMedia, AudioContext, MediaRecorder)
+- **Detectors** - Platform algılama (Teams, Discord, Zoom, vb.)
 
-## Architecture Overview
+## Mimari Genel Bakış
 
-### Extension Lifecycle
+### Extension Yaşam Döngüsü
 
 ```
-User installs extension
+Kullanıcı extension'ı yükler
          ↓
-manifest.json loads scripts
+manifest.json script'leri yükler
          ↓
-background.js (Service Worker) starts
+background.js (Service Worker) başlar
          ↓
-content.js injects → page.js (MAIN world)
+content.js enjekte eder → page.js (MAIN world)
          ↓
-page.js hooks WebRTC APIs via PageInspector
+page.js, PageInspector aracılığıyla WebRTC API'lerini hook'lar
          ↓
-Collectors emit data → PageInspector
+Collector'lar veri üretir → PageInspector
          ↓
 PageInspector → window.postMessage()
          ↓
-content.js receives → chrome.storage.local
+content.js alır → chrome.storage.local
          ↓
-popup.js reads → displays UI
+popup.js okur → UI'ı günceller
 ```
 
-### Data Flow
+### Veri Akışı
 
 ```
 [MAIN world - page.js / PageInspector]
-  RTCPeerConnection, getUserMedia, AudioContext hooks
+  RTCPeerConnection, getUserMedia, AudioContext hook'ları
          ↓
   PageInspector._report() → window.postMessage()
          ↓
 [ISOLATED world - content.js]
-  postMessage listener → chrome.storage.local.set()
+  postMessage dinleyicisi → chrome.storage.local.set()
          ↓
-[Popup context - popup.js]
+[Popup bağlamı - popup.js]
   chrome.storage.local.get() → updateUI()
          ↓
 [UI - popup.html]
-  Display WebRTC stats, inspector status (Started/Stopped), controls
+  WebRTC istatistikleri, inspector durumu (Başladı/Durdu), kontroller
 ```
 
-### State Management
+### Durum Yönetimi
 
 - **inspectorEnabled** (chrome.storage.local) - Inspector aktif mi?
 - **lockedTab** (chrome.storage.local) - Kilitli tab bilgisi: `{ id, url, title }`
-- **platformInfo** (chrome.storage.local) - Platform detection (persistent)
-- **audioData** (chrome.storage.local) - Latest stats data
+- **platformInfo** (chrome.storage.local) - Platform algılama (kalıcı)
+- **audioData** (chrome.storage.local) - Son istatistik verileri
 - **debug_logs** (chrome.storage.local) - Merkezi log kayıtları
 
-### Control Messages
+### Kontrol Mesajları
 
-**page.js → content.js** (Initialization)
-- `INSPECTOR_READY` - PageInspector signals it's ready for commands (race condition fix)
+**page.js → content.js** (Başlatma)
+- `INSPECTOR_READY` - PageInspector komutlara hazır olduğunu bildirir (race condition düzeltmesi)
 
-**popup.js → content.js → page.js** (User actions)
-- `SET_ENABLED` - Toggle stats collection on/off
-- `FORCE_REFRESH` - Immediate stats collection
+**popup.js → content.js → page.js** (Kullanıcı eylemleri)
+- `SET_ENABLED` - İstatistik toplamayı aç/kapat
+- `FORCE_REFRESH` - Anlık istatistik toplama
 
-**content.js → background.js** (Tab & Log yönetimi)
+**content.js → background.js** (Tab ve Log yönetimi)
 - `GET_TAB_ID` - Content script kendi tab ID'sini öğrenir (tab kilitleme için)
 - `ADD_LOG` - Merkezi log ekleme (race condition önleme)
 
-**content.js → page.js** (State restoration)
-- `SET_ENABLED` - Restore inspector state after INSPECTOR_READY signal (tab ID + origin kontrolü ile)
-- `RE_EMIT_ALL` - Signal collectors to re-emit current data (after storage reset on new recording)
+**content.js → page.js** (Durum geri yükleme)
+- `SET_ENABLED` - INSPECTOR_READY sinyalinden sonra inspector durumunu geri yükle (tab ID + origin kontrolü ile)
+- `RE_EMIT_ALL` - Collector'lara mevcut verileri yeniden göndermelerini söyle (yeni kayıtta storage sıfırlandıktan sonra)
 
-## Skill Routing
+## Skill Yönlendirme
 
 İki özel skill mevcut (`.claude/skills/`):
 
@@ -150,78 +154,74 @@ Detaylı bilgi: `.claude/README.md`
 
 ## Kod Yazma Kuralları
 
-### 🔄 DRY (Don't Repeat Yourself)
-1. **Yeni kod yazmadan önce mevcut utility'leri kontrol et**
-   - CSS: `popup.html` → `.has-tooltip`, `.subheader`, `.sub-item`, CSS variables
+> **Temel İlke:** Aşağıdaki tüm kurallar "aşırı mühendislikten kaçınarak" uygulanmalıdır. Hedef, basitlik ile genişletilebilirlik arasındaki optimal dengeyi bulmaktır.
+
+### 🔄 DRY (Kendini Tekrarlama)
+1. **Yeni kod yazmadan önce mevcut yardımcıları kontrol et**
+   - CSS: `popup.html` → `.has-tooltip`, `.subheader`, `.sub-item`, CSS değişkenleri
    - JS: `src/core/utils/ApiHook.js`, `src/core/constants.js`
-2. **Tekrar eden değerler → constants.js veya CSS variable**
-3. **Benzer fonksiyonlar → tek parametrik fonksiyon**
+2. **Tekrar eden değerler → constants.js veya CSS değişkeni**
+3. **Benzer fonksiyonlar → tek parametrik fonksiyon** (ama gerçekten gerekiyorsa)
 
-### 🔓 OCP (Open-Closed Principle)
-4. **Genişlemeye açık, değişikliğe kapalı yaz**
-   - `data-attribute` > hardcoded content (bkz: `.has-tooltip`)
-   - Config object > çoklu if-else
-   - Factory function > tekrarlı constructor
-5. **Yeni özellik = yeni kod, mevcut kodu değiştirme**
+### 🔓 OCP (Açık-Kapalı Prensibi)
+4. **Genişlemeye açık, değişikliğe kapalı yaz** (sadece genişleme öngörülüyorsa)
+   - `data-attribute` > sabit içerik (bkz: `.has-tooltip`)
+   - Config nesnesi > çoklu if-else (karmaşıklık makul olduğunda)
+   - Factory fonksiyon > tekrarlı constructor
+5. **Yeni özellik = yeni kod** (ama önce mevcut kodu genişletmeyi düşün)
 
-### 🧬 Inheritance & Composition
+### 🧬 Kalıtım ve Bileşim
 6. **Mevcut base class varsa türet**
    - Collector → `BaseCollector` veya `PollingCollector`
-   - Detector → `RegexDetector`
+   - Detector → `BaseDetector` veya `RegexDetector`
 7. **Pattern'leri takip et** - Benzer kod nasıl yazılmış?
-8. **Composition > deep inheritance** - 2 seviyeden fazla türetme yapma
+8. **Bileşim > derin kalıtım** - 2 seviyeden fazla türetme yapma
 
-### ⚖️ Aşırı Mühendislikten Kaçın
-9. **YAGNI** - Şu an gerekmiyorsa ekleme
-10. **3 satır tekrar > 1 gereksiz abstraction**
+### ⚖️ YAGNI (Şimdi Gerekmiyorsa Ekleme)
+9. **3 satır tekrar > 1 gereksiz soyutlama**
+10. **Gelecek için değil, şimdi için yaz** - Varsayımsal gereksinimler için tasarlama
 
-## Development Guidelines
+## Geliştirme Rehberi
 
-### Adding New Collectors
+### Yeni Collector Ekleme
 
-1. Create new file: `src/collectors/MyCollector.js`
-2. Extend `BaseCollector` from `src/collectors/BaseCollector.js`
-3. Implement `initialize()`, `start()`, `stop()` methods
-4. Add to `src/page/PageInspector.js` instantiation list
+1. Yeni dosya oluştur: `src/collectors/MyCollector.js`
+2. `src/collectors/BaseCollector.js` veya `PollingCollector.js`'den türet
+3. `initialize()`, `start()`, `stop()` metodlarını uygula
+4. `src/page/PageInspector.js` başlatma listesine ekle
 
 Detaylı rehber: **collectors** skill'i
 
-### Adding New Detectors
+### Yeni Detector Ekleme
 
-1. Add detector definition to `src/detectors/platforms/StandardDetectors.js`
+1. Detector tanımını `src/detectors/platforms/StandardDetectors.js`'e ekle
 
-### File Path Rules
+### Dosya Yolu Kuralları
 
-- Manifest-referenced files MUST be in `/scripts`
-- HTML templates MUST be in `/views`
-- Icons MUST be in `/images`
-- Modular code MUST be in `/src`
-- Test files MUST be in `/tests`
+- Manifest'te referans verilen dosyalar `/scripts` içinde OLMALI
+- HTML şablonları `/views` içinde OLMALI
+- İkonlar `/images` içinde OLMALI
+- Modüler kod `/src` içinde OLMALI
+- Test dosyaları `/tests` içinde OLMALI
 
-### Important Notes
+### Önemli Notlar
 
-- Do NOT modify manifest.json without updating file paths in this guide
-- MAIN world injection (page.js) requires Chrome extension API permissions
-- Content script is ISOLATED - cannot access page variables directly
-- Platform info persists across storage clears (preserved by popup.js)
-- Stats polling controlled by extension enabled state
+- manifest.json'u değiştirmeden önce bu rehberdeki dosya yollarını güncelle
+- MAIN world enjeksiyonu (page.js) Chrome extension API izinleri gerektirir
+- Content script ISOLATED'dır - sayfa değişkenlerine doğrudan erişemez
+- Platform bilgisi storage temizlemelerinde korunur (popup.js tarafından saklanır)
+- İstatistik yoklama extension etkin durumuna göre kontrol edilir
 
-## Testing
+## Test
 
-After refactoring or adding features:
+Yeniden yapılandırma veya özellik ekledikten sonra:
 
 ```bash
-1. Open chrome://extensions/
-2. Click reload on AudioInspector
-3. Open DevTools (F12) → Console
-4. Check for errors starting with [AudioInspector]
-5. Test on WhatsApp Web, Teams, Discord, etc.
-6. Verify Start/Stop works
-7. Verify platform detection persists
+1. chrome://extensions/ aç
+2. AudioInspector'da yeniden yükle'ye tıkla
+3. DevTools (F12) → Console aç
+4. [AudioInspector] ile başlayan hataları kontrol et
+5. WhatsApp Web, Teams, Discord, vb. üzerinde test et
+6. Başlat/Durdur'un çalıştığını doğrula
+7. Platform algılamanın kalıcı olduğunu doğrula
 ```
-
-## References
-
-- [Manifest V3 Documentation](https://developer.chrome.com/docs/extensions/mv3/)
-- [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
-- [WebRTC Statistics](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/getStats)
