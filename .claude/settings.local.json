@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Skill(skill-audit)",
-      "Skill(skill-audit:*)"
-    ]
-  }
-}
