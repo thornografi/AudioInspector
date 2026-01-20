@@ -200,9 +200,7 @@ class PageInspector {
    */
   _reEmitAllCollectors() {
     for (const collector of this.collectors) {
-      if (typeof collector.reEmit === 'function') {
-        collector.reEmit();
-      }
+      collector.reEmit();  // All collectors have reEmit() via BaseCollector
     }
   }
 
@@ -226,6 +224,12 @@ class PageInspector {
    */
   async _stopAllCollectors() {
     await Promise.all(this.collectors.map(c => c.stop()));
+
+    // Clear early hook registry to prevent memory leak
+    // Hooks remain installed, only captured data is cleared
+    if (typeof window.__clearEarlyCaptures === 'function') {
+      window.__clearEarlyCaptures();
+    }
   }
 
   /**

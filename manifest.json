@@ -21,6 +21,13 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
+      "js": ["scripts/early-inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
       "js": ["scripts/content.js"],
       "run_at": "document_start",
       "all_frames": false

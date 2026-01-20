@@ -131,20 +131,31 @@ export function getCodecInfo(codec) {
   const codecDb = {
     opus: {
       name: 'Opus',
+      encoder: 'opus-recorder',
       type: 'lossy',
       typical_bitrate: '6-510 kbps',
       latency: 'low (2.5-60ms)',
       features: ['VBR', 'CBR', 'FEC', 'DTX', 'stereo']
     },
+    mp3: {
+      name: 'MP3',
+      encoder: 'lamejs',
+      type: 'lossy',
+      typical_bitrate: '128-320 kbps',
+      latency: 'medium',
+      features: ['VBR', 'CBR', 'joint stereo']
+    },
     aac: {
       name: 'AAC',
+      encoder: 'fdk-aac.js',
       type: 'lossy',
       typical_bitrate: '96-320 kbps',
       latency: 'medium',
-      features: ['VBR', 'CBR', 'HE-AAC']
+      features: ['VBR', 'CBR', 'HE-AAC', 'AAC-LC']
     },
     pcm: {
       name: 'PCM (Uncompressed)',
+      encoder: null,
       type: 'lossless',
       typical_bitrate: '1411 kbps (CD quality)',
       latency: 'none',
@@ -152,6 +163,7 @@ export function getCodecInfo(codec) {
     },
     vorbis: {
       name: 'Vorbis',
+      encoder: 'vorbis.js',
       type: 'lossy',
       typical_bitrate: '64-500 kbps',
       latency: 'medium',
@@ -159,6 +171,7 @@ export function getCodecInfo(codec) {
     },
     flac: {
       name: 'FLAC',
+      encoder: 'libflac.js',
       type: 'lossless',
       typical_bitrate: '~1000 kbps',
       latency: 'low',
@@ -167,5 +180,57 @@ export function getCodecInfo(codec) {
   };
 
   if (!codec) return null;
-  return codecDb[codec.toLowerCase()] || { name: codec, type: 'unknown' };
+  return codecDb[codec.toLowerCase()] || { name: codec, encoder: null, type: 'unknown' };
+}
+
+/**
+ * Worker URL veya dosya adından encoder tespit eder
+ * @param {string|null} url - Worker URL veya dosya adı
+ * @param {string|null} codec - Bilinen codec (varsa)
+ * @returns {{encoder: string|null, codec: string|null}} Tespit edilen encoder ve codec
+ */
+export function detectEncoder(url, codec = null) {
+  if (!url) {
+    // Codec'den varsayılan encoder
+    if (codec) {
+      const info = getCodecInfo(codec);
+      return { encoder: info?.encoder || null, codec };
+    }
+    return { encoder: null, codec: null };
+  }
+
+  const urlLower = url.toLowerCase();
+
+  // lamejs MP3 encoder patterns
+  if (urlLower.includes('lame') || urlLower.includes('lamejs') || urlLower.includes('mp3encoder')) {
+    return { encoder: 'lamejs', codec: 'mp3' };
+  }
+
+  // opus-recorder patterns
+  if (urlLower.includes('opus') || urlLower.includes('libopus')) {
+    return { encoder: 'opus-recorder', codec: 'opus' };
+  }
+
+  // fdk-aac.js patterns
+  if (urlLower.includes('fdk') || urlLower.includes('fdkaac') || urlLower.includes('aacencoder')) {
+    return { encoder: 'fdk-aac.js', codec: 'aac' };
+  }
+
+  // vorbis.js patterns
+  if (urlLower.includes('vorbis') || urlLower.includes('libvorbis') || urlLower.includes('oggencoder')) {
+    return { encoder: 'vorbis.js', codec: 'vorbis' };
+  }
+
+  // libflac.js patterns
+  if (urlLower.includes('flac') || urlLower.includes('libflac')) {
+    return { encoder: 'libflac.js', codec: 'flac' };
+  }
+
+  // Codec'den varsayılan encoder
+  if (codec) {
+    const info = getCodecInfo(codec);
+    return { encoder: info?.encoder || null, codec };
+  }
+
+  return { encoder: null, codec: null };
 }

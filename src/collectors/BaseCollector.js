@@ -83,6 +83,34 @@ class BaseCollector {
   }
 
   /**
+   * Re-emit current data from active instances
+   * Called when UI needs to be refreshed (e.g., after data reset)
+   * Default implementation is no-op - subclasses should override if they maintain state
+   */
+  reEmit() {
+    // Default: no-op
+    // Subclasses with active state (streams, connections, contexts) should override
+  }
+
+  /**
+   * Register a global handler on window object for early hook communication.
+   * EarlyHook.js captures instances before collectors are ready - this handler
+   * allows collectors to receive those instances when they initialize.
+   *
+   * @param {string} handlerName - Global handler name (e.g., '__rtcPeerConnectionCollectorHandler')
+   * @param {Function} handler - Handler function to register
+   */
+  registerGlobalHandler(handlerName, handler) {
+    try {
+      // @ts-ignore - Dynamic window property assignment
+      window[handlerName] = handler;
+      logger.info(this.logPrefix, `Global handler registered: ${handlerName}`);
+    } catch (err) {
+      logger.warn(this.logPrefix, `Failed to register global handler ${handlerName}:`, err);
+    }
+  }
+
+  /**
    * Emit event to listeners (used internally by subclasses)
    * Only emits if collector is active (started)
    * @param {string} eventName - Event name (e.g., 'data', 'error', 'stats')

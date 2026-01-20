@@ -1,7 +1,7 @@
 // @ts-check
 
 import BaseCollector from './BaseCollector.js';
-import { EVENTS, DATA_TYPES, DESTINATION_TYPES, streamRegistry } from '../core/constants.js';
+import { EVENTS, DATA_TYPES, DESTINATION_TYPES, streamRegistry, ENCODER_KEYWORDS } from '../core/constants.js';
 import { logger } from '../core/Logger.js';
 import { hookAsyncMethod, hookMethod } from '../core/utils/ApiHook.js';
 import { getInstanceRegistry, cleanupClosedAudioContexts } from '../core/utils/EarlyHook.js';
@@ -9,31 +9,42 @@ import { getInstanceRegistry, cleanupClosedAudioContexts } from '../core/utils/E
 /**
  * Sync handlers for methodCalls - OCP: Add new handlers without modifying sync loop
  * Maps registry keys to pipeline sync functions
- * @type {Object<string, Function>}
+ *
+ * ⚠️ SYNC REQUIRED: When adding a new processor type here, also add a corresponding
+ * hook in EarlyHook.js → METHOD_HOOK_CONFIGS
  */
-const METHOD_CALL_SYNC_HANDLERS = {
-  scriptProcessor: (data, pipeline) => {
-    pipeline.processors.push({
-      type: 'scriptProcessor',
-      bufferSize: data.bufferSize,
-      inputChannels: data.inputChannels,
-      outputChannels: data.outputChannels,
-      timestamp: data.timestamp
-    });
-  },
-  analyser: (data, pipeline) => {
-    pipeline.processors.push({
-      type: 'analyser',
-      timestamp: data.timestamp
-    });
-  },
-  mediaStreamSource: (data, pipeline) => {
-    // TODO: Determine from streamId using streamRegistry
-    pipeline.inputSource = 'microphone';
-  },
-  mediaStreamDestination: (data, pipeline) => {
-    pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+
+/**
+ * Factory: Creates a processor handler with duplicate check
+ * DRY: All DSP nodes use this pattern - add new nodes with single line
+ * @param {string} type - Processor type name
+ * @param {Object<string, string>} [fieldMap] - Maps data fields to entry fields with defaults: { fieldName: 'defaultValue' }
+ */
+const createProcessorHandler = (type, fieldMap = {}) => (data, pipeline) => {
+  if (pipeline.processors.some(p => p.type === type && p.timestamp === data.timestamp)) return;
+  const entry = { type, timestamp: data.timestamp };
+  for (const [field, defaultVal] of Object.entries(fieldMap)) {
+    entry[field] = data[field] ?? defaultVal;
   }
+  pipeline.processors.push(entry);
+};
+
+const METHOD_CALL_SYNC_HANDLERS = {
+  // Special handlers (non-processor)
+  mediaStreamSource: (data, pipeline) => { pipeline.inputSource = 'microphone'; },
+  mediaStreamDestination: (data, pipeline) => { pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM; },
+
+  // Processor handlers - OCP: Add new DSP node with single line
+  scriptProcessor: createProcessorHandler('scriptProcessor', { bufferSize: 4096, inputChannels: 2, outputChannels: 2 }),
+  analyser: createProcessorHandler('analyser'),
+  gain: createProcessorHandler('gain'),
+  biquadFilter: createProcessorHandler('biquadFilter', { filterType: 'lowpass' }),
+  dynamicsCompressor: createProcessorHandler('dynamicsCompressor'),
+  oscillator: createProcessorHandler('oscillator', { oscillatorType: 'sine' }),
+  delay: createProcessorHandler('delay', { maxDelayTime: 1 }),
+  convolver: createProcessorHandler('convolver'),
+  waveShaper: createProcessorHandler('waveShaper', { oversample: 'none' }),
+  panner: createProcessorHandler('panner', { panningModel: 'equalpower' })
 };
 
 /**
@@ -50,20 +61,75 @@ class AudioContextCollector extends BaseCollector {
     /** @type {number} */
     this.contextIdCounter = 0;
 
-    /** @type {Function|null} */
-    this.originalCreateScriptProcessor = null;
+    /**
+     * Pending worklets queue for deferred matching
+     * When AudioWorklet.addModule is called before context is registered,
+     * we queue it here and match when context is registered later.
+     * @type {Array<{audioWorkletInstance: AudioWorklet, moduleUrl: string, isEncoder: boolean, timestamp: number}>}
+     */
+    this.pendingWorklets = [];
 
-    /** @type {Function|null} */
-    this.originalAudioWorkletAddModule = null;
+    /**
+     * Pending WASM encoder data
+     * When WASM encoder is detected before collector is active (started),
+     * we store it here and emit when start() is called.
+     * @type {Object|null}
+     */
+    this.pendingWasmEncoder = null;
 
-    /** @type {Function|null} */
-    this.originalCreateMediaStreamDestination = null;
+    // NOTE: Original method references are not stored because:
+    // 1. We hook on prototype level, not instance level
+    // 2. Restoring would break other extensions that also hook these methods
+    // 3. The hooks are designed to be "forever running" in page context
+  }
 
-    /** @type {Function|null} */
-    this.originalCreateAnalyser = null;
+  _getContextIdMap() {
+    const win = /** @type {any} */ (window);
+    const existing = win.__audioInspectorContextIdMap;
+    if (existing && typeof existing.get === 'function' && typeof existing.set === 'function') {
+      return existing;
+    }
+    const map = new WeakMap();
+    win.__audioInspectorContextIdMap = map;
+    return map;
+  }
 
-    /** @type {Function|null} */
-    this.originalCreateMediaStreamSource = null;
+  _syncContextIdCounterFromId(contextId) {
+    if (typeof contextId !== 'string') return;
+    const match = /^ctx_(\d+)$/.exec(contextId);
+    if (!match) return;
+    const num = Number(match[1]);
+    if (!Number.isNaN(num) && num > this.contextIdCounter) {
+      this.contextIdCounter = num;
+    }
+  }
+
+  _getOrAssignContextId(ctx) {
+    if (!ctx) {
+      this.contextIdCounter += 1;
+      return `ctx_${this.contextIdCounter}`;
+    }
+
+    const map = this._getContextIdMap();
+    let contextId = map.get(ctx);
+    if (contextId) {
+      this._syncContextIdCounterFromId(contextId);
+      return contextId;
+    }
+
+    this.contextIdCounter += 1;
+    contextId = `ctx_${this.contextIdCounter}`;
+    map.set(ctx, contextId);
+
+    const win = /** @type {any} */ (window);
+    const winCounter = Number.isInteger(win.__audioInspectorContextIdCounter)
+      ? win.__audioInspectorContextIdCounter
+      : 0;
+    if (this.contextIdCounter > winCounter) {
+      win.__audioInspectorContextIdCounter = this.contextIdCounter;
+    }
+
+    return contextId;
   }
 
   /**
@@ -75,48 +141,22 @@ class AudioContextCollector extends BaseCollector {
   async initialize() {
     logger.info(this.logPrefix, 'Initializing AudioContextCollector hooks...');
 
-    // Register global handler IMMEDIATELY (even before start)
-    // This ensures we catch instances even if inspector is stopped
-    // @ts-ignore
-    window.__audioContextCollectorHandler = (ctx) => {
-      // Only emit if active, but always track the instance
+    // Register global handler for early hook communication
+    this.registerGlobalHandler('__audioContextCollectorHandler', (ctx) => {
       this._handleNewContext(ctx);
-    };
+    });
 
-    // Early hooks already installed constructor hooks, so we skip hookConstructor here
-    // to avoid overwriting the early Proxy
-    logger.info(this.logPrefix, 'Skipping constructor hook (early hook already installed)');
+    // ScriptProcessor detection is handled via:
+    // 1. early-inject.js instance-level hooks (for earliest captures)
+    // 2. EarlyHook.js METHOD_HOOK_CONFIGS (for prototype-level fallback)
+    // 3. METHOD_CALL_SYNC_HANDLERS syncs to pipeline on start()
+    // 4. popup.js ENCODER_DETECTORS (for UI display as encoding heuristic)
+    // Chrome deprecation warnings are accepted for this critical detection feature
 
-    // 3. Hook createScriptProcessor (Sync method)
-    // We can hook it on the prototype so all instances get it
-    // Note: shouldHook is always true - emit() checks this.active internally
-    if (window.AudioContext && window.AudioContext.prototype) {
-        this.originalCreateScriptProcessor = hookMethod(
-            window.AudioContext.prototype,
-            'createScriptProcessor',
-            // @ts-ignore
-            (node, args) => this._handleScriptProcessor(node, args),
-            () => true  // Always hook, emit() controls data flow
-        );
-        logger.info(this.logPrefix, 'Hooked AudioContext.prototype.createScriptProcessor');
-    }
-    // Also try webkit prototype if different
-    // @ts-ignore
-    if (window.webkitAudioContext && window.webkitAudioContext.prototype && window.webkitAudioContext.prototype !== window.AudioContext.prototype) {
-        hookMethod(
-            // @ts-ignore
-            window.webkitAudioContext.prototype,
-            'createScriptProcessor',
-            // @ts-ignore
-            (node, args) => this._handleScriptProcessor(node, args),
-            () => true
-        );
-    }
-
-    // 4. Hook AudioWorklet.addModule (Async method)
+    // 3. Hook AudioWorklet.addModule (Async method)
     // @ts-ignore
     if (window.AudioWorklet && window.AudioWorklet.prototype) {
-        this.originalAudioWorkletAddModule = hookAsyncMethod(
+        hookAsyncMethod(
             // @ts-ignore
             window.AudioWorklet.prototype,
             'addModule',
@@ -130,7 +170,7 @@ class AudioContextCollector extends BaseCollector {
     // 5. Hook createMediaStreamDestination (Sync method)
     // Bu metod MediaRecorder'a giden output için kullanılır
     if (window.AudioContext && window.AudioContext.prototype) {
-        this.originalCreateMediaStreamDestination = hookMethod(
+        hookMethod(
             window.AudioContext.prototype,
             'createMediaStreamDestination',
             // @ts-ignore
@@ -142,7 +182,7 @@ class AudioContextCollector extends BaseCollector {
 
     // 6. Hook createAnalyser (Sync method) - VU meter / visualizer detection
     if (window.AudioContext && window.AudioContext.prototype) {
-        this.originalCreateAnalyser = hookMethod(
+        hookMethod(
             window.AudioContext.prototype,
             'createAnalyser',
             // @ts-ignore
@@ -154,7 +194,7 @@ class AudioContextCollector extends BaseCollector {
 
     // 7. Hook createMediaStreamSource (Sync method) - Microphone input detection
     if (window.AudioContext && window.AudioContext.prototype) {
-        this.originalCreateMediaStreamSource = hookMethod(
+        hookMethod(
             window.AudioContext.prototype,
             'createMediaStreamSource',
             // @ts-ignore
@@ -165,10 +205,26 @@ class AudioContextCollector extends BaseCollector {
     }
 
     // 8. Register WASM encoder handler (Worker.postMessage hook in EarlyHook.js)
-    // @ts-ignore
-    window.__wasmEncoderHandler = (encoderInfo) => {
+    this.registerGlobalHandler('__wasmEncoderHandler', (encoderInfo) => {
       this._handleWasmEncoder(encoderInfo);
-    };
+    });
+
+    // 9. Register AudioWorkletNode handler (constructor hook in EarlyHook.js)
+    this.registerGlobalHandler('__audioWorkletNodeHandler', (node, args) => {
+      this._handleAudioWorkletNode(node, args);
+    });
+
+    // 10. Register method call handler for real-time pipeline updates
+    // This is called by EarlyHook.js prototype hooks (createScriptProcessor, etc.)
+    this.registerGlobalHandler('__audioContextMethodCallHandler', (ctx, methodCallData) => {
+      this._handleMethodCall(ctx, methodCallData);
+    });
+
+    // 11. Register audio connection handler (AudioNode.connect() calls)
+    // This captures the audio graph topology: who connects to whom
+    this.registerGlobalHandler('__audioConnectionHandler', (connection) => {
+      this._handleAudioConnection(connection);
+    });
 
   }
 
@@ -179,9 +235,7 @@ class AudioContextCollector extends BaseCollector {
    * @param {boolean} shouldEmit - If true, emit data event; if false, silent registration
    */
   _handleNewContext(ctx, shouldEmit = true) {
-      // Generate unique context ID
-      this.contextIdCounter++;
-      const contextId = `ctx_${this.contextIdCounter}`;
+      const contextId = this._getOrAssignContextId(ctx);
 
       const now = Date.now();
       const metadata = {
@@ -207,6 +261,57 @@ class AudioContextCollector extends BaseCollector {
 
       this.activeContexts.set(ctx, metadata);
 
+      // ═══════════════════════════════════════════════════════════════════
+      // LATENCY UPDATE: outputLatency may not be accurate until context is running
+      // Listen for state change to update latency values when context becomes running
+      // ═══════════════════════════════════════════════════════════════════
+      if (ctx.state !== 'running') {
+        const updateLatencyOnRunning = () => {
+          if (ctx.state === 'running' && this.activeContexts.has(ctx)) {
+            const ctxData = this.activeContexts.get(ctx);
+            const newBaseLatency = ctx.baseLatency;
+            const newOutputLatency = ctx.outputLatency;
+
+            // Only update and emit if latency actually changed
+            if (ctxData.static.baseLatency !== newBaseLatency ||
+                ctxData.static.outputLatency !== newOutputLatency) {
+              ctxData.static.baseLatency = newBaseLatency;
+              ctxData.static.outputLatency = newOutputLatency;
+              ctxData.static.state = ctx.state;
+
+              if (this.active) {
+                this.emit(EVENTS.DATA, ctxData);
+                logger.info(this.logPrefix, `Latency updated for ${contextId}: base=${(newBaseLatency * 1000).toFixed(1)}ms, output=${(newOutputLatency * 1000).toFixed(1)}ms`);
+              }
+            }
+          }
+          // Remove listener after first running state
+          ctx.removeEventListener('statechange', updateLatencyOnRunning);
+        };
+
+        ctx.addEventListener('statechange', updateLatencyOnRunning);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // SYNC REGISTRY methodCalls: Check if prototype hooks already captured
+      // method calls for this context (e.g., createScriptProcessor called
+      // between AudioContext creation and this handler running)
+      // ═══════════════════════════════════════════════════════════════════
+      const registry = getInstanceRegistry();
+      const registryEntry = registry.audioContexts.find(e => e.instance === ctx);
+      if (registryEntry?.methodCalls?.length > 0) {
+        this._syncMethodCallsToExistingContext(ctx, registryEntry.methodCalls);
+        // Clear to prevent re-sync
+        registryEntry.methodCalls = [];
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // DEFERRED MATCHING: Check pending worklets queue
+      // If addModule was called before this context was registered,
+      // the worklet is waiting in pendingWorklets - match and emit now
+      // ═══════════════════════════════════════════════════════════════════
+      this._matchPendingWorklets(ctx, metadata);
+
       // Conditionally emit based on caller
       if (shouldEmit) {
         this.emit(EVENTS.DATA, metadata);
@@ -214,6 +319,66 @@ class AudioContextCollector extends BaseCollector {
       } else {
         logger.info(this.logPrefix, 'AudioContext registered (silent):', metadata);
       }
+  }
+
+  /**
+   * Sync methodCalls to an existing context's pipeline (no duplicate context creation)
+   * Used when registry contains same instance as earlyCaptures
+   * @private
+   * @param {AudioContext} instance - The AudioContext instance
+   * @param {Array} methodCalls - Array of method call records from registry
+   */
+  _syncMethodCallsToExistingContext(instance, methodCalls) {
+    const ctxData = this.activeContexts.get(instance);
+    if (!ctxData) {
+      logger.warn(this.logPrefix, 'Cannot sync methodCalls - context not in activeContexts');
+      return;
+    }
+
+    // Apply all registered handlers for each method call in order
+    methodCalls.forEach((call) => {
+      const handler = METHOD_CALL_SYNC_HANDLERS[call.type];
+      if (handler) {
+        handler(call, ctxData.pipeline);
+      }
+    });
+
+    ctxData.pipeline.timestamp = Date.now();
+
+    // Emit updated context data
+    this.emit(EVENTS.DATA, ctxData);
+
+    const callTypes = methodCalls.map(c => c.type);
+    logger.info(this.logPrefix, `Synced pipeline data for ${ctxData.contextId}:`, callTypes);
+  }
+
+  /**
+   * Handle real-time method call from EarlyHook.js prototype hooks
+   * Updates activeContexts pipeline immediately when methods like createScriptProcessor are called
+   * @private
+   * @param {AudioContext} ctx - The AudioContext instance
+   * @param {Object} methodCallData - { type: 'scriptProcessor', bufferSize, inputChannels, outputChannels, timestamp }
+   */
+  _handleMethodCall(ctx, methodCallData) {
+    if (!this.active) return;  // Only process when collector is active
+
+    const ctxData = this.activeContexts.get(ctx);
+    if (!ctxData) {
+      // Context not in activeContexts yet - will be synced when context is registered
+      logger.info(this.logPrefix, `Method call ${methodCallData.type} queued (context not yet registered)`);
+      return;
+    }
+
+    // Apply the handler for this method type
+    const handler = METHOD_CALL_SYNC_HANDLERS[methodCallData.type];
+    if (handler) {
+      handler(methodCallData, ctxData.pipeline);
+      ctxData.pipeline.timestamp = Date.now();
+
+      // Emit updated context data
+      this.emit(EVENTS.DATA, ctxData);
+      logger.info(this.logPrefix, `Real-time pipeline update: ${methodCallData.type} added to ${ctxData.contextId}`);
+    }
   }
 
   /**
@@ -230,6 +395,20 @@ class AudioContextCollector extends BaseCollector {
           return true;
       }
       return false;
+  }
+
+  /**
+   * Get context data with late-discovery support
+   * Ensures context is registered, then returns its metadata
+   * DRY helper combining _ensureContextRegistered + activeContexts.get
+   * @private
+   * @param {AudioContext} ctx
+   * @returns {Object|undefined} Context metadata or undefined if ctx is null
+   */
+  _getContextData(ctx) {
+      if (!ctx) return undefined;
+      this._ensureContextRegistered(ctx);
+      return this.activeContexts.get(ctx);
   }
 
   /**
@@ -251,16 +430,10 @@ class AudioContextCollector extends BaseCollector {
           timestamp: Date.now()
       };
 
-      // Find which context this node belongs to
-      // node.context should point to the AudioContext
-      const ctx = node.context;
+      // Find which context this node belongs to and ensure it's registered
+      const ctxData = this._getContextData(node.context);
 
-      // Late-discovery: register context if not already known
-      this._ensureContextRegistered(ctx);
-
-      if (this.activeContexts.has(ctx)) {
-          const ctxData = this.activeContexts.get(ctx);
-          if (ctxData) {
+      if (ctxData) {
             // Single active processor - replace instead of accumulate
             const processorEntry = {
               type: 'scriptProcessor',
@@ -277,13 +450,25 @@ class AudioContextCollector extends BaseCollector {
               ctxData.pipeline.processors.push(processorEntry);
             }
             ctxData.pipeline.timestamp = Date.now();
+
+            // ═══════════════════════════════════════════════════════════════
+            // PCM PROCESSING HINT: ScriptProcessor processes raw audio data
+            // This indicates raw PCM data is being processed (not yet encoded)
+            // Actual encoding detection is handled in Encoding section (popup.js)
+            // ═══════════════════════════════════════════════════════════════
+            ctxData.encodingHint = {
+              type: 'scriptProcessor',
+              bufferSize: spData.bufferSize,
+              channels: spData.inputChannels || spData.outputChannels || 1,
+              hint: 'Raw PCM data'
+            };
+
             // Re-emit updated context data
             this.emit(EVENTS.DATA, ctxData);
             logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch (context: ${ctxData.contextId})`);
-          }
       } else {
            // Context gerçekten null veya undefined (iframe/cross-origin)
-           logger.warn(this.logPrefix, `ScriptProcessor created but context is ${ctx === null ? 'null' : 'undefined'}`);
+           logger.warn(this.logPrefix, `ScriptProcessor created but context is ${node.context === null ? 'null' : 'undefined'}`);
 
            // Emit as orphan data (yeni yapıda)
            const now = Date.now();
@@ -331,9 +516,9 @@ class AudioContextCollector extends BaseCollector {
       };
 
       // Encoder pattern detection - check if AudioWorklet URL indicates an encoder
-      const ENCODER_PATTERNS = ['encoder', 'opus', 'ogg', 'wasm-audio', 'audio-encoder', 'voice-processor', 'mediaworker'];
+      // Uses ENCODER_KEYWORDS from constants.js (single source of truth)
       const urlLower = (typeof moduleUrl === 'string' ? moduleUrl : '').toLowerCase();
-      const isEncoder = ENCODER_PATTERNS.some(pattern => urlLower.includes(pattern));
+      const isEncoder = ENCODER_KEYWORDS.some(kw => urlLower.includes(kw));
 
       // Find the AudioContext that owns this AudioWorklet instance
       // by iterating through our known contexts and matching ctx.audioWorklet === audioWorkletInstance
@@ -353,22 +538,22 @@ class AudioContextCollector extends BaseCollector {
       }
 
       if (matchedContextData) {
-          // Add worklet to pipeline.processors array
-          const processorEntry = {
-            type: 'audioWorklet',
-            moduleUrl: workletData.url,
-            timestamp: workletData.timestamp
-          };
-          matchedContextData.pipeline.processors.push(processorEntry);
-          matchedContextData.pipeline.timestamp = Date.now();
+          // NOTE: addModule sadece modülü yükler, pipeline'a EKLEMEYİZ
+          // AudioWorkletNode instance'ı oluşturulduğunda (_handleAudioWorkletNode) eklenir
+          // Bu duplicate'ı önler: AudioWorklet → Worklet(name) yerine sadece Worklet(name) görünür
 
           // If encoder pattern detected, emit to canonical wasm_encoder storage
           if (isEncoder) {
+              // Extract container from URL (ogg, webm)
+              const container = urlLower.includes('ogg') ? 'ogg' :
+                               urlLower.includes('webm') ? 'webm' : null;
+
               // Emit to canonical wasm_encoder storage (not attached to audioContext)
               this.emit(EVENTS.DATA, {
                   type: DATA_TYPES.WASM_ENCODER,
                   timestamp: Date.now(),
                   codec: 'opus',
+                  container: container,  // Extracted from URL
                   source: 'audioworklet',  // URL pattern detection
                   moduleUrl: moduleUrl,
                   linkedContextId: matchedContextId,  // Context bağlantısı
@@ -389,15 +574,92 @@ class AudioContextCollector extends BaseCollector {
           // Re-emit updated context data
           this.emit(EVENTS.DATA, matchedContextData);
       } else {
-          // Fallback: emit as orphan worklet event (context not found)
-          logger.warn(this.logPrefix, 'AudioWorklet module added but context not found:', workletData);
+          // ═══════════════════════════════════════════════════════════════════
+          // DEFERRED MATCHING: Context not found yet - queue for later matching
+          // This handles the race condition where addModule is called before
+          // the AudioContext is registered in activeContexts
+          // ═══════════════════════════════════════════════════════════════════
+          logger.info(this.logPrefix, `AudioWorklet module queued for deferred matching: ${moduleUrl}`);
 
+          this.pendingWorklets.push({
+              audioWorkletInstance,
+              moduleUrl,
+              isEncoder,
+              timestamp: Date.now()
+          });
+
+          // Also emit orphan event for backwards compatibility and debugging
           this.emit(EVENTS.DATA, {
               type: DATA_TYPES.AUDIO_WORKLET,
               timestamp: Date.now(),
               moduleUrl: workletData.url,
-              contextId: null
+              contextId: null,
+              pending: true  // Flag to indicate it's queued for matching
           });
+      }
+  }
+
+  /**
+   * Match pending worklets to a newly registered context
+   * Called from _handleNewContext after context is added to activeContexts
+   * @private
+   * @param {AudioContext} ctx - The newly registered AudioContext
+   * @param {Object} ctxData - The context metadata
+   */
+  _matchPendingWorklets(ctx, ctxData) {
+      if (this.pendingWorklets.length === 0) return;
+
+      // Find worklets belonging to this context
+      const matched = [];
+      const remaining = [];
+
+      for (const pending of this.pendingWorklets) {
+          try {
+              if (ctx.audioWorklet === pending.audioWorkletInstance) {
+                  matched.push(pending);
+              } else {
+                  remaining.push(pending);
+              }
+          } catch (e) {
+              // Keep in remaining if comparison fails
+              remaining.push(pending);
+          }
+      }
+
+      if (matched.length === 0) return;
+
+      // Update pending queue
+      this.pendingWorklets = remaining;
+
+      // Process matched worklets
+      for (const worklet of matched) {
+          logger.info(this.logPrefix, `✅ Deferred match: ${worklet.moduleUrl} → ${ctxData.contextId}`);
+
+          // If this is an encoder, emit wasm_encoder data
+          if (worklet.isEncoder) {
+              // Extract container from URL (ogg, webm)
+              const urlLower = (worklet.moduleUrl || '').toLowerCase();
+              const container = urlLower.includes('ogg') ? 'ogg' :
+                               urlLower.includes('webm') ? 'webm' : null;
+
+              this.emit(EVENTS.DATA, {
+                  type: DATA_TYPES.WASM_ENCODER,
+                  timestamp: Date.now(),
+                  codec: 'opus',
+                  container: container,  // Extracted from URL
+                  source: 'audioworklet-deferred',  // Indicates deferred matching
+                  moduleUrl: worklet.moduleUrl,
+                  linkedContextId: ctxData.contextId,
+                  sampleRate: ctxData.static?.sampleRate || null,
+                  bitRate: null,
+                  channels: null
+              });
+
+              // Mark context as having encoder
+              ctxData.wasmEncoder = { ref: true };
+
+              logger.info(this.logPrefix, `🔧 WASM Encoder detected via deferred matching: ${worklet.moduleUrl}`);
+          }
       }
   }
 
@@ -409,24 +671,18 @@ class AudioContextCollector extends BaseCollector {
    * @param {any[]} args
    */
   _handleMediaStreamDestination(node, args) {
-      // node.context ile AudioContext'e erişebiliriz
-      const ctx = node.context;
+      // Get context data with late-discovery support
+      const ctxData = this._getContextData(node.context);
 
-      // Late-discovery: register context if not already known
-      this._ensureContextRegistered(ctx);
-
-      if (this.activeContexts.has(ctx)) {
-          const ctxData = this.activeContexts.get(ctx);
-          if (ctxData) {
-              // @ts-ignore - pipeline.destinationType güncelle
-              ctxData.pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
-              ctxData.pipeline.timestamp = Date.now();
-              // Re-emit updated context data
-              this.emit(EVENTS.DATA, ctxData);
-              logger.info(this.logPrefix, `MediaStreamDestination created - audio routed to stream (context: ${ctxData.contextId})`);
-          }
+      if (ctxData) {
+          // @ts-ignore - pipeline.destinationType güncelle
+          ctxData.pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+          ctxData.pipeline.timestamp = Date.now();
+          // Re-emit updated context data
+          this.emit(EVENTS.DATA, ctxData);
+          logger.info(this.logPrefix, `MediaStreamDestination created - audio routed to stream (context: ${ctxData.contextId})`);
       } else {
-          logger.warn(this.logPrefix, `MediaStreamDestination created but context is ${ctx === null ? 'null' : 'undefined'}`);
+          logger.warn(this.logPrefix, `MediaStreamDestination created but context is ${node.context === null ? 'null' : 'undefined'}`);
       }
   }
 
@@ -436,28 +692,23 @@ class AudioContextCollector extends BaseCollector {
    * @param {AnalyserNode} node
    */
   _handleAnalyserNode(node) {
-      const ctx = node.context;
+      // Get context data with late-discovery support
+      const ctxData = this._getContextData(node.context);
 
-      // Late-discovery: register context if not already known
-      this._ensureContextRegistered(ctx);
-
-      if (this.activeContexts.has(ctx)) {
-          const ctxData = this.activeContexts.get(ctx);
-          if (ctxData) {
-              // Analyser'ı processor olarak ekle (duplicate check)
-              if (!ctxData.pipeline.processors.some(p => p.type === 'analyser')) {
-                ctxData.pipeline.processors.push({
-                  type: 'analyser',
-                  timestamp: Date.now()
-                });
-                ctxData.pipeline.timestamp = Date.now();
-              }
-              // Re-emit updated context data
-              this.emit(EVENTS.DATA, ctxData);
-              logger.info(this.logPrefix, `AnalyserNode created - VU meter/visualizer detected (context: ${ctxData.contextId})`);
+      if (ctxData) {
+          // Analyser'ı processor olarak ekle (duplicate check)
+          if (!ctxData.pipeline.processors.some(p => p.type === 'analyser')) {
+            ctxData.pipeline.processors.push({
+              type: 'analyser',
+              timestamp: Date.now()
+            });
+            ctxData.pipeline.timestamp = Date.now();
           }
+          // Re-emit updated context data
+          this.emit(EVENTS.DATA, ctxData);
+          logger.info(this.logPrefix, `AnalyserNode created - VU meter/visualizer detected (context: ${ctxData.contextId})`);
       } else {
-          logger.warn(this.logPrefix, `AnalyserNode created but context is ${ctx === null ? 'null' : 'undefined'}`);
+          logger.warn(this.logPrefix, `AnalyserNode created but context is ${node.context === null ? 'null' : 'undefined'}`);
       }
   }
 
@@ -470,38 +721,34 @@ class AudioContextCollector extends BaseCollector {
    */
   _handleMediaStreamSource(node, args) {
       const stream = args[0];
-      const ctx = node.context;
 
-      // Late-discovery: register context if not already known
-      this._ensureContextRegistered(ctx);
+      // Get context data with late-discovery support
+      const ctxData = this._getContextData(node.context);
 
-      if (this.activeContexts.has(ctx)) {
-          const ctxData = this.activeContexts.get(ctx);
-          if (ctxData) {
-              // Determine stream source using registry
-              let inputSource = 'unknown';
-              if (stream && stream.id) {
-                  if (streamRegistry.microphone.has(stream.id)) {
-                      inputSource = 'microphone';
-                  } else if (streamRegistry.remote.has(stream.id)) {
-                      inputSource = 'remote';
-                  } else {
-                      // Fallback: check deviceId (microphone streams have deviceId)
-                      const track = stream.getAudioTracks()[0];
-                      const deviceId = track?.getSettings?.()?.deviceId;
-                      inputSource = deviceId ? 'microphone' : 'remote';
-                      logger.info(this.logPrefix, `Stream ${stream.id} not in registry, using deviceId fallback: ${inputSource}`);
-                  }
+      if (ctxData) {
+          // Determine stream source using registry
+          let inputSource = 'unknown';
+          if (stream && stream.id) {
+              if (streamRegistry.microphone.has(stream.id)) {
+                  inputSource = 'microphone';
+              } else if (streamRegistry.remote.has(stream.id)) {
+                  inputSource = 'remote';
+              } else {
+                  // Fallback: check deviceId (microphone streams have deviceId)
+                  const track = stream.getAudioTracks()[0];
+                  const deviceId = track?.getSettings?.()?.deviceId;
+                  inputSource = deviceId ? 'microphone' : 'remote';
+                  logger.info(this.logPrefix, `Stream ${stream.id} not in registry, using deviceId fallback: ${inputSource}`);
               }
-
-              ctxData.pipeline.inputSource = inputSource;
-              ctxData.pipeline.timestamp = Date.now();
-              // Re-emit updated context data
-              this.emit(EVENTS.DATA, ctxData);
-              logger.info(this.logPrefix, `MediaStreamSource created - ${inputSource} connected to AudioContext (context: ${ctxData.contextId}, stream: ${stream?.id})`);
           }
+
+          ctxData.pipeline.inputSource = inputSource;
+          ctxData.pipeline.timestamp = Date.now();
+          // Re-emit updated context data
+          this.emit(EVENTS.DATA, ctxData);
+          logger.info(this.logPrefix, `MediaStreamSource created - ${inputSource} connected to AudioContext (context: ${ctxData.contextId}, stream: ${stream?.id})`);
       } else {
-          logger.warn(this.logPrefix, `MediaStreamSource created but context is ${ctx === null ? 'null' : 'undefined'}`);
+          logger.warn(this.logPrefix, `MediaStreamSource created but context is ${node.context === null ? 'null' : 'undefined'}`);
       }
   }
 
@@ -530,43 +777,237 @@ class AudioContextCollector extends BaseCollector {
   }
 
   /**
-   * Handle WASM encoder detection (from Worker.postMessage hook)
+   * Handle WASM encoder detection (from Worker.postMessage or AudioWorkletNode.port.postMessage hook)
    * Emits encoder to canonical wasm_encoder storage with optional context linking
+   *
+   * PATTERN PRIORITY (higher = better, should not be overwritten by lower):
+   * - audioworklet-config: 5 (highest - full AudioWorklet config)
+   * - direct/nested: 4 (Worker hook with explicit encoder fields)
+   * - worker-audio-init: 3 (Worker hook with audio init pattern)
+   * - audio-blob: 2 (Blob creation - post-hoc, confirms format)
+   * - unknown: 1 (lowest)
+   *
    * @private
-   * @param {Object} encoderInfo - { type, sampleRate, bitRate, channels, application, timestamp, pattern, status, originalSampleRate?, frameSize?, bufferLength? }
+   * @param {Object} encoderInfo - { type, sampleRate, bitRate, channels, application, applicationName, timestamp, pattern, source, status, originalSampleRate?, frameSize?, bufferLength?, processorName?, blobSize?, workerFilename? }
    */
   _handleWasmEncoder(encoderInfo) {
       logger.info(this.logPrefix, 'WASM encoder detected:', encoderInfo);
 
+      // ═══════════════════════════════════════════════════════════════════
+      // PATTERN PRIORITY: Prevent lower-priority patterns from overwriting better ones
+      // Example: Blob detection (post-hoc) should not overwrite Worker detection (real-time)
+      // ═══════════════════════════════════════════════════════════════════
+      const PATTERN_PRIORITY = {
+        'audioworklet-config': 5,
+        'audioworklet-init': 4,
+        'audioworklet-deferred': 4,
+        'direct': 4,
+        'nested': 4,
+        'worker-init': 3,
+        'worker-audio-init': 3,
+        'audio-blob': 2,
+        'unknown': 1
+      };
+
+      const newPriority = PATTERN_PRIORITY[encoderInfo.pattern] || 1;
+      const existingPriority = this.currentEncoderData
+        ? (PATTERN_PRIORITY[this.currentEncoderData.pattern] || 1)
+        : 0;
+
+      // If we have a better pattern already, only merge supplementary data from Blob
+      if (existingPriority >= newPriority && encoderInfo.pattern === 'audio-blob') {
+        // Blob can supplement with: blobSize, codec (if unknown), container, bitRate
+        if (this.currentEncoderData) {
+          // Merge blobSize and calculated bitRate
+          if (encoderInfo.blobSize) {
+            this.currentEncoderData.blobSize = encoderInfo.blobSize;
+            this.currentEncoderData.mimeType = encoderInfo.mimeType;
+            this.currentEncoderData.recordingDuration = encoderInfo.recordingDuration;
+
+            // Use calculated bitRate from Blob if we don't have one OR for live updates
+            // Live updates: Allow Blob to update bitRate in real-time while recording is active
+            // This fixes the issue where worker-audio-init pattern has bitRate=0 (init message has no bitrate)
+            // Blob calculates bitRate from actual data size / duration - more accurate
+            const currentBitRateUnknown = !this.currentEncoderData.bitRate || this.currentEncoderData.bitRate === 0;
+            const isLiveUpdate = encoderInfo.isLiveEstimate === true;
+            if (encoderInfo.calculatedBitRate && (currentBitRateUnknown || isLiveUpdate)) {
+              this.currentEncoderData.bitRate = encoderInfo.calculatedBitRate;
+              logger.info(this.logPrefix, `📊 BitRate ${isLiveUpdate ? 'updated' : 'calculated'} from Blob: ${Math.round(encoderInfo.calculatedBitRate / 1000)}kbps`);
+            }
+          }
+
+          // Update codec if currently unknown (Blob provides definitive format)
+          if (this.currentEncoderData.codec === 'unknown' && encoderInfo.type) {
+            this.currentEncoderData.codec = encoderInfo.type;
+            this.currentEncoderData.container = encoderInfo.container;
+            logger.info(this.logPrefix, `🎵 Codec confirmed from Blob: ${encoderInfo.type}`);
+          }
+
+          // Update encoder if not set (Blob provides encoder info)
+          if (!this.currentEncoderData.encoder && encoderInfo.encoder) {
+            this.currentEncoderData.encoder = encoderInfo.encoder;
+            logger.info(this.logPrefix, `📚 Encoder detected from Blob: ${encoderInfo.encoder}`);
+          }
+
+          // Log blob capture
+          if (encoderInfo.blobSize) {
+            const durationInfo = encoderInfo.recordingDuration ? ` (${encoderInfo.recordingDuration.toFixed(1)}s)` : '';
+            logger.info(this.logPrefix, `📦 Blob captured: ${(encoderInfo.blobSize / 1024).toFixed(1)}KB${durationInfo} (pattern preserved: ${this.currentEncoderData.pattern})`);
+          }
+
+          // Re-emit with updated data
+          if (this.active) {
+            this.emit(EVENTS.DATA, this.currentEncoderData);
+          }
+        }
+        return; // Don't overwrite with lower priority pattern
+      }
+
       // Best-effort context matching (may return null if no match)
       const linkedContextId = this._findBestMatchingContextId(encoderInfo.sampleRate);
 
-      // Emit to canonical wasm_encoder storage with context linking
-      this.emit(EVENTS.DATA, {
+      // Human-readable application name (Opus terminology)
+      // 2048 = OPUS_APPLICATION_VOIP, 2049 = OPUS_APPLICATION_AUDIO, 2051 = OPUS_APPLICATION_LOWDELAY
+      const appNames = { 2048: 'VoIP', 2049: 'Audio', 2051: 'LowDelay' };
+      const appName = encoderInfo.applicationName || appNames[encoderInfo.application] || null;
+
+      // Build encoder data object
+      const encoderData = {
           type: DATA_TYPES.WASM_ENCODER,
           timestamp: Date.now(),
           codec: encoderInfo.type || 'opus',
-          source: 'direct',  // opus_encoder_create hook
+          encoder: encoderInfo.encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
+          source: encoderInfo.source || 'direct',  // audioworklet-port veya direct
           sampleRate: encoderInfo.sampleRate,
           originalSampleRate: encoderInfo.originalSampleRate,
           bitRate: encoderInfo.bitRate,
           channels: encoderInfo.channels || 1,
           application: encoderInfo.application, // 2048=Voice, 2049=FullBand, 2051=LowDelay
-          pattern: encoderInfo.pattern, // 'direct' or 'nested'
+          applicationName: appName, // 'Voice', 'Audio', 'LowDelay'
+          container: encoderInfo.container, // 'ogg', 'webm', 'mp4', or null
+          encoderPath: encoderInfo.encoderPath, // WASM module path
+          pattern: encoderInfo.pattern, // 'direct', 'nested', 'audioworklet-config', etc.
           status: encoderInfo.status || 'initialized',
           frameSize: encoderInfo.frameSize,
           bufferLength: encoderInfo.bufferLength,
+          processorName: encoderInfo.processorName, // AudioWorklet processor name
+          workerFilename: encoderInfo.workerFilename, // Worker JS filename
+          blobSize: encoderInfo.blobSize, // Blob size in bytes (for bitrate calc)
+          mimeType: encoderInfo.mimeType, // MIME type from Blob
           linkedContextId  // Context bağlantısı (null olabilir)
-      });
+      };
 
-      // Human-readable application name
-      const appNames = { 2048: 'Voice', 2049: 'Audio', 2051: 'LowDelay' };
-      const appName = appNames[encoderInfo.application] || encoderInfo.application;
+      // Store current encoder data for priority comparison
+      this.currentEncoderData = encoderData;
 
+      // If collector is not active, store for later emission during start()
+      // This handles the case where WASM encoder is detected before user clicks "Start"
+      if (!this.active) {
+          this.pendingWasmEncoder = encoderData;
+          logger.info(this.logPrefix, '📦 WASM encoder queued (collector not active yet)');
+      } else {
+          // Emit immediately if active
+          this.emit(EVENTS.DATA, encoderData);
+      }
+
+      const containerInfo = encoderInfo.container ? ` [${encoderInfo.container.toUpperCase()}]` : '';
       logger.info(
           this.logPrefix,
-          `🔧 WASM Encoder: ${encoderInfo.type || 'opus'} @ ${encoderInfo.bitRate/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels}ch, app=${appName}`
+          `🔧 WASM Encoder: ${encoderInfo.type || 'opus'}${containerInfo} @ ${(encoderInfo.bitRate || 0)/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels || 1}ch, app=${appName || encoderInfo.application}`
       );
+  }
+
+  /**
+   * Handle AudioWorkletNode instance creation
+   * Captures custom DSP processor instances (e.g., 'opus-encoder', 'noise-suppressor')
+   * @private
+   * @param {AudioWorkletNode} node
+   * @param {any[]} args - [context, processorName, options?]
+   */
+  _handleAudioWorkletNode(node, args) {
+      const context = args[0];      // AudioContext
+      const processorName = args[1]; // 'opus-encoder', 'noise-suppressor', vb.
+      const options = args[2];       // opsiyonel parametreler
+
+      // Get context data with late-discovery support
+      const ctxData = this._getContextData(context);
+
+      if (ctxData) {
+          // Add AudioWorkletNode to pipeline processors
+          const processorEntry = {
+            type: 'audioWorkletNode',
+            processorName: processorName,
+            options: options,
+            timestamp: Date.now()
+          };
+
+          // Duplicate check - aynı processorName varsa güncelle
+          const existingIdx = ctxData.pipeline.processors.findIndex(
+            p => p.type === 'audioWorkletNode' && p.processorName === processorName
+          );
+          if (existingIdx >= 0) {
+            ctxData.pipeline.processors[existingIdx] = processorEntry;
+          } else {
+            ctxData.pipeline.processors.push(processorEntry);
+          }
+
+          ctxData.pipeline.timestamp = Date.now();
+
+          // Re-emit updated context data
+          this.emit(EVENTS.DATA, ctxData);
+          logger.info(this.logPrefix, `AudioWorkletNode created: ${processorName} (context: ${ctxData.contextId})`);
+      } else {
+          logger.warn(this.logPrefix, `AudioWorkletNode created but context is ${context === null ? 'null' : 'undefined'}`);
+      }
+  }
+
+  /**
+   * Handle audio connection (AudioNode.connect() calls)
+   * Captures the audio graph topology to show data flow between nodes
+   * @private
+   * @param {Object} connection - { sourceType, sourceId, destType, destId, outputIndex, inputIndex, timestamp }
+   */
+  _handleAudioConnection(connection) {
+      if (!this.active) return;  // Only process when collector is active
+
+      const { sourceType, sourceId, destType, destId, outputIndex, inputIndex, timestamp } = connection;
+      const contextId = connection.contextId || null;
+
+      // Find context that owns this connection
+      // Strategy: Match by looking for any context that has the source or destination node
+      // NOTE: We don't have direct access to context from node ID, so we store connections globally
+      // and associate them with the most recently active context or emit as global graph data
+
+      // For now, store connections in a global array on the collector
+      // and emit as separate data type for UI to render
+      if (!this.audioConnections) {
+        this.audioConnections = [];
+      }
+
+      // Add connection to list
+      const normalizedConnection = {
+        sourceType,
+        sourceId,
+        destType,
+        destId,
+        outputIndex,
+        inputIndex,
+        timestamp,
+        contextId
+      };
+
+      this.audioConnections.push(normalizedConnection);
+
+      // Emit connection data as separate type
+      this.emit(EVENTS.DATA, {
+        type: DATA_TYPES.AUDIO_CONNECTION,
+        timestamp,
+        connection: normalizedConnection,
+        // Also include full connection list for graph rendering
+        allConnections: [...this.audioConnections]
+      });
+
+      logger.info(this.logPrefix, `Audio connection: ${sourceType} → ${destType}`);
   }
 
   /**
@@ -577,14 +1018,22 @@ class AudioContextCollector extends BaseCollector {
     this.active = true;
 
     // ═══════════════════════════════════════════════════════════════════
-    // CLEAN SLATE: Clear ALL previous state on start
-    // This prevents stale data issues and simplifies state management
+    // IMPORTANT: Do NOT clear early captures here!
+    // Early captures contain AudioContexts created BEFORE inspector started.
+    // We need to process them first, then clear only methodCalls (not instances).
+    // Cross-origin protection is handled by content.js tab/origin validation.
     // ═══════════════════════════════════════════════════════════════════
 
     // 1. Clear activeContexts Map (our internal state)
     const previousSize = this.activeContexts.size;
+    this.currentEncoderData = null; // Clear encoder pattern priority state
     this.activeContexts.clear();
-    this.contextIdCounter = 0; // Reset ID counter for fresh start
+    // Keep counter in sync with global context ID map to avoid duplicates
+    const win = /** @type {any} */ (window);
+    this.contextIdCounter = Number.isInteger(win.__audioInspectorContextIdCounter)
+      ? win.__audioInspectorContextIdCounter
+      : 0;
+    this.pendingWorklets = []; // Clear pending worklet queue
     logger.info(this.logPrefix, `Cleared ${previousSize} previous context(s) from activeContexts`);
 
     // 2. Clean up closed contexts from EarlyHook registry
@@ -596,20 +1045,80 @@ class AudioContextCollector extends BaseCollector {
       this._handleWasmEncoder(encoderInfo);
     };
 
-    // 4. Clear any stale WASM encoder detection
+    // 4. Re-register AudioWorkletNode handler
+    // @ts-ignore
+    window.__audioWorkletNodeHandler = (node, args) => {
+      this._handleAudioWorkletNode(node, args);
+    };
+
+    // 5. Clear any stale WASM encoder detection
     // @ts-ignore
     window.__wasmEncoderDetected = null;
 
-    // ═══════════════════════════════════════════════════════════════════
-    // Now sync RUNNING contexts from registry (ignore closed ones)
-    // ═══════════════════════════════════════════════════════════════════
-    const registry = getInstanceRegistry();
-    logger.info(this.logPrefix, `Registry has ${registry.audioContexts.length} AudioContext(s) (after cleanup)`);
+    // 6. Register new recording session handler (stale data fix)
+    // When MediaRecorder starts a new recording, reset encoder detection state
+    // This prevents second recording from showing first recording's encoder info
+    // @ts-ignore
+    window.__newRecordingSessionHandler = () => {
+      if (this.active) {
+        this.currentEncoderData = null;
+        logger.info(this.logPrefix, '🔄 New recording session - encoder detection reset');
+      }
+    };
 
-    // Sync ONLY running contexts from registry and emit them
-    // Also sync methodCalls for late capture support
-    let syncedCount = 0;
+    // ═══════════════════════════════════════════════════════════════════
+    // SINGLE SOURCE OF TRUTH: Prevent double processing
+    // earlyCaptures ve registry aynı instance'ı içerebilir (syncEarlyCaptures)
+    // WeakSet ile işlenen instance'ları takip et
+    // ═══════════════════════════════════════════════════════════════════
+
+    /** @type {WeakSet<AudioContext>} */
+    const processedInstances = new WeakSet();
+    let earlyCount = 0;
+    let registryCount = 0;
     let pipelineSyncedCount = 0;
+
+    // ───────────────────────────────────────────────────────────────────
+    // 1. PRIMARY SOURCE: early-inject.js captures (MAIN world content script)
+    // These are AudioContexts created before page.js loaded
+    // ───────────────────────────────────────────────────────────────────
+    // @ts-ignore
+    const earlyCaptures = window.__earlyCaptures?.audioContexts;
+    if (earlyCaptures?.length) {
+      logger.info(this.logPrefix, `📥 Processing ${earlyCaptures.length} early AudioContext capture(s)`);
+      for (const capture of earlyCaptures) {
+        if (capture.instance.state !== 'closed') {
+          this._handleNewContext(capture.instance, true);
+          processedInstances.add(capture.instance); // Mark as processed
+          earlyCount++;
+
+          // ═══════════════════════════════════════════════════════════════
+          // SYNC EARLY METHOD CALLS: Pipeline data from early-inject.js
+          // These were captured BEFORE page.js loaded - critical for sites
+          // that set up audio pipeline immediately after AudioContext creation
+          // ═══════════════════════════════════════════════════════════════
+          if (capture.methodCalls?.length > 0) {
+            this._syncMethodCallsToExistingContext(capture.instance, capture.methodCalls);
+            pipelineSyncedCount++;
+            logger.info(this.logPrefix, `📡 Synced ${capture.methodCalls.length} early method call(s) from early-inject.js`);
+          }
+        }
+      }
+      // NOT: earlyCaptures'ı silmiyoruz - inspector tekrar başlatıldığında
+      // hala aktif context'leri tekrar işleyebilmek için tutuyoruz
+      // Sadece methodCalls'ı temizliyoruz (sync edildi)
+      for (const capture of earlyCaptures) {
+        if (capture.methodCalls) capture.methodCalls = [];
+      }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // 2. FALLBACK SOURCE: EarlyHook.js registry
+    // May contain same instances as earlyCaptures (via syncEarlyCaptures)
+    // DUPLICATE CHECK: Skip if already processed, only sync methodCalls
+    // ───────────────────────────────────────────────────────────────────
+    const registry = getInstanceRegistry();
+
     for (const entry of registry.audioContexts) {
       const { instance, methodCalls } = entry;
 
@@ -619,45 +1128,67 @@ class AudioContextCollector extends BaseCollector {
         continue;
       }
 
-      // Add running context to activeContexts and emit
-      this._handleNewContext(instance, true); // true = emit immediately
-      syncedCount++;
-
-      // Sync methodCalls to pipeline (late capture) - data-driven via METHOD_CALL_SYNC_HANDLERS
-      if (methodCalls && Object.keys(methodCalls).length > 0) {
-        const ctxData = this.activeContexts.get(instance);
-        if (ctxData) {
-          // Apply all registered handlers for this methodCalls object
-          Object.entries(methodCalls).forEach(([key, data]) => {
-            const handler = METHOD_CALL_SYNC_HANDLERS[key];
-            if (handler) {
-              handler(data, ctxData.pipeline);
-            }
-          });
-          ctxData.pipeline.timestamp = Date.now();
-          this.emit(EVENTS.DATA, ctxData);
+      // ══════════════════════════════════════════════════════════════════
+      // DUPLICATE CHECK: If already processed from earlyCaptures, only sync methodCalls
+      // ══════════════════════════════════════════════════════════════════
+      if (processedInstances.has(instance)) {
+        // Context already added - only sync methodCalls if available
+        if (methodCalls?.length > 0) {
+          this._syncMethodCallsToExistingContext(instance, methodCalls);
           pipelineSyncedCount++;
-          logger.info(this.logPrefix, `Synced pipeline data for ${ctxData.contextId}:`, Object.keys(methodCalls));
         }
+        entry.methodCalls = []; // Clean up
+        continue;
       }
 
-      // SONRA temizle - stale data prevention for next start()
-      // Inspector çalışırken yeni method çağrıları hem emit() hem registry'ye gider
-      entry.methodCalls = {};
+      // New context from registry - process it
+      this._handleNewContext(instance, true);
+      processedInstances.add(instance);
+      registryCount++;
+
+      // Sync methodCalls to pipeline (late capture) - data-driven via METHOD_CALL_SYNC_HANDLERS
+      if (methodCalls?.length > 0) {
+        this._syncMethodCallsToExistingContext(instance, methodCalls);
+        pipelineSyncedCount++;
+      }
+
+      // Clean up methodCalls - stale data prevention for next start()
+      entry.methodCalls = [];
     }
 
-    if (syncedCount > 0) {
-      logger.info(this.logPrefix, `Synced ${syncedCount} running AudioContext(s) from registry`);
+    // ───────────────────────────────────────────────────────────────────
+    // SUMMARY LOG: Clear breakdown of what was processed
+    // ───────────────────────────────────────────────────────────────────
+    const totalProcessed = this.activeContexts.size;
+    if (totalProcessed > 0) {
+      logger.info(this.logPrefix, `✅ Processed ${totalProcessed} AudioContext(s) total (${earlyCount} from earlyCaptures, ${registryCount} from registry)`);
       if (pipelineSyncedCount > 0) {
         logger.info(this.logPrefix, `Synced pipeline data for ${pipelineSyncedCount} context(s) (late capture)`);
       }
     } else {
       logger.info(this.logPrefix, 'No running AudioContexts to sync (will capture new ones)');
     }
-    logger.info(this.logPrefix, 'Cleared methodCalls from registry (fresh for next start)');
 
     // NOTE: __wasmEncoderDetected was cleared at start (clean slate approach)
     // WASM encoder will be detected fresh when encoding actually starts
+
+    // ───────────────────────────────────────────────────────────────────
+    // 3. EMIT PENDING WASM ENCODER (if detected before start())
+    // Also restore currentEncoderData for pattern priority to work correctly
+    // ───────────────────────────────────────────────────────────────────
+    if (this.pendingWasmEncoder) {
+      logger.info(this.logPrefix, '📤 Emitting pending WASM encoder data');
+      this.emit(EVENTS.DATA, this.pendingWasmEncoder);
+      // Restore currentEncoderData for pattern priority (e.g., Blob supplement)
+      this.currentEncoderData = this.pendingWasmEncoder;
+      this.pendingWasmEncoder = null;  // Clear pending after restore
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // 4. INITIALIZE CONNECTIONS (clean slate - early captures were cleared above)
+    // New connections will be captured in real-time via __audioConnectionHandler
+    // ───────────────────────────────────────────────────────────────────
+    this.audioConnections = [];
 
     logger.info(this.logPrefix, 'Started - ready to capture new audio activity');
   }
@@ -694,12 +1225,18 @@ class AudioContextCollector extends BaseCollector {
   async stop() {
     this.active = false;
 
-    // Clear WASM encoder handler to prevent EarlyHook from re-setting __wasmEncoderDetected
+    // Clear all global handlers to prevent stale data and memory leaks
     // This is critical - without this, EarlyHook continues to detect and store encoder info
     // even when inspector is stopped, causing stale data on restart
     // @ts-ignore
+    window.__audioContextCollectorHandler = null;
+    // @ts-ignore
     window.__wasmEncoderHandler = null;
-    logger.info(this.logPrefix, 'Cleared __wasmEncoderHandler on stop');
+    // @ts-ignore
+    window.__audioWorkletNodeHandler = null;
+    // @ts-ignore
+    window.__newRecordingSessionHandler = null;
+    logger.info(this.logPrefix, 'Cleared all handlers on stop');
 
     // Clear stale WASM encoder detection
     // @ts-ignore
@@ -708,6 +1245,19 @@ class AudioContextCollector extends BaseCollector {
       window.__wasmEncoderDetected = null;
       logger.info(this.logPrefix, 'Cleared __wasmEncoderDetected on stop');
     }
+
+    // Clear AudioWorklet encoder heuristic detection cache
+    // @ts-ignore
+    if (window.__audioWorkletEncoderDetected) {
+      // @ts-ignore
+      window.__audioWorkletEncoderDetected = null;
+    }
+
+    // Clear pending WASM encoder to prevent stale data on restart
+    this.pendingWasmEncoder = null;
+
+    // Clear pending worklets to prevent memory leak in long sessions
+    this.pendingWorklets = [];
 
     // Only clean up closed contexts to prevent memory leak
     // Keep metadata for running contexts (preserves pipeline info)

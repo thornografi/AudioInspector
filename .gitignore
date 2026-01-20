@@ -24,3 +24,9 @@ node_modules/
 
 # Claude Code temp files
 tmpclaude-*
+
+# Batch files (local/personal scripts)
+*.bat
+
+# Claude Code local settings
+.claude/settings.local.json

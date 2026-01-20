@@ -5,7 +5,6 @@
  */
 export const EVENTS = {
   DATA: 'data',
-  ERROR: 'error',
   CONNECTION_CREATED: 'connection-created',
   CONNECTION_CLOSED: 'connection-closed'
 };
@@ -20,16 +19,8 @@ export const DATA_TYPES = {
   AUDIO_WORKLET: 'audioWorklet',
   MEDIA_RECORDER: 'mediaRecorder',
   WASM_ENCODER: 'wasmEncoder',
+  AUDIO_CONNECTION: 'audioConnection',
   PLATFORM_DETECTED: 'platform_detected'
-};
-
-/**
- * Default metadata values
- */
-export const DEFAULT_METADATA = {
-  DESCRIPTION: '',
-  VERSION: '1.0.0',
-  TAGS: []
 };
 
 /**
@@ -64,21 +55,22 @@ export const DESTINATION_TYPES = {
 };
 
 /**
- * UI display limits
- */
-export const UI_LIMITS = {
-  MAX_AUDIO_CONTEXTS: 4
-};
-
-/**
  * Storage keys for collected measurement data
  * Used for cleanup operations (tab close, browser restart, origin change, etc.)
  *
- * IMPORTANT: This is the single source of truth.
- * The following files have inline copies that MUST be kept in sync:
- * - scripts/background.js (cannot import ES modules)
- * - scripts/popup.js (cannot import ES modules)
- * - scripts/content.js (cannot import ES modules)
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║ SINGLE SOURCE OF TRUTH - ALL INLINE COPIES MUST MATCH THIS          ║
+ * ║                                                                      ║
+ * ║ Files with inline copies (cannot import ES modules):                 ║
+ * ║ - scripts/background.js:6   → DATA_STORAGE_KEYS                      ║
+ * ║ - scripts/popup.js:17       → DATA_STORAGE_KEYS                      ║
+ * ║ - scripts/content.js:82     → DATA_STORAGE_KEYS                      ║
+ * ║                                                                      ║
+ * ║ When adding/removing keys:                                           ║
+ * ║ 1. Update this array first                                          ║
+ * ║ 2. Update all 3 inline copies with EXACT same values                 ║
+ * ║ 3. Verify clearInspectorData() in each file uses spread operator    ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
  */
 export const DATA_STORAGE_KEYS = [
   'rtc_stats',
@@ -86,7 +78,8 @@ export const DATA_STORAGE_KEYS = [
   'audio_contexts',
   'audio_worklet',
   'media_recorder',
-  'wasm_encoder'
+  'wasm_encoder',
+  'audio_connections'
 ];
 
 /**
@@ -103,3 +96,21 @@ export const streamRegistry = {
   /** @type {Set<string>} RTCPeerConnection remote stream ID'leri */
   remote: new Set()
 };
+
+/**
+ * Keywords that indicate encoder/audio-related Workers and AudioWorklets
+ * Used for WASM encoder detection in Worker URLs and processor names
+ *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║ SINGLE SOURCE OF TRUTH - SYNC REQUIRED                              ║
+ * ║                                                                      ║
+ * ║ Files with inline copies (cannot import ES modules):                 ║
+ * ║ - scripts/early-inject.js:490 → ENCODER_KEYWORDS                     ║
+ * ║                                                                      ║
+ * ║ When adding keywords: Update both locations!                         ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ */
+export const ENCODER_KEYWORDS = [
+  'encoder', 'opus', 'ogg', 'mp3', 'aac', 'vorbis', 'flac',
+  'lame', 'audio', 'media', 'wasm', 'codec', 'voice', 'recorder'
+];

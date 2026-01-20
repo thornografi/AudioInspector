@@ -23,7 +23,6 @@ class Logger {
   constructor() {
     this.enabled = true; // Default to true for now, can be toggled via messages
     /** @type {LogEntry[]} */
-    /** @type {LogEntry[]} */
     this.history = [];
     this.MAX_HISTORY = 100;
     /** @type {((entry: LogEntry) => void)[]} */

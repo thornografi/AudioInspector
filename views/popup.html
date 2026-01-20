@@ -6,6 +6,7 @@
   <title>AudioInspector</title>
   <style>
     :root {
+      /* Colors */
       --bg-primary: #0d1117;
       --bg-secondary: #161b22;
       --bg-tertiary: #21262d;
@@ -21,6 +22,10 @@
       --accent-red: #f85149;
       --accent-purple: #a371f7;
       --inspecting-glow: rgba(248, 81, 73, 0.4);
+      /* Typography */
+      --font-mono: 'SF Mono', 'Consolas', 'Monaco', monospace;
+      /* Layout */
+      --drawer-handle-height: 36px;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -55,7 +60,7 @@
       gap: 8px;
       padding: 10px 16px;
       background: var(--bg-secondary);
-      border-bottom: 1px solid var(--border-primary);
+      border-bottom: 3px solid var(--border-primary);
       align-items: center;
     }
 
@@ -81,16 +86,6 @@
       background: var(--bg-card);
       color: var(--text-primary);
       border-color: var(--border-primary);
-    }
-
-    .btn-icon {
-      width: 32px;
-      padding: 0;
-    }
-
-    .btn-icon span {
-      font-size: inherit;
-      line-height: 1;
     }
 
     /* Ghost buttons - secondary actions */
@@ -185,13 +180,13 @@
     }
 
     /* Main Content Grid - 2 rows (WebRTC, GUM+Encoding+AC) */
-    /* Area1 (WebRTC) = 0.5fr (~38%), Area2 = 0.8fr (~62%) */
+    /* Area1 (WebRTC) = 30%, Area2 = 70% */
     .main-content {
       flex: 1;
       display: grid;
-      grid-template-rows: minmax(0, 0.5fr) minmax(0, 0.8fr);
-      gap: 1px;
-      background: var(--border-subtle);
+      grid-template-rows: 30% 70%;
+      gap: 2px;
+      background: var(--border-primary);
       overflow: hidden;
       min-height: 0;
     }
@@ -246,7 +241,7 @@
     .timestamp {
       font-size: 11px;
       color: var(--text-muted);
-      font-family: 'SF Mono', 'Consolas', monospace;
+      font-family: var(--font-mono);
       font-style: italic;
     }
 
@@ -286,7 +281,7 @@
     .row-2col {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 1px;
+      gap: 1.5px;
       background: var(--border-subtle);
       min-height: 0; /* Grid içinde içerik taşmasını önle */
     }
@@ -295,7 +290,7 @@
     .left-stack {
       display: flex;
       flex-direction: column;
-      gap: 1px;
+      gap: 1.5px;
       background: var(--border-subtle);
       min-height: 0;
     }
@@ -305,11 +300,20 @@
       min-height: 0;
     }
 
+    /* getUserMedia card - daha fazla alan ver (scrollbar oluşmasın) */
+    #gumSection {
+      flex: 1.3; /* Encoding'den biraz daha büyük */
+    }
+
+    #encodingSection {
+      flex: 1;
+    }
+
     /* RTC Two Column Content */
     #rtcContent {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 1px;
+      gap: 1.5px;
       height: 100%;
       background: var(--border-subtle);
     }
@@ -373,6 +377,7 @@
 
     td {
       padding: 5px 0;
+      vertical-align: middle;
     }
 
     td:first-child {
@@ -385,7 +390,7 @@
       color: var(--text-primary);
       font-weight: 500;
       text-align: right;
-      font-family: 'SF Mono', 'Consolas', monospace;
+      font-family: var(--font-mono);
       font-size: 12px;
     }
 
@@ -403,12 +408,27 @@
       border-radius: 4px;
       font-size: 10px;
       font-weight: 600;
-      font-family: 'SF Mono', 'Consolas', monospace;
+      font-family: var(--font-mono);
+      vertical-align: baseline;
+      line-height: 1.4;
     }
 
     .badge-code {
       background: var(--bg-tertiary);
       color: var(--text-secondary);
+    }
+
+    /* Badge içeren td hücreleri için vertical hizalama düzeltmesi */
+    td:last-child .badge {
+      vertical-align: middle;
+    }
+
+    /* Confidence source info (alt satır) */
+    .confidence-source {
+      display: block;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 2px;
     }
 
     .no-data {
@@ -428,7 +448,7 @@
     #debugContent {
       flex: 1;
       overflow-y: auto;
-      font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
       line-height: 1.6;
       padding-right: 4px;
@@ -493,31 +513,33 @@
       margin-top: 8px;
     }
 
+    /* Page Audio context minimal view */
+    .context-minimal {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 12px;
+      padding: 8px 12px;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+    .context-minimal .context-purpose {
+      font-weight: 500;
+      margin-bottom: 0;
+    }
+    .context-minimal .context-subtext {
+      width: 100%;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: -2px;
+    }
+
     .context-purpose {
       font-size: 11px;
       font-weight: 600;
       color: var(--accent-blue);
       margin-bottom: 4px;
       padding: 2px 0;
-    }
-
-    /* Processing - tablo satırlarıyla aynı hizada */
-    .processing-section {
-      margin-top: 4px;
-      padding-top: 4px;
-      border-top: 1px solid var(--border-subtle);
-    }
-
-    .processing-header-row {
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 4px;
-    }
-
-    /* REMOVED: .pipeline-timestamp - unused, merged into .timestamp */
-
-    .processing-header {
-      display: none;
     }
 
     /* Processing satırları - tablo tr gibi */
@@ -544,19 +566,30 @@
     .detail-label {
       color: var(--text-muted);
       font-size: 11px;
+      width: 50%;
+      flex-shrink: 0;
     }
 
     .detail-value {
       color: var(--text-primary);
-      font-family: 'SF Mono', 'Consolas', monospace;
+      font-family: var(--font-mono);
       font-weight: 500;
       text-align: right;
+      flex: 1;
     }
 
     /* ========== Generic Tooltip System (OCP-DRY) ========== */
     .has-tooltip {
       position: relative;
       cursor: default;
+      /* NOT: margin-left sadece ikon tooltip'leri için gerekli, variant class'larında tanımlı */
+    }
+
+    /* Tooltip varyantları (ikon) - sol margin ile metinden ayrılır */
+    .has-tooltip--info,
+    .has-tooltip--warning,
+    .has-tooltip--success,
+    .has-tooltip--error {
       margin-left: 4px;
     }
 
@@ -583,12 +616,26 @@
       opacity: 1;
     }
 
+    /* Chain içindeki tooltip'ler için margin sıfırla (→ ile ayrılan işlemciler) */
+    .detail-value .has-tooltip {
+      margin-left: 0;
+    }
+
     /* Tooltip varyantları - sadece ikon rengi değişir */
     .has-tooltip--warning { color: var(--accent-orange); }
     .has-tooltip--info { color: var(--accent-blue); }
     .has-tooltip--success { color: var(--accent-green); }
     .has-tooltip--error { color: var(--accent-red); }
 
+    /* Detecting codec - pulsing animation */
+    .detecting-codec {
+      color: var(--accent-orange);
+      animation: pulse-detecting 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse-detecting {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
 
     /* AudioContext main table - parent section */
     .ac-main-table {
@@ -626,33 +673,56 @@
       letter-spacing: 0.3px;
     }
 
+    /* Alt başlık altındaki içerik - sağa kaydırılmış (indent) */
+    .ac-section .ac-main-table td:first-child {
+      padding-left: 12px;
+    }
+
     .ac-detected-time {
       font-size: 10px;
       color: var(--text-muted);
-      font-family: 'SF Mono', 'Consolas', monospace;
+      font-family: var(--font-mono);
     }
 
     /* Audio Path timestamp - extends .timestamp with smaller font */
     .ac-detected-time-subtle {
       font-size: 10px;
       color: var(--text-muted);
-      font-family: 'SF Mono', 'Consolas', monospace;
+      font-family: var(--font-mono);
       font-style: italic;
     }
 
-    /* Satır indent'i - başlık altındaki içerik hiyerarşisi */
-    .ac-main-table td:first-child {
-      padding-left: 12px;
-    }
-
-    .ac-section .processing-item .detail-label {
-      padding-left: 12px;
-    }
+    /* AudioContext: GETUSERMEDIA ile aynı hizalama - indent yok */
 
     /* Monitor satırı - muted stil (renk + ağırlık) */
     .detail-value-muted {
       color: var(--text-muted);
       font-weight: 400;
+    }
+
+    /* ========== Audio Chain - Vertical Format ========== */
+    .chain-vertical {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+
+    .chain-node {
+      display: flex;
+      align-items: center;
+    }
+
+    .chain-node-name {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .chain-arrow {
+      color: var(--text-muted);
+      font-size: 10px;
     }
 
     /* ========== Console Drawer ========== */
@@ -711,7 +781,7 @@
       bottom: 0;
       left: 0;
       right: 0;
-      height: 36px;
+      height: var(--drawer-handle-height);
       background: var(--bg-secondary);
       border-top: 1px solid var(--border-primary);
       display: flex;
@@ -769,7 +839,7 @@
 
     /* Main content needs bottom padding for handle */
     .main-content {
-      padding-bottom: 36px;
+      padding-bottom: var(--drawer-handle-height);
     }
 
     /* Locked Tab Info Banner */
@@ -819,10 +889,27 @@
       font-weight: 600;
     }
 
-    /* Controls disabled state */
+    /* Controls disabled state - SADECE Start butonu (farklı tab veya system page) */
     .controls.disabled .btn-primary {
       opacity: 0.5;
       pointer-events: none;
+      cursor: not-allowed;
+    }
+
+    /* Bireysel buton disabled stili - Export/Clear için (inspector çalışırken) */
+    .btn.disabled,
+    .btn-ghost.disabled {
+      opacity: 0.5;
+      pointer-events: none;
+      cursor: not-allowed;
+    }
+
+    /* Native disabled attribute desteği */
+    button:disabled,
+    .btn:disabled {
+      opacity: 0.5;
+      pointer-events: none;
+      cursor: not-allowed;
     }
 
     /* Auto-Stop Notification Banner */
@@ -839,6 +926,101 @@
 
     .auto-stop-banner.visible {
       display: block;
+    }
+
+    /* ========== Refresh Required Modal ========== */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+    }
+
+    .modal-overlay.visible {
+      display: flex;
+    }
+
+    .modal-content {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      width: 90%;
+      max-width: 320px;
+      padding: 20px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .modal-icon {
+      font-size: 24px;
+      color: var(--accent-orange);
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .modal-body {
+      margin-bottom: 20px;
+    }
+
+    .modal-body p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+
+    .modal-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    .modal-warning {
+      color: var(--accent-orange) !important;
+      font-weight: 500;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .btn-modal-cancel {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-primary);
+    }
+
+    .btn-modal-cancel:hover {
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
+
+    .btn-modal-confirm {
+      background: var(--accent-orange);
+      color: #fff;
+      border: 1px solid var(--accent-orange);
+      font-weight: 600;
+    }
+
+    .btn-modal-confirm:hover {
+      background: #c08920;
+      border-color: #c08920;
     }
 
   </style>
@@ -950,6 +1132,24 @@
     <span class="handle-label">Console</span>
     <span class="log-badge empty" id="logBadge">0</span>
     <span class="handle-chevron">▲</span>
+  </div>
+
+  <!-- Refresh Required Modal -->
+  <div class="modal-overlay" id="refreshModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-icon">&#x26A0;</span>
+        <span class="modal-title">Sayfa Yenileme Gerekli</span>
+      </div>
+      <div class="modal-body">
+        <p>Doğru sonuçlar için sayfanın yenilenmesi gerekiyor.</p>
+        <p class="modal-warning">Aktif görüşme veya kayıt sonlanacaktır!</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-modal-cancel" id="refreshModalCancel">İptal</button>
+        <button class="btn btn-modal-confirm" id="refreshModalConfirm">Yenile ve Başlat</button>
+      </div>
+    </div>
   </div>
 
   <script src="../scripts/popup.js"></script>

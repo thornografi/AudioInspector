@@ -1,12 +1,32 @@
 // Background service worker
 
-// Measurement data storage keys
-// SOURCE OF TRUTH: src/core/constants.js → DATA_STORAGE_KEYS
-// (Duplicated here because background.js cannot import ES modules)
+// Storage keys for collected data
+// SOURCE OF TRUTH: src/core/constants.js:74 → DATA_STORAGE_KEYS
+// (background.js cannot import ES modules, inline copy required)
 const DATA_STORAGE_KEYS = [
   'rtc_stats', 'user_media', 'audio_contexts',
-  'audio_worklet', 'media_recorder', 'wasm_encoder'
+  'audio_worklet', 'media_recorder', 'wasm_encoder',
+  'audio_connections'
 ];
+
+/**
+ * Clear inspector state and data from storage
+ * NOTE: This version also clears 'debug_logs' (background.js owns log storage)
+ *
+ * See also: popup.js:29, content.js:92
+ *
+ * @param {Object} [options={}] - Cleanup options
+ * @param {boolean} [options.includeAutoStopReason=false] - Include autoStoppedReason key
+ * @returns {Promise<void>}
+ */
+function clearInspectorData(options = {}) {
+  const keys = ['inspectorEnabled', 'lockedTab', 'debug_logs', 'pendingAutoStart', ...DATA_STORAGE_KEYS];
+  if (options.includeAutoStopReason) {
+    keys.push('autoStoppedReason');
+  }
+  return chrome.storage.local.remove(keys);
+}
+
 
 // Merkezi log yönetimi - race condition önleme
 let logQueue = [];
@@ -53,18 +73,25 @@ function addLog(entry) {
 chrome.runtime.onInstalled.addListener(() => {
   console.log('AudioInspector installed');
 
-  // Reset inspector state on install/update - default to stopped
-  // Include autoStoppedReason to prevent stale banner on fresh start
-  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'autoStoppedReason']);
+  // Reset ALL state on install/update - clean slate
+  clearInspectorData({ includeAutoStopReason: true });
   updateBadge(false);
 
   // Reload test pages immediately on install/update
   reloadTestTabs();
 });
 
+// Chrome başlatıldığında temizlik - browser restart sonrası clean slate
+chrome.runtime.onStartup.addListener(() => {
+  console.log('AudioInspector startup - cleaning previous session');
+  clearInspectorData({ includeAutoStopReason: true });
+  updateBadge(false);
+});
+
 // Toggle side panel when extension icon is clicked
 let panelOpenTabs = new Set(); // Track which tabs have the panel open
 let togglingTabs = new Set(); // Mutex: prevent rapid click race condition
+let handlingTabSwitch = false; // Mutex: prevent rapid tab switch race condition
 
 // Side panel kapanma tespiti için port-based connection listener
 // beforeunload + sendMessage güvenilir değil, port disconnect güvenilir
@@ -107,13 +134,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
-// Reset inspector state when browser starts - default to stopped
-chrome.runtime.onStartup.addListener(() => {
-  console.log('AudioInspector: Browser started, resetting to stopped state');
-  // Include autoStoppedReason to prevent stale banner from previous session
-  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'autoStoppedReason', 'debug_logs', ...DATA_STORAGE_KEYS]);
-  updateBadge(false);
-});
+// Log temizleme: extension restart, browser restart, tab kapatma, pencere kapatma, navigation
 
 // Tab kapatıldığında kilitli tab kontrolü ve panel tracking temizliği
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -123,8 +144,36 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   // Kilitli tab kontrolü
   chrome.storage.local.get(['lockedTab'], (result) => {
     if (result.lockedTab && result.lockedTab.id === tabId) {
-      console.log('[Background] Kilitli tab kapatıldı, state ve veriler temizleniyor');
-      chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', ...DATA_STORAGE_KEYS]);
+      console.log('[Background] Kilitli tab kapatıldı, state, veriler ve loglar temizleniyor');
+      clearInspectorData();
+      updateBadge(false);
+    }
+  });
+});
+
+// Tab URL değişikliği kontrolü - cross-origin navigation'da inspector'ı durdur
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Sadece URL değişikliklerini izle
+  if (!changeInfo.url) return;
+
+  chrome.storage.local.get(['inspectorEnabled', 'lockedTab'], (result) => {
+    if (!result.lockedTab || result.lockedTab.id !== tabId) return;
+
+    // Origin karşılaştırması
+    try {
+      const oldOrigin = new URL(result.lockedTab.url).origin;
+      const newOrigin = new URL(changeInfo.url).origin;
+
+      if (oldOrigin !== newOrigin) {
+        console.log(`[Background] 🔄 Cross-origin navigation (${oldOrigin} → ${newOrigin}), inspector durduruluyor`);
+        chrome.storage.local.set({ autoStoppedReason: 'navigation' });
+        clearInspectorData();
+        updateBadge(false);
+      }
+    } catch (e) {
+      // URL parse hatası - güvenli tarafta kal, inspector'ı durdur
+      console.log('[Background] URL parse error during navigation check, stopping inspector');
+      clearInspectorData();
       updateBadge(false);
     }
   });
@@ -132,40 +181,97 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // Tab değişimi (activation) kontrolü - aktif dinleme varsa otomatik durdur
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  const result = await chrome.storage.local.get(['inspectorEnabled', 'lockedTab']);
+  // Mutex: prevent rapid tab switch race condition
+  if (handlingTabSwitch) return;
+  handlingTabSwitch = true;
 
-  // Dinleme aktif değilse hiçbir şey yapma
-  if (!result.inspectorEnabled || !result.lockedTab) {
-    return;
-  }
+  try {
+    const result = await chrome.storage.local.get(['inspectorEnabled', 'lockedTab']);
 
-  // Aktif tab değişti mi kontrol et
-  const newActiveTabId = activeInfo.tabId;
-  const lockedTabId = result.lockedTab.id;
-
-  if (newActiveTabId !== lockedTabId) {
-    // Farklı tab'a geçildi, otomatik durdur
-    console.log('[Background] Tab switched during monitoring - auto-stopping');
-
-    // Auto-stop reason set et
-    await chrome.storage.local.set({ autoStoppedReason: 'tab_switch' });
-
-    // Inspector'ı durdur (lockedTab kalsın - review için)
-    await chrome.storage.local.remove(['inspectorEnabled']);
-
-    // Badge'i güncelle
-    updateBadge(false);
-
-    // Locked tab'e mesaj gönder (page script'i durdur)
-    try {
-      await chrome.tabs.sendMessage(lockedTabId, {
-        type: 'SET_ENABLED',
-        enabled: false
-      });
-    } catch (e) {
-      // Tab erişilemez olabilir (arka planda, suspended, vb.)
-      console.log('[Background] Could not send stop message to locked tab:', e.message);
+    // Dinleme aktif değilse hiçbir şey yapma
+    if (!result.inspectorEnabled || !result.lockedTab) {
+      return;
     }
+
+    // Aktif tab değişti mi kontrol et
+    const newActiveTabId = activeInfo.tabId;
+    const lockedTabId = result.lockedTab.id;
+
+    if (newActiveTabId !== lockedTabId) {
+      // Farklı tab'a geçildi, otomatik durdur
+      console.log('[Background] Tab switched during monitoring - auto-stopping');
+
+      // Auto-stop reason set et
+      await chrome.storage.local.set({ autoStoppedReason: 'tab_switch' });
+
+      // Inspector'ı durdur (lockedTab kalsın - review için)
+      await chrome.storage.local.remove(['inspectorEnabled']);
+
+      // Badge'i güncelle
+      updateBadge(false);
+
+      // Locked tab'e mesaj gönder (page script'i durdur)
+      try {
+        await chrome.tabs.sendMessage(lockedTabId, {
+          type: 'SET_ENABLED',
+          enabled: false
+        });
+      } catch (e) {
+        // Tab erişilemez olabilir (arka planda, suspended, vb.)
+        console.log('[Background] Could not send stop message to locked tab:', e.message);
+      }
+    }
+  } finally {
+    handlingTabSwitch = false;
+  }
+});
+
+// Pencere kapatıldığında kilitli tab kontrolü - tab kapatma ile aynı davranış
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  const result = await chrome.storage.local.get(['lockedTab']);
+  if (!result.lockedTab) return;
+
+  // Kilitli tab'ın hangi pencerede olduğunu kontrol et
+  try {
+    await chrome.tabs.get(result.lockedTab.id);
+    // Tab hala var, farklı pencere kapatılmış - hiçbir şey yapma
+  } catch (e) {
+    // Tab artık yok = kilitli tab'ın penceresi kapatıldı
+    console.log('[Background] 🪟 Kilitli tab\'ın penceresi kapatıldı, state, veriler ve loglar temizleniyor');
+    await clearInspectorData();
+    updateBadge(false);
+  }
+});
+
+// Pencere değişikliği kontrolü - farklı pencereye geçildiğinde otomatik durdur
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  // WINDOW_ID_NONE = -1 (tüm pencereler focus kaybetti, örn: başka uygulamaya geçildi)
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+
+  const result = await chrome.storage.local.get(['inspectorEnabled', 'lockedTab']);
+  if (!result.inspectorEnabled || !result.lockedTab) return;
+
+  // Kilitli tab'ın hangi pencerede olduğunu kontrol et
+  try {
+    const lockedTab = await chrome.tabs.get(result.lockedTab.id);
+    if (lockedTab.windowId !== windowId) {
+      // Farklı pencereye geçildi
+      console.log('[Background] 🪟 Window switched during monitoring - auto-stopping');
+      await chrome.storage.local.set({ autoStoppedReason: 'window_switch' });
+      await chrome.storage.local.remove(['inspectorEnabled']);
+      updateBadge(false);
+
+      // Kilitli tab'e mesaj gönder (page script'i durdur)
+      try {
+        await chrome.tabs.sendMessage(result.lockedTab.id, { type: 'SET_ENABLED', enabled: false });
+      } catch (e) {
+        // Tab erişilemez olabilir
+        console.log('[Background] Could not send stop message to locked tab:', e.message);
+      }
+    }
+  } catch (e) {
+    // Tab artık yok - bu durumda zaten tabs.onRemoved temizlik yapmış olmalı
+    console.log('[Background] Locked tab no longer exists during window switch check');
   }
 });
 
@@ -250,23 +356,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Handles the injection of the page script into the MAIN world
  */
 async function handleInjection(tabId, frameId) {
-  // frameId undefined veya null ise 0 kullan (main frame)
-  const targetFrameId = frameId ?? 0;
+  // frameId undefined/null ise 0 kullan (main frame)
+  const targetFrameId = Number.isInteger(frameId) ? frameId : 0;
   const extensionUrl = chrome.runtime.getURL('');
-  const target = { tabId, frameIds: [targetFrameId] };
 
-  // 1. Inject Extension URL constant
-  await chrome.scripting.executeScript({
-    target,
-    world: 'MAIN',
-    func: (url) => { window.__audioPipelineExtensionUrl = url; },
-    args: [extensionUrl]
-  });
+  const injectIntoFrame = async (frameIdToUse) => {
+    const target = { tabId, frameIds: [frameIdToUse] };
 
-  // 2. Inject Page Script
-  await chrome.scripting.executeScript({
-    target,
-    world: 'MAIN',
-    files: ['scripts/page.js']
-  });
+    // 1. Inject Extension URL constant
+    await chrome.scripting.executeScript({
+      target,
+      world: 'MAIN',
+      func: (url) => { window.__audioPipelineExtensionUrl = url; },
+      args: [extensionUrl]
+    });
+
+    // 2. Inject Page Script
+    await chrome.scripting.executeScript({
+      target,
+      world: 'MAIN',
+      files: ['scripts/page.js']
+    });
+  };
+
+  try {
+    await injectIntoFrame(targetFrameId);
+  } catch (err) {
+    if (targetFrameId !== 0 && isMissingFrameError(err)) {
+      console.warn('[Background] Frame not found, retrying injection in main frame:', err?.message || err);
+      await injectIntoFrame(0);
+      return;
+    }
+    throw err;
+  }
+}
+
+function isMissingFrameError(err) {
+  const message = err?.message ? err.message : String(err || '');
+  return message.includes('No frame with id') || message.includes('Frame with ID');
 }

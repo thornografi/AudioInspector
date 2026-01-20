@@ -34,15 +34,11 @@ class MediaRecorderCollector extends BaseCollector {
       return;
     }
 
-    // Register global handler IMMEDIATELY (even before start)
-    // @ts-ignore
-    window.__mediaRecorderCollectorHandler = (recorder, args) => {
+    // Register global handler for early hook communication
+    this.registerGlobalHandler('__mediaRecorderCollectorHandler', (recorder, args) => {
       logger.info(this.logPrefix, 'MediaRecorder constructor called via hook');
       this._handleNewRecorder(recorder, args);
-    };
-
-    // Early hooks already installed constructor hooks, so we skip hookConstructor here
-    logger.info(this.logPrefix, 'Skipping constructor hook (early hook already installed)');
+    });
   }
 
   /**
@@ -84,15 +80,18 @@ class MediaRecorderCollector extends BaseCollector {
    */
   _createRecorderEventListener(recorder, eventType, eventName, metadata) {
     const listener = (/** @type {any} */ event) => {
+      // dataavailable = sadece data chunk, teşhis değeri yok, UI kullanmıyor
+      if (eventType === 'dataavailable') {
+        return;
+      }
+
       metadata.state = recorder.state; // State might change on event
       const eventData = { name: eventName, timestamp: Date.now() };
-      
-      if (eventType === 'dataavailable' && event.data && event.data.size > 0) {
-        Object.assign(eventData, { size: event.data.size, mimeType: event.data.type });
-      } else if (eventType === 'error' && event.error) {
+
+      if (eventType === 'error' && event.error) {
         Object.assign(eventData, { message: event.error.message });
       }
-      
+
       // Cap events array to prevent memory/storage overflow (FIFO - oldest removed first)
       if (metadata.events.length >= 50) {
         metadata.events.shift();
@@ -110,10 +109,9 @@ class MediaRecorderCollector extends BaseCollector {
       if (metadata.resetData) {
         delete metadata.resetData;
       }
-      
-      if (eventType === 'dataavailable') {
-        logger.info(this.logPrefix, `MediaRecorder ${eventName}: size=${event.data.size}, type=${event.data.type}`);
-      } else if (eventType === 'error') {
+
+      // Sadece önemli event'leri logla (start, stop, pause, resume, error)
+      if (eventType === 'error') {
         logger.error(this.logPrefix, `MediaRecorder ${eventName}:`, event.error);
       } else {
         logger.info(this.logPrefix, `MediaRecorder ${eventName}`);
@@ -162,12 +160,17 @@ class MediaRecorderCollector extends BaseCollector {
           result.hasAudio = true;
           // Determine audio source from label
           const label = (track.label || '').toLowerCase();
-          if (label.includes('microphone') || label.includes('mic') || label.includes('input')) {
+          if (label.includes('microphone') || label.includes('mic') || label.includes('input') ||
+              label.includes('analogue') || label.includes('analog') || label.includes('line in') ||
+              label.includes('usb audio') || label.includes('focusrite') || label.includes('scarlett') ||
+              label.includes('audio interface') || label.includes('external')) {
+            // Physical audio input device (microphone, audio interface, etc.)
             result.audioSource = 'microphone';
-          } else if (label.includes('system') || label.includes('loopback') || label.includes('stereo mix')) {
+          } else if (label.includes('system') || label.includes('loopback') || label.includes('stereo mix') ||
+                     label.includes('what u hear') || label.includes('wasapi')) {
             result.audioSource = 'system';
-          } else if (label === '' || label.includes('mediastreamdestination')) {
-            // Empty label often means synthesized (from AudioContext)
+          } else if (label === '' || label.includes('mediastreamdestination') || label.includes('destinationnode')) {
+            // Empty label or MediaStreamAudioDestinationNode = synthesized (from AudioContext)
             result.audioSource = 'synthesized';
           } else {
             result.audioSource = 'unknown';
@@ -183,6 +186,23 @@ class MediaRecorderCollector extends BaseCollector {
   }
 
   /**
+   * Get source audio track settings (sampleSize, sampleRate, channelCount)
+   * @private
+   * @param {MediaStream} stream
+   * @returns {{sampleSize: number|undefined, sampleRate: number|undefined, channelCount: number|undefined}|null}
+   */
+  _getSourceAudioInfo(stream) {
+    const audioTrack = stream?.getAudioTracks?.()?.[0];
+    if (!audioTrack) return null;
+    const settings = audioTrack.getSettings();
+    return {
+      sampleSize: settings.sampleSize,
+      sampleRate: settings.sampleRate,
+      channelCount: settings.channelCount
+    };
+  }
+
+  /**
    * Handle new MediaRecorder instance
    * @private
    * @param {any} recorder
@@ -195,6 +215,17 @@ class MediaRecorderCollector extends BaseCollector {
 
       // Analyze stream tracks to determine source
       const trackAnalysis = this._analyzeStreamTracks(stream);
+
+      // DEBUG: Log track analysis details
+      logger.info(this.logPrefix, `🔍 Track Analysis: hasAudio=${trackAnalysis.hasAudio}, hasVideo=${trackAnalysis.hasVideo}, audioSource=${trackAnalysis.audioSource}`);
+      if (trackAnalysis.trackInfo?.length > 0) {
+        trackAnalysis.trackInfo.forEach((t, i) => {
+          logger.info(this.logPrefix, `🔍 Track[${i}]: kind=${t.kind}, label="${t.label}", enabled=${t.enabled}, muted=${t.muted}, readyState=${t.readyState}`);
+        });
+      }
+
+      // Get source audio track settings (bit depth, sample rate, channel count)
+      const sourceAudio = this._getSourceAudioInfo(stream);
 
       // Parse mimeType to extract codec info
       const parsedMime = parseMimeType(recorder.mimeType);
@@ -214,6 +245,8 @@ class MediaRecorderCollector extends BaseCollector {
         hasVideoTrack: trackAnalysis.hasVideo,
         audioSource: trackAnalysis.audioSource, // 'microphone', 'system', 'synthesized', 'unknown', 'none'
         trackInfo: trackAnalysis.trackInfo,
+        // Source audio track settings (bit depth, sample rate, channel count)
+        sourceAudio: sourceAudio,
         events: []
       };
 
@@ -221,7 +254,10 @@ class MediaRecorderCollector extends BaseCollector {
 
       // Emit immediately (emit() checks this.active internally)
       this.emit(EVENTS.DATA, metadata);
-      logger.info(this.logPrefix, `MediaRecorder created:`, JSON.stringify(metadata));
+
+      // DEBUG: Log full metadata for debugging
+      logger.info(this.logPrefix, `MediaRecorder created - mimeType=${metadata.mimeType}, audioSource=${metadata.audioSource}, hasAudioTrack=${metadata.hasAudioTrack}`);
+      logger.info(this.logPrefix, `MediaRecorder metadata: ${JSON.stringify(metadata, null, 0)}`);
 
       // Attach event listeners to track recorder lifecycle
       const eventTypes = ['start', 'stop', 'pause', 'resume', 'dataavailable', 'error'];
@@ -238,10 +274,44 @@ class MediaRecorderCollector extends BaseCollector {
   async start() {
     this.active = true;
 
-    // Registry'deki eski instance'ları ignore et
-    // Sadece yeni oluşturulan MediaRecorder'ları izle
-    // Bu, profil değişikliğinde eski verilerin görünmesini önler
-    logger.info(this.logPrefix, 'Started - listening for new MediaRecorder instances only');
+    // ═══════════════════════════════════════════════════════════════════
+    // Process early captures (MediaRecorders created before inspector started)
+    // This handles cases like veed.io where recording starts before user
+    // clicks "Start" in the extension
+    // ═══════════════════════════════════════════════════════════════════
+
+    // 1. Check early-inject.js captures first (MAIN world content script)
+    // @ts-ignore
+    const earlyCaptures = window.__earlyCaptures?.mediaRecorders;
+    if (earlyCaptures?.length) {
+      logger.info(this.logPrefix, `📥 Processing ${earlyCaptures.length} early MediaRecorder capture(s)`);
+      for (const capture of earlyCaptures) {
+        // Skip if already processed
+        if (!this.activeRecorders.has(capture.instance)) {
+          this._handleNewRecorder(capture.instance, [capture.stream, capture.options || {}]);
+        }
+      }
+    }
+
+    // 2. Check EarlyHook.js registry (fallback)
+    const registry = getInstanceRegistry();
+    if (registry.mediaRecorders?.length) {
+      for (const entry of registry.mediaRecorders) {
+        // Skip if already processed from earlyCaptures
+        if (!this.activeRecorders.has(entry.instance)) {
+          // Registry doesn't have stream/options, try to get from recorder
+          const stream = entry.instance.stream;
+          this._handleNewRecorder(entry.instance, [stream, {}]);
+        }
+      }
+    }
+
+    const totalProcessed = this.activeRecorders.size;
+    if (totalProcessed > 0) {
+      logger.info(this.logPrefix, `✅ Processed ${totalProcessed} MediaRecorder(s) total`);
+    } else {
+      logger.info(this.logPrefix, 'Started - listening for new MediaRecorder instances');
+    }
   }
 
   /**

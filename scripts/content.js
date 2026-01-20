@@ -76,10 +76,30 @@ async function injectPageScript(attempt = 1) {
 
 // --- Message Handlers (All payloads now have consistent 'type' field) ---
 
-// Measurement data storage keys
-// SOURCE OF TRUTH: src/core/constants.js → DATA_STORAGE_KEYS
-// (Duplicated here because content.js cannot import ES modules)
-const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder'];
+// Storage keys for collected data
+// SOURCE OF TRUTH: src/core/constants.js:74 → DATA_STORAGE_KEYS
+// (content.js cannot import ES modules, inline copy required)
+const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+
+/**
+ * Clear inspector state and all measurement data from storage
+ *
+ * SYNC NOTE: background.js version also clears 'debug_logs' (log owner)
+ * See also: popup.js:29, background.js:23
+ *
+ * @param {Function} [callback] - Optional callback after removal
+ */
+function clearInspectorData(callback) {
+  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'pendingAutoStart', ...DATA_STORAGE_KEYS], callback);
+}
+
+/**
+ * Clear only measurement data from storage (keep inspector state)
+ * @param {Function} [callback] - Optional callback after removal
+ */
+function clearMeasurementData(callback) {
+  chrome.storage.local.remove(DATA_STORAGE_KEYS, callback);
+}
 
 // Queue for audioContext updates to prevent race conditions
 // NOTE: audioWorklet updates also go through this queue to prevent race conditions
@@ -212,17 +232,30 @@ const MESSAGE_HANDLERS = {
     chrome.storage.local.get(['wasm_encoder'], (result) => {
       const existing = result.wasm_encoder || {};
 
-      // Merge: yeni veri önde, ama null'lar eskiyi korur
+      // Merge: yeni veri önde, ama null/undefined eskiyi korur
       const merged = {
         ...existing,
         ...payload,
-        // Zengin field'ları koru (source: 'direct' genelde daha detaylı)
+        // Temel encoder field'ları
+        codec: payload.codec ?? payload.type ?? existing.codec,  // codec veya type field'ından al
+        encoder: payload.encoder ?? existing.encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
         bitRate: payload.bitRate ?? existing.bitRate,
         channels: payload.channels ?? existing.channels,
         sampleRate: payload.sampleRate ?? existing.sampleRate,
         application: payload.application ?? existing.application,
-        // Source priority: 'direct' > 'audioworklet' (daha fazla detay içerir)
-        source: payload.source === 'direct' ? 'direct' : (existing.source || payload.source)
+        // AudioWorklet encoder field'ları
+        applicationName: payload.applicationName ?? existing.applicationName,
+        frameSize: payload.frameSize ?? existing.frameSize,
+        processorName: payload.processorName ?? existing.processorName,
+        originalSampleRate: payload.originalSampleRate ?? existing.originalSampleRate,
+        wavBitDepth: payload.wavBitDepth ?? existing.wavBitDepth,
+        // Container format (ogg, webm, mp4, mp3, aac, flac)
+        container: payload.container ?? existing.container,
+        encoderPath: payload.encoderPath ?? existing.encoderPath,
+        // Source priority: 'audioworklet-config' > 'direct' > others (AudioWorklet daha detaylı)
+        source: payload.source?.includes('audioworklet') ? payload.source :
+                (existing.source?.includes('audioworklet') ? existing.source :
+                 (payload.source === 'direct' ? 'direct' : (existing.source || payload.source)))
       };
 
       chrome.storage.local.set({
@@ -260,6 +293,32 @@ const MESSAGE_HANDLERS = {
     return null; // Handled internally
   },
 
+  // Handler for audio connection graph (AudioNode.connect() calls)
+  // Stores the audio graph topology showing who connects to whom
+  audioConnection: (payload) => {
+    chrome.storage.local.get(['audio_connections'], (result) => {
+      // Store all connections array directly from payload
+      const connections = payload.allConnections || [];
+
+      chrome.storage.local.set({
+        audio_connections: {
+          connections,
+          lastUpdate: Date.now(),
+          sourceTabId: currentTabId
+        }
+      }, () => {
+        if (chrome.runtime.lastError) {
+          persistLogs(createLog('Content', `❌ audio_connections SET error: ${chrome.runtime.lastError.message}`, 'error'));
+        } else {
+          const conn = payload.connection;
+          persistLogs(createLog('Content', `🔗 Connection: ${conn?.sourceType} → ${conn?.destType}`));
+        }
+      });
+    });
+
+    return null; // Handled internally
+  },
+
   // Special handler for log entries
   LOG_ENTRY: (payload) => {
     persistLogs(payload);
@@ -273,10 +332,50 @@ window.addEventListener('message', (event) => {
   if (event.source !== window) return;
   if (event.origin !== window.location.origin) return;
   if (!event.data?.__audioPipelineInspector) return;
-  
+
+  // Handle DEBUG_LOG - forward to extension console panel
+  if (event.data.type === 'DEBUG_LOG') {
+    const { prefix, message } = event.data.payload || {};
+    if (message) {
+      persistLogs(createLog(prefix || 'Debug', message));
+    }
+    return;
+  }
+
   // Handle INSPECTOR_READY - restore state if needed (with tab lock check)
   if (event.data.type === 'INSPECTOR_READY') {
-      chrome.storage.local.get(['inspectorEnabled', 'lockedTab'], (result) => {
+      chrome.storage.local.get(['inspectorEnabled', 'lockedTab', 'pendingAutoStart'], (result) => {
+          // PRIORITY 1: Check for pendingAutoStart (page refresh + auto-start flow)
+          if (result.pendingAutoStart && result.pendingAutoStart === currentTabId) {
+              logContent('🚀 pendingAutoStart detected - auto-starting inspector');
+              persistLogs(createLog('Content', '🚀 Auto-starting after page refresh'));
+
+              // Clear the flag first
+              chrome.storage.local.remove(['pendingAutoStart'], () => {
+                  // Set up new locked tab
+                  const lockedTabData = {
+                      id: currentTabId,
+                      url: window.location.href,
+                      title: document.title
+                  };
+
+                  chrome.storage.local.set({
+                      inspectorEnabled: true,
+                      lockedTab: lockedTabData
+                  }, () => {
+                      // Start the inspector
+                      window.postMessage({
+                          __audioPipelineInspector: true,
+                          type: 'SET_ENABLED',
+                          enabled: true
+                      }, '*');
+                      logContent('✅ Inspector auto-started after page refresh');
+                  });
+              });
+              return;
+          }
+
+          // PRIORITY 2: Normal state restoration
           if (result.inspectorEnabled === true && result.lockedTab) {
               // currentTabId zaten injection'da senkron olarak alındı (line 50)
               // Async GET_TAB_ID çağrısına gerek yok - DRY prensibi
@@ -309,7 +408,7 @@ window.addEventListener('message', (event) => {
 
                   // Auto-stop: Set reason flag first, then clear inspector state AND measurement data
                   chrome.storage.local.set({ autoStoppedReason: 'origin_change' }, () => {
-                      chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', ...DATA_STORAGE_KEYS], () => {
+                      clearInspectorData(() => {
                           logContent('🛑 Inspector auto-stopped due to origin change (state + data cleared)');
                       });
                   });
@@ -321,7 +420,7 @@ window.addEventListener('message', (event) => {
               persistLogs(createLog('Content', '🔄 Restoring inspector state'));
 
               // Clear stale data before restoring
-              chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+              clearMeasurementData(() => {
                   logContent('🧹 Cleared stale data before restore');
 
                   window.postMessage({
@@ -365,7 +464,7 @@ window.addEventListener('message', (event) => {
 
     // Check if new recording started - clear all audio data first
     if (payload.resetData) {
-      chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+      clearMeasurementData(() => {
         logContent('🧹 New recording started - cleared all audio data');
 
         logContent(logMsg, logData || payload);
@@ -408,7 +507,7 @@ async function handleSetEnabled(message) {
   // This ensures old encoding data is fully removed before collectors start emitting new data
   if (message.enabled) {
     await new Promise(resolve => {
-      chrome.storage.local.remove(DATA_STORAGE_KEYS, () => {
+      clearMeasurementData(() => {
         logContent('🧹 Cleared stale data from storage');
         resolve();
       });

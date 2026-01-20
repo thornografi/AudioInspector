@@ -3,59 +3,8 @@
 import { logger } from '../../core/Logger.js';
 import { LOG_PREFIX } from '../constants.js';
 
-/**
- * Hooks a constructor function on a target object.
- * 
- * @param {Object} target - The object containing the constructor (e.g., window)
- * @param {string} property - The name of the property to hook (e.g., 'RTCPeerConnection')
- * @param {Function} onInstance - Callback invoked with (instance, args) when a new instance is created
- * @param {Function} [shouldHook] - Optional predicate that returns true if the hook logic should run
- * @returns {Function|null} The original constructor, or null if target/property didn't exist
- */
-export function hookConstructor(target, property, onInstance, shouldHook = () => true) {
-  const Original = /** @type {any} */ (target)[property];
-  if (!Original) return null;
-
-  const handler = {
-    // @ts-ignore
-    construct(target, args, newTarget) {
-      const shouldProcess = shouldHook();
-
-      // Only log when inspector is active (prevents log spam when disabled)
-      if (shouldProcess) {
-        logger.info(LOG_PREFIX.INSPECTOR, `📡 Constructor called: ${property}`);
-      }
-
-      if (!shouldProcess) {
-        return Reflect.construct(target, args, newTarget);
-      }
-
-      try {
-        const instance = Reflect.construct(target, args, newTarget);
-        try {
-            onInstance(instance, args);
-        } catch (err) {
-            logger.error(LOG_PREFIX.INSPECTOR, `Error in ${property} hook listener:`, err);
-        }
-        return instance;
-      } catch (err) {
-        // If constructor fails, propagate error
-        throw err;
-      }
-    }
-  };
-
-  try {
-    const ProxyConstructor = new Proxy(Original, handler);
-    // @ts-ignore
-    target[property] = ProxyConstructor;
-  } catch (e) {
-    logger.error(LOG_PREFIX.INSPECTOR, `Failed to assign proxy hook to ${property}:`, e);
-    return null;
-  }
-
-  return Original;
-}
+// NOTE: Constructor hooks are handled by EarlyHook.js (createConstructorHook factory)
+// This file only contains method-level hooks (hookAsyncMethod, hookMethod)
 
 /**
  * Hooks an async method (returning a Promise) on a target object.
@@ -67,11 +16,11 @@ export function hookConstructor(target, property, onInstance, shouldHook = () =>
  * @returns {Function|null} The original method, or null if target/property didn't exist
  */
 export function hookAsyncMethod(target, property, onResult, shouldHook = () => true) {
-  // @ts-ignore
-  if (!target || !target[property]) return null;
+  if (!target) return null;
 
   // @ts-ignore
   const original = target[property];
+  if (typeof original !== 'function') return null;
 
   // Do NOT bind 'this' here. We need to respect the 'this' context at the call site,
   // especially for prototype methods (like AudioWorklet.prototype.addModule).
@@ -106,11 +55,11 @@ export function hookAsyncMethod(target, property, onResult, shouldHook = () => t
  * @returns {Function|null} The original method, or null if target/property didn't exist
  */
 export function hookMethod(target, property, onCall, shouldHook = () => true) {
-  // @ts-ignore
-  if (!target || !target[property]) return null;
+  if (!target) return null;
 
   // @ts-ignore
   const original = target[property];
+  if (typeof original !== 'function') return null;
 
   // @ts-ignore
   target[property] = function(/** @type {any[]} */ ...args) {

@@ -32,14 +32,10 @@ class RTCPeerConnectionCollector extends PollingCollector {
    * @returns {Promise<void>}
    */
   async initialize() {
-    // Register global handler IMMEDIATELY (even before start)
-    // @ts-ignore
-    window.__rtcPeerConnectionCollectorHandler = (pc) => {
+    // Register global handler for early hook communication
+    this.registerGlobalHandler('__rtcPeerConnectionCollectorHandler', (pc) => {
       this._handleNewConnection(pc);
-    };
-
-    // Early hooks already installed constructor hooks, so we skip hookConstructor here
-    logger.info(this.logPrefix, 'Skipping constructor hook (early hook already installed)');
+    });
   }
 
   /**
@@ -135,6 +131,11 @@ class RTCPeerConnectionCollector extends PollingCollector {
 
     this.peerConnections.clear();
     this.previousStats.clear();
+
+    // Clear remote stream registry to prevent memory leak
+    // Individual track 'ended' listeners also clean up, but this ensures full cleanup on stop
+    streamRegistry.remote.clear();
+
     logger.info(this.logPrefix, `Stopped and cleaned up`);
   }
 
@@ -159,6 +160,18 @@ class RTCPeerConnectionCollector extends PollingCollector {
         peerConnections: allStats
       });
     }
+  }
+
+  /**
+   * Calculate bitrate in kbps from bytes delta and time delta
+   * @private
+   * @param {number} bytesDelta - Bytes transferred since last measurement
+   * @param {number} timeDeltaSec - Time elapsed in seconds
+   * @returns {number|null} Bitrate in kbps or null if calculation not possible
+   */
+  _calculateBitrateKbps(bytesDelta, timeDeltaSec) {
+    if (timeDeltaSec <= 0) return null;
+    return Math.round((bytesDelta * 8) / timeDeltaSec / 1000);
   }
 
   /**
@@ -219,11 +232,8 @@ class RTCPeerConnectionCollector extends PollingCollector {
         const isOpus = codec?.mimeType?.toLowerCase().includes('opus');
 
         // Calculate send bitrate (kbps)
-        let sendBitrateKbps = null;
-        if (prev && timeDeltaSec > 0) {
-          const bytesDelta = (audioOutbound.bytesSent || 0) - prev.bytesSent;
-          sendBitrateKbps = Math.round((bytesDelta * 8) / timeDeltaSec / 1000);
-        }
+        const sendBytesDelta = prev ? (audioOutbound.bytesSent || 0) - prev.bytesSent : 0;
+        const sendBitrateKbps = prev ? this._calculateBitrateKbps(sendBytesDelta, timeDeltaSec) : null;
 
         result.send = {
           // Codec info
@@ -255,11 +265,8 @@ class RTCPeerConnectionCollector extends PollingCollector {
         const isOpus = codec?.mimeType?.toLowerCase().includes('opus');
 
         // Calculate receive bitrate (kbps)
-        let recvBitrateKbps = null;
-        if (prev && timeDeltaSec > 0) {
-          const bytesDelta = (audioInbound.bytesReceived || 0) - prev.bytesReceived;
-          recvBitrateKbps = Math.round((bytesDelta * 8) / timeDeltaSec / 1000);
-        }
+        const recvBytesDelta = prev ? (audioInbound.bytesReceived || 0) - prev.bytesReceived : 0;
+        const recvBitrateKbps = prev ? this._calculateBitrateKbps(recvBytesDelta, timeDeltaSec) : null;
 
         result.recv = {
           // Codec info
