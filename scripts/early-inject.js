@@ -85,6 +85,7 @@
     window.__earlyCaptures.mediaRecorders = [];
     window.__earlyCaptures.workers = [];
     window.__earlyCaptures.connections = [];
+    window.__earlyCaptures.audioWorkletNodes = [];
     console.log('[AudioInspector] Early: Registry cleared');
   };
 
@@ -156,6 +157,12 @@
     'createScriptProcessor': 'scriptProcessor',
     'createAnalyser': 'analyser'
   };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // AudioWorkletNode Early Capture Registry
+  // Stores AudioWorkletNode instances created before inspector starts
+  // ═══════════════════════════════════════════════════════════════════
+  window.__earlyCaptures.audioWorkletNodes = [];
 
   /**
    * Single source of truth for methods to hook
@@ -371,6 +378,48 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  // AudioWorkletNode Constructor Hook - Early Capture for VU Meters
+  // Captures AudioWorkletNode instances (e.g., peak-worklet-processor)
+  // BEFORE inspector starts, ensuring UI consistency on refresh vs initial start
+  // ═══════════════════════════════════════════════════════════════════
+  const OriginalAudioWorkletNode = window.AudioWorkletNode;
+  if (OriginalAudioWorkletNode) {
+    window.AudioWorkletNode = new Proxy(OriginalAudioWorkletNode, {
+      construct(target, args, newTarget) {
+        const instance = Reflect.construct(target, args, newTarget);
+
+        const context = args[0];      // AudioContext
+        const processorName = args[1]; // 'peak-worklet-processor', 'opus-encoder', etc.
+        const options = args[2];       // Optional parameters
+
+        const contextId = context ? getOrAssignContextId(context) : null;
+
+        const capture = {
+          instance,
+          context,
+          contextId,
+          processorName,
+          options,
+          timestamp: Date.now()
+        };
+
+        window.__earlyCaptures.audioWorkletNodes.push(capture);
+
+        // Notify collector handler if already registered (real-time capture)
+        if (window.__audioWorkletNodeHandler) {
+          window.__audioWorkletNodeHandler(instance, args);
+        }
+
+        console.log(`[AudioInspector] Early: AudioWorkletNode created (${processorName})`);
+
+        return instance;
+      }
+    });
+
+    console.log('[AudioInspector] Early: Hooked AudioWorkletNode constructor');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   // RTCPeerConnection Hook
   // ═══════════════════════════════════════════════════════════════════
   const OriginalRTCPC = window.RTCPeerConnection;
@@ -413,7 +462,8 @@
     lastBlobSize: 0,
     mode: 'unknown', // 'unknown' | 'chunked' | 'cumulative'
     lastBitrateUpdateAt: 0,
-    active: false
+    active: false,
+    sessionCount: 0  // Track recording sessions for auto-stop logic
   };
   const BITRATE_UPDATE_INTERVAL_MS = 2000;
 
@@ -433,6 +483,10 @@
 
         // Track recording duration for bitrate calculation
         instance.addEventListener('start', () => {
+          // Increment session count FIRST
+          window.__recordingState.sessionCount++;
+          const sessionNum = window.__recordingState.sessionCount;
+
           window.__recordingState.startTime = Date.now();
           window.__recordingState.duration = null;
           window.__recordingState.totalBytes = 0;
@@ -451,7 +505,20 @@
             window.__newRecordingSessionHandler();
           }
 
-          debugLog('MediaRecorder started', 'New recording session - encoder detection reset');
+          // ═══════════════════════════════════════════════════════════════
+          // AUTO-STOP: Only trigger on 2nd+ recording session
+          // First recording: inspector keeps running (normal operation)
+          // Second+ recording: auto-stop to prevent stale data accumulation
+          // ═══════════════════════════════════════════════════════════════
+          if (sessionNum >= 2) {
+            window.postMessage({
+              __audioPipelineInspector: true,
+              type: 'AUTO_STOP_NEW_RECORDING'
+            }, '*');
+            debugLog('MediaRecorder started', `Session #${sessionNum} - inspector auto-stop triggered`);
+          } else {
+            debugLog('MediaRecorder started', `Session #${sessionNum} - first recording, inspector continues`);
+          }
         });
 
         instance.addEventListener('stop', () => {

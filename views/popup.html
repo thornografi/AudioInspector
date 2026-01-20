@@ -251,30 +251,74 @@
       min-height: 0; /* Grid/flex içinde scroll çalışması için gerekli */
     }
 
-    /* Unified scrollbar styles */
+    /* ========== Global Scrollbar System ========== */
+    /*
+     * Overlay scrollbar approach:
+     * - Scrollbar appears ON TOP of content (doesn't push content)
+     * - Invisible by default, visible on hover
+     * - Very thin (3px) to minimize visual impact
+     */
+
+    /* Base scrollable styles */
+    .card-content,
+    .rtc-column,
+    #debugContent,
+    .drawer-content {
+      overflow-y: overlay;  /* Chrome: overlay scrollbar */
+      overflow-x: hidden;
+    }
+
+    /* Fallback for browsers without overlay support */
+    @supports not (overflow-y: overlay) {
+      .card-content,
+      .rtc-column,
+      #debugContent,
+      .drawer-content {
+        overflow-y: auto;
+        /* Add right padding to compensate for scrollbar width */
+        padding-right: 4px;
+      }
+    }
+
+    /* Ultra-thin scrollbar (3px) */
     .card-content::-webkit-scrollbar,
     .rtc-column::-webkit-scrollbar,
-    #debugContent::-webkit-scrollbar {
-      width: 6px;
+    #debugContent::-webkit-scrollbar,
+    .drawer-content::-webkit-scrollbar {
+      width: 3px;
     }
 
     .card-content::-webkit-scrollbar-track,
     .rtc-column::-webkit-scrollbar-track,
-    #debugContent::-webkit-scrollbar-track {
+    #debugContent::-webkit-scrollbar-track,
+    .drawer-content::-webkit-scrollbar-track {
       background: transparent;
     }
 
     .card-content::-webkit-scrollbar-thumb,
     .rtc-column::-webkit-scrollbar-thumb,
-    #debugContent::-webkit-scrollbar-thumb {
-      background: var(--border-primary);
-      border-radius: 3px;
+    #debugContent::-webkit-scrollbar-thumb,
+    .drawer-content::-webkit-scrollbar-thumb {
+      background: rgba(139, 148, 158, 0.3);
+      border-radius: 2px;
     }
 
     .card-content::-webkit-scrollbar-thumb:hover,
     .rtc-column::-webkit-scrollbar-thumb:hover,
-    #debugContent::-webkit-scrollbar-thumb:hover {
-      background: var(--text-muted);
+    #debugContent::-webkit-scrollbar-thumb:hover,
+    .drawer-content::-webkit-scrollbar-thumb:hover {
+      background: rgba(139, 148, 158, 0.6);
+    }
+
+    /* Show scrollbar only on card/section hover (cleaner look) */
+    .card-content::-webkit-scrollbar-thumb {
+      background: transparent;
+    }
+    .card:hover .card-content::-webkit-scrollbar-thumb {
+      background: rgba(139, 148, 158, 0.3);
+    }
+    .card:hover .card-content::-webkit-scrollbar-thumb:hover {
+      background: rgba(139, 148, 158, 0.6);
     }
 
     /* Two Column Layout */
@@ -704,8 +748,8 @@
     .chain-vertical {
       display: flex;
       flex-direction: column;
-      align-items: flex-end;
-      gap: 2px;
+      align-items: flex-end;  /* Sağa hizalı */
+      gap: 0;
       font-family: var(--font-mono);
       font-size: 11px;
     }
@@ -713,16 +757,30 @@
     .chain-node {
       display: flex;
       align-items: center;
+      width: 100%;
+      justify-content: flex-end;  /* Node sağa */
     }
 
     .chain-node-name {
       color: var(--text-primary);
       font-weight: 500;
+      text-align: right;
     }
 
     .chain-arrow {
+      display: block;
+      width: 100%;
+      text-align: right;
       color: var(--text-muted);
       font-size: 10px;
+      line-height: 1.2;
+      padding-right: 0.5em;  /* Ok işaretini biraz içeri çek */
+    }
+
+    /* Graph feedback indicator (used in table) */
+    .graph-feedback {
+      color: var(--accent-orange);
+      font-style: italic;
     }
 
     /* ========== Console Drawer ========== */

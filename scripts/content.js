@@ -76,29 +76,68 @@ async function injectPageScript(attempt = 1) {
 
 // --- Message Handlers (All payloads now have consistent 'type' field) ---
 
-// Storage keys for collected data
-// SOURCE OF TRUTH: src/core/constants.js:74 → DATA_STORAGE_KEYS
-// (content.js cannot import ES modules, inline copy required)
-const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRY: Storage keys fetched from background.js (single source of truth)
+// Fallback array used until background.js responds (prevents race condition)
+// ═══════════════════════════════════════════════════════════════════════════════
+let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRY HELPER: WASM Encoder data merge with null-safe field preservation
+// OCP: Add new fields to ENCODER_MERGE_FIELDS array, no logic change needed
+// ═══════════════════════════════════════════════════════════════════════════════
+const ENCODER_MERGE_FIELDS = [
+  'encoder', 'bitRate', 'channels', 'sampleRate', 'application',
+  'applicationName', 'frameSize', 'processorName', 'originalSampleRate',
+  'wavBitDepth', 'container', 'encoderPath'
+];
+
+function mergeEncoderData(existing, payload) {
+  const merged = { ...existing, ...payload };
+
+  // Special: codec can come from 'codec' or 'type' field
+  merged.codec = payload.codec ?? payload.type ?? existing.codec;
+
+  // Null-safe merge: preserve existing values if payload has null/undefined
+  for (const field of ENCODER_MERGE_FIELDS) {
+    merged[field] = payload[field] ?? existing[field];
+  }
+
+  // Source priority: 'audioworklet-*' > 'direct' > others
+  merged.source = payload.source?.includes('audioworklet') ? payload.source :
+                  (existing.source?.includes('audioworklet') ? existing.source :
+                   (payload.source === 'direct' ? 'direct' : (existing.source || payload.source)));
+
+  return merged;
+}
+
+// Fetch actual keys from background.js (async, updates DATA_STORAGE_KEYS)
+chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
+  if (response?.keys) {
+    DATA_STORAGE_KEYS = response.keys;
+  }
+});
 
 /**
  * Clear inspector state and all measurement data from storage
- *
- * SYNC NOTE: background.js version also clears 'debug_logs' (log owner)
- * See also: popup.js:29, background.js:23
- *
+ * DRY: Delegates to background.js (single source of truth)
  * @param {Function} [callback] - Optional callback after removal
  */
 function clearInspectorData(callback) {
-  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'pendingAutoStart', ...DATA_STORAGE_KEYS], callback);
+  chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { includeLogs: false } }, () => {
+    if (callback) callback();
+  });
 }
 
 /**
  * Clear only measurement data from storage (keep inspector state)
+ * DRY: Delegates to background.js (single source of truth)
  * @param {Function} [callback] - Optional callback after removal
  */
 function clearMeasurementData(callback) {
-  chrome.storage.local.remove(DATA_STORAGE_KEYS, callback);
+  chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { dataOnly: true } }, () => {
+    if (callback) callback();
+  });
 }
 
 // Queue for audioContext updates to prevent race conditions
@@ -172,11 +211,12 @@ function processAudioContextQueue() {
           // Static: shallow merge (sadece timestamp değişmez, diğerleri güncellenebilir)
           static: { ...existing.static, ...payload.static },
           // Pipeline: processors array özel merge
+          // Note: Empty array ([]) is a valid reset - don't fall back to existing
           pipeline: {
             ...existing.pipeline,
             ...payload.pipeline,
-            processors: payload.pipeline?.processors?.length > 0
-              ? payload.pipeline.processors
+            processors: Array.isArray(payload.pipeline?.processors)
+              ? payload.pipeline.processors  // Use new array (even if empty = reset)
               : existing.pipeline?.processors || []
           },
           // wasmEncoder root level'da kalır
@@ -231,32 +271,7 @@ const MESSAGE_HANDLERS = {
   wasmEncoder: (payload) => {
     chrome.storage.local.get(['wasm_encoder'], (result) => {
       const existing = result.wasm_encoder || {};
-
-      // Merge: yeni veri önde, ama null/undefined eskiyi korur
-      const merged = {
-        ...existing,
-        ...payload,
-        // Temel encoder field'ları
-        codec: payload.codec ?? payload.type ?? existing.codec,  // codec veya type field'ından al
-        encoder: payload.encoder ?? existing.encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
-        bitRate: payload.bitRate ?? existing.bitRate,
-        channels: payload.channels ?? existing.channels,
-        sampleRate: payload.sampleRate ?? existing.sampleRate,
-        application: payload.application ?? existing.application,
-        // AudioWorklet encoder field'ları
-        applicationName: payload.applicationName ?? existing.applicationName,
-        frameSize: payload.frameSize ?? existing.frameSize,
-        processorName: payload.processorName ?? existing.processorName,
-        originalSampleRate: payload.originalSampleRate ?? existing.originalSampleRate,
-        wavBitDepth: payload.wavBitDepth ?? existing.wavBitDepth,
-        // Container format (ogg, webm, mp4, mp3, aac, flac)
-        container: payload.container ?? existing.container,
-        encoderPath: payload.encoderPath ?? existing.encoderPath,
-        // Source priority: 'audioworklet-config' > 'direct' > others (AudioWorklet daha detaylı)
-        source: payload.source?.includes('audioworklet') ? payload.source :
-                (existing.source?.includes('audioworklet') ? existing.source :
-                 (payload.source === 'direct' ? 'direct' : (existing.source || payload.source)))
-      };
+      const merged = mergeEncoderData(existing, payload);
 
       chrome.storage.local.set({
         wasm_encoder: { ...merged, sourceTabId: currentTabId },
@@ -310,8 +325,13 @@ const MESSAGE_HANDLERS = {
         if (chrome.runtime.lastError) {
           persistLogs(createLog('Content', `❌ audio_connections SET error: ${chrome.runtime.lastError.message}`, 'error'));
         } else {
+          // Log: single connection or batch sync
           const conn = payload.connection;
-          persistLogs(createLog('Content', `🔗 Connection: ${conn?.sourceType} → ${conn?.destType}`));
+          if (conn) {
+            persistLogs(createLog('Content', `🔗 Connection: ${conn.sourceType} → ${conn.destType}`));
+          } else {
+            persistLogs(createLog('Content', `🔗 Connections synced: ${connections.length} total`));
+          }
         }
       });
     });
@@ -342,96 +362,93 @@ window.addEventListener('message', (event) => {
     return;
   }
 
-  // Handle INSPECTOR_READY - restore state if needed (with tab lock check)
+  // Handle AUTO_STOP_NEW_RECORDING - stop inspector when new recording starts
+  // This prevents stale data accumulation (gain(x6) etc.) across recording sessions
+  // User can restart inspector via Refresh Modal for fresh state
+  if (event.data.type === 'AUTO_STOP_NEW_RECORDING') {
+    chrome.storage.local.get(['inspectorEnabled'], async (result) => {
+      // Only stop if inspector is currently running
+      if (result.inspectorEnabled !== true) {
+        return;
+      }
+
+      logContent('🔄 New recording detected - auto-stopping inspector');
+      persistLogs(createLog('Content', '🔄 Auto-stopped: new recording session started'));
+
+      // Set autoStoppedReason for UI feedback
+      await chrome.storage.local.set({
+        inspectorEnabled: false,
+        autoStoppedReason: 'new_recording'
+      });
+
+      // Signal PageInspector to stop collectors
+      window.postMessage({
+        __audioPipelineInspector: true,
+        type: 'SET_ENABLED',
+        enabled: false
+      }, '*');
+    });
+    return;
+  }
+
+  // Handle INSPECTOR_READY - delegate state decision to background.js (centralized)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CENTRALIZED APPROACH: All state decisions are made by background.js
+  // content.js only forwards page info and executes commands from background.js
+  // This prevents race conditions and duplicate logic
+  // ═══════════════════════════════════════════════════════════════════════════
   if (event.data.type === 'INSPECTOR_READY') {
-      chrome.storage.local.get(['inspectorEnabled', 'lockedTab', 'pendingAutoStart'], (result) => {
-          // PRIORITY 1: Check for pendingAutoStart (page refresh + auto-start flow)
-          if (result.pendingAutoStart && result.pendingAutoStart === currentTabId) {
-              logContent('🚀 pendingAutoStart detected - auto-starting inspector');
-              persistLogs(createLog('Content', '🚀 Auto-starting after page refresh'));
+      logContent('📡 INSPECTOR_READY - delegating to background.js');
 
-              // Clear the flag first
-              chrome.storage.local.remove(['pendingAutoStart'], () => {
-                  // Set up new locked tab
-                  const lockedTabData = {
-                      id: currentTabId,
-                      url: window.location.href,
-                      title: document.title
-                  };
+      // Send page info to background.js for centralized decision making
+      chrome.runtime.sendMessage({
+          type: 'PAGE_READY',
+          tabId: currentTabId,
+          url: window.location.href,
+          origin: window.location.origin,
+          title: document.title
+      }, (response) => {
+          if (chrome.runtime.lastError) {
+              logContent('⚠️ PAGE_READY message failed:', chrome.runtime.lastError.message);
+              return;
+          }
 
-                  chrome.storage.local.set({
-                      inspectorEnabled: true,
-                      lockedTab: lockedTabData
-                  }, () => {
-                      // Start the inspector
+          if (!response) {
+              logContent('⚠️ No response from background.js');
+              return;
+          }
+
+          logContent(`📥 Background response: action=${response.action}`, response);
+          persistLogs(createLog('Content', `Background decision: ${response.action}`));
+
+          // Execute action based on background.js decision
+          switch (response.action) {
+              case 'START':
+                  // Clear stale data then start
+                  clearMeasurementData(() => {
+                      logContent('🧹 Cleared stale data before restore');
                       window.postMessage({
                           __audioPipelineInspector: true,
                           type: 'SET_ENABLED',
                           enabled: true
                       }, '*');
-                      logContent('✅ Inspector auto-started after page refresh');
                   });
-              });
-              return;
-          }
+                  break;
 
-          // PRIORITY 2: Normal state restoration
-          if (result.inspectorEnabled === true && result.lockedTab) {
-              // currentTabId zaten injection'da senkron olarak alındı (line 50)
-              // Async GET_TAB_ID çağrısına gerek yok - DRY prensibi
-              const thisTabId = currentTabId;
-              const lockedTabId = result.lockedTab.id;
-              const thisOrigin = window.location.origin;
-              let lockedOrigin;
-              try {
-                  lockedOrigin = new URL(result.lockedTab.url).origin;
-              } catch {
-                  lockedOrigin = null;
-              }
-
-              // Debug log - tab ID ve origin karşılaştırması
-              logContent(`Tab check: current=${thisTabId}, locked=${lockedTabId}, origins: ${thisOrigin} vs ${lockedOrigin}`);
-              persistLogs(createLog('Content', `Tab check: current=${thisTabId}, locked=${lockedTabId}`));
-
-              // Tab ID kontrolü
-              if (thisTabId !== lockedTabId) {
-                  // Farklı tab, başlatma
-                  logContent('Inspector active but this tab is not locked (not starting)');
-                  persistLogs(createLog('Content', `Different tab (${thisTabId} != ${lockedTabId}) - not starting`));
-                  return;
-              }
-
-              // Origin kontrolü - aynı tab'da farklı siteye gidilmiş olabilir
-              if (thisOrigin !== lockedOrigin) {
-                  logContent(`Same tab but different origin: ${thisOrigin} vs ${lockedOrigin} (auto-stopping)`);
-                  persistLogs(createLog('Content', `Origin changed (${thisOrigin}) - inspector auto-stopped`));
-
-                  // Auto-stop: Set reason flag first, then clear inspector state AND measurement data
-                  chrome.storage.local.set({ autoStoppedReason: 'origin_change' }, () => {
-                      clearInspectorData(() => {
-                          logContent('🛑 Inspector auto-stopped due to origin change (state + data cleared)');
-                      });
-                  });
-                  return;
-              }
-
-              // Hem tab ID hem origin eşleşti, başlat
-              logContent('🔄 Restoring inspector state (tab + origin match)');
-              persistLogs(createLog('Content', '🔄 Restoring inspector state'));
-
-              // Clear stale data before restoring
-              clearMeasurementData(() => {
-                  logContent('🧹 Cleared stale data before restore');
-
+              case 'STOP':
+                  // Just ensure page script is stopped (background already updated storage)
                   window.postMessage({
                       __audioPipelineInspector: true,
                       type: 'SET_ENABLED',
-                      enabled: true
+                      enabled: false
                   }, '*');
-              });
-          } else {
-              logContent('Inspector READY but state is stopped (not restoring)');
-              persistLogs(createLog('Content', 'Inspector state: stopped (not restoring)'));
+                  break;
+
+              case 'NONE':
+              default:
+                  // Do nothing - inspector should stay stopped
+                  logContent('Inspector READY but staying stopped (background decision: NONE)');
+                  break;
           }
       });
       return;

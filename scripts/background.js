@@ -1,8 +1,10 @@
 // Background service worker
 
-// Storage keys for collected data
-// SOURCE OF TRUTH: src/core/constants.js:74 → DATA_STORAGE_KEYS
-// (background.js cannot import ES modules, inline copy required)
+// ═══════════════════════════════════════════════════════════════════════════════
+// SINGLE SOURCE OF TRUTH: Storage keys for collected data
+// Other scripts (content.js, popup.js) get these via GET_STORAGE_KEYS message
+// This eliminates DRY violation across 3 files
+// ═══════════════════════════════════════════════════════════════════════════════
 const DATA_STORAGE_KEYS = [
   'rtc_stats', 'user_media', 'audio_contexts',
   'audio_worklet', 'media_recorder', 'wasm_encoder',
@@ -11,19 +13,32 @@ const DATA_STORAGE_KEYS = [
 
 /**
  * Clear inspector state and data from storage
- * NOTE: This version also clears 'debug_logs' (background.js owns log storage)
- *
- * See also: popup.js:29, content.js:92
+ * SINGLE SOURCE OF TRUTH: Other scripts call via CLEAR_INSPECTOR_DATA message
  *
  * @param {Object} [options={}] - Cleanup options
  * @param {boolean} [options.includeAutoStopReason=false] - Include autoStoppedReason key
+ * @param {boolean} [options.includeLogs=true] - Include debug_logs (default true for background.js)
+ * @param {boolean} [options.dataOnly=false] - Only clear measurement data, keep state
  * @returns {Promise<void>}
  */
 function clearInspectorData(options = {}) {
-  const keys = ['inspectorEnabled', 'lockedTab', 'debug_logs', 'pendingAutoStart', ...DATA_STORAGE_KEYS];
-  if (options.includeAutoStopReason) {
-    keys.push('autoStoppedReason');
+  const { includeAutoStopReason = false, includeLogs = true, dataOnly = false } = options;
+
+  let keys;
+  if (dataOnly) {
+    // Only measurement data - used by content.js/popup.js clearMeasurementData()
+    keys = [...DATA_STORAGE_KEYS];
+  } else {
+    // Full clear - state + data + optionally logs
+    keys = ['inspectorEnabled', 'lockedTab', 'pendingAutoStart', ...DATA_STORAGE_KEYS];
+    if (includeLogs) {
+      keys.push('debug_logs');
+    }
+    if (includeAutoStopReason) {
+      keys.push('autoStoppedReason');
+    }
   }
+
   return chrome.storage.local.remove(keys);
 }
 
@@ -335,6 +350,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async response
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CENTRALIZED STATE DECISION: PAGE_READY handler
+  // All state decisions are made here - content.js only executes commands
+  // This prevents race conditions and duplicate logic across scripts
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (message.type === 'PAGE_READY') {
+    handlePageReady(message, sender)
+      .then(response => sendResponse(response))
+      .catch(err => {
+        console.error('[Background] PAGE_READY error:', err);
+        sendResponse({ action: 'NONE', error: err.message });
+      });
+    return true; // async response
+  }
+
   // Content script'in kendi tab ID'sini öğrenmesi için
   if (message.type === 'GET_TAB_ID') {
     sendResponse({ tabId: sender.tab?.id });
@@ -348,9 +378,126 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false; // sync response
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DRY: Single source of truth for storage keys
+  // content.js and popup.js get keys via this message instead of duplicating
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (message.type === 'GET_STORAGE_KEYS') {
+    sendResponse({ keys: DATA_STORAGE_KEYS });
+    return false; // sync response
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DRY: Centralized data clearing - prevents duplicate clearInspectorData() in each file
+  // Options: { dataOnly: true } for measurement data only, { includeLogs: false } to keep logs
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (message.type === 'CLEAR_INSPECTOR_DATA') {
+    clearInspectorData(message.options || {}).then(() => {
+      sendResponse({ success: true });
+    });
+    return true; // async response
+  }
+
   // Note: PANEL_CLOSED artık port-based connection ile handle ediliyor (daha güvenilir)
   // Note: Icon updates now handled by storage.onChanged listener (see above)
 });
+
+/**
+ * Centralized state decision handler for PAGE_READY
+ * Determines what action content.js should take based on current state
+ *
+ * Decision matrix:
+ * | pendingAutoStart | inspectorEnabled | lockedTab | sameTab | sameOrigin | Action |
+ * |------------------|------------------|-----------|---------|------------|--------|
+ * | YES (=tabId)     | -                | -         | -       | -          | START  |
+ * | NO               | YES              | YES       | YES     | YES        | START  |
+ * | NO               | YES              | YES       | YES     | NO         | STOP (origin change) |
+ * | NO               | YES              | YES       | NO      | -          | NONE (different tab) |
+ * | NO               | NO/missing       | YES       | YES     | -          | NONE + clear lockedTab |
+ * | NO               | NO/missing       | NO        | -       | -          | NONE   |
+ *
+ * @param {Object} message - { tabId, url, origin, title }
+ * @param {Object} sender - Chrome sender object
+ * @returns {Promise<{action: string, reason?: string}>}
+ */
+async function handlePageReady(message, sender) {
+  const { tabId, url, origin, title } = message;
+  const result = await chrome.storage.local.get(['inspectorEnabled', 'lockedTab', 'pendingAutoStart']);
+
+  console.log(`[Background] PAGE_READY: tab=${tabId}, origin=${origin}`);
+  console.log(`[Background] State: enabled=${result.inspectorEnabled}, lockedTab=${result.lockedTab?.id}, pending=${result.pendingAutoStart}`);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIORITY 1: pendingAutoStart (Refresh Modal flow)
+  // User clicked "Refresh and Start" - auto-start after page reload
+  // ─────────────────────────────────────────────────────────────────────────
+  if (result.pendingAutoStart && result.pendingAutoStart === tabId) {
+    console.log('[Background] ✅ pendingAutoStart matched - starting inspector');
+
+    // Clear pending flag and set up new session
+    await chrome.storage.local.remove(['pendingAutoStart']);
+    await chrome.storage.local.set({
+      inspectorEnabled: true,
+      lockedTab: { id: tabId, url, title }
+    });
+    updateBadge(true);
+
+    return { action: 'START', reason: 'pendingAutoStart' };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIORITY 2: Active inspector session restoration
+  // ─────────────────────────────────────────────────────────────────────────
+  if (result.inspectorEnabled === true && result.lockedTab) {
+    const lockedTabId = result.lockedTab.id;
+    let lockedOrigin;
+    try {
+      lockedOrigin = new URL(result.lockedTab.url).origin;
+    } catch {
+      lockedOrigin = null;
+    }
+
+    // Tab ID check
+    if (tabId !== lockedTabId) {
+      console.log(`[Background] Different tab (${tabId} != ${lockedTabId}) - not restoring`);
+      return { action: 'NONE', reason: 'different_tab' };
+    }
+
+    // Origin check - same tab but navigated to different site
+    if (origin !== lockedOrigin) {
+      console.log(`[Background] 🔄 Origin changed (${lockedOrigin} → ${origin}) - auto-stopping`);
+
+      // Auto-stop and clear state
+      await chrome.storage.local.set({ autoStoppedReason: 'origin_change' });
+      await clearInspectorData();
+      updateBadge(false);
+
+      return { action: 'STOP', reason: 'origin_change' };
+    }
+
+    // Same tab, same origin - restore inspector
+    console.log('[Background] ✅ Tab + origin match - restoring inspector');
+
+    // Update lockedTab URL in case path changed (same origin navigation)
+    await chrome.storage.local.set({
+      lockedTab: { id: tabId, url, title }
+    });
+
+    return { action: 'START', reason: 'session_restore' };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIORITY 3: Inspector stopped - cleanup stale lockedTab
+  // ─────────────────────────────────────────────────────────────────────────
+  if (result.lockedTab && result.lockedTab.id === tabId) {
+    // Page refreshed while inspector was stopped - clear stale lockedTab
+    // This prevents Refresh Modal from appearing unnecessarily
+    console.log('[Background] 🧹 Clearing stale lockedTab (page refresh while stopped)');
+    await chrome.storage.local.remove(['lockedTab']);
+  }
+
+  return { action: 'NONE', reason: 'inspector_stopped' };
+}
 
 /**
  * Handles the injection of the page script into the MAIN world

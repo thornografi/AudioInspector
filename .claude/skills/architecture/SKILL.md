@@ -77,10 +77,54 @@ await chrome.scripting.executeScript({
 | Mesaj | Yön | Amaç |
 |-------|-----|------|
 | `INSPECTOR_READY` | page→content | PageInspector hazır |
+| `PAGE_READY` | content→background | Sayfa hazır, karar iste |
 | `SET_ENABLED` | popup→content→page | Inspector aç/kapat |
 | `RE_EMIT_ALL` | content→page | Collector'lar veriyi yeniden emit etsin |
-| `GET_TAB_ID` | content→background | Tab ID öğrenme |
 | `ADD_LOG` | content→background | Merkezi log ekleme |
+| `GET_TAB_ID` | content→background | Content script'in kendi tab ID'sini öğrenmesi |
+| `GET_STORAGE_KEYS` | content/popup→background | DRY: Storage key listesi al |
+| `CLEAR_INSPECTOR_DATA` | content/popup→background | DRY: Merkezi veri temizleme |
+| `AUTO_STOP_NEW_RECORDING` | page→content | İkinci kayıtta inspector'ı durdur |
+
+## Merkezi State Yönetimi (Centralized Approach)
+
+**Tek Doğru Kaynak:** `background.js` TÜM state kararlarını verir.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        background.js                                 │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │ handlePageReady() - Merkezi karar mantığı                    │   │
+│  │                                                               │   │
+│  │ Decision Matrix:                                              │   │
+│  │ ┌────────────────┬──────────────┬───────────┬────────────┐   │   │
+│  │ │ pendingAuto    │ enabled      │ sameTab   │ Action     │   │   │
+│  │ ├────────────────┼──────────────┼───────────┼────────────┤   │   │
+│  │ │ YES (=tabId)   │ -            │ -         │ START      │   │   │
+│  │ │ NO             │ YES          │ YES+same  │ START      │   │   │
+│  │ │ NO             │ YES          │ YES+diff  │ STOP       │   │   │
+│  │ │ NO             │ NO           │ YES       │ NONE+clean │   │   │
+│  │ │ NO             │ NO           │ NO        │ NONE       │   │   │
+│  │ └────────────────┴──────────────┴───────────┴────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  Also handles: tab close, tab switch, window switch, cross-origin   │
+└─────────────────────────────────────────────────────────────────────┘
+          │
+          │ response: { action: 'START'|'STOP'|'NONE', reason }
+          ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        content.js                                    │
+│  - Sadece mesaj iletir, karar VERMEZ                                │
+│  - PAGE_READY gönderir, response'a göre hareket eder                │
+│  - SET_ENABLED'ı page.js'e forward eder                             │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Neden Merkezi?**
+- Race condition önleme (storage okuma/yazma sırası)
+- Duplicate mantık yok (cross-origin kontrolü tek yerde)
+- Tutarlı davranış (refresh, navigation, tab switch aynı sonuç)
 
 ## Detaylı Referanslar
 
@@ -95,7 +139,8 @@ Aşağıdaki konular için ilgili reference dosyasını oku:
   - storage.onChanged listener pattern
   - Async storage clearing (race condition fix)
   - Force restart logic
-  - Data reset flow
+  - DRY: DATA_STORAGE_KEYS message pattern
+  - DRY: clearInspectorData centralized pattern
 
 - **Tab Locking:** [references/tab-locking.md](references/tab-locking.md)
   - Tab kilitleme akışı

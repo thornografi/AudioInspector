@@ -119,32 +119,72 @@ Start'ta TÜM önceki state temizlenir - stale data önlenir.
 4. `__wasmEncoderDetected = null`
 5. Sadece `state !== 'closed'` context'leri sync et
 
-## Constants Mirroring (DATA_STORAGE_KEYS)
+## Constants Management (DRY Pattern)
 
 popup.js, content.js, background.js ES module olmadığı için `constants.js`'den import edemez.
 
-**SINGLE SOURCE OF TRUTH:** `src/core/constants.js`
+### DATA_STORAGE_KEYS - Message-Based Pattern
+
+**SINGLE SOURCE OF TRUTH:** `scripts/background.js`
 
 ```javascript
-// constants.js - Ana kaynak
-export const DATA_STORAGE_KEYS = [
+// background.js - Tek doğru kaynak
+const DATA_STORAGE_KEYS = [
   'rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet',
   'media_recorder', 'wasm_encoder', 'audio_connections'
 ];
 ```
 
-**Inline kopyalar (her değişiklikte güncelle):**
-- `scripts/background.js:6` → DATA_STORAGE_KEYS
-- `scripts/popup.js:17` → DATA_STORAGE_KEYS
-- `scripts/content.js:82` → DATA_STORAGE_KEYS
-
-**Diğer duplicate sabitler (popup.js):**
+**Diğer script'ler message ile alır:**
 ```javascript
-const DESTINATION_TYPES = { SPEAKERS: 'speakers', MEDIA_STREAM: 'MediaStreamDestination' };
-const MAX_AUDIO_CONTEXTS = 4; // UI limit - popup.js only
+// content.js / popup.js - Başlangıçta fallback, sonra güncelleme
+let DATA_STORAGE_KEYS = ['rtc_stats', ...]; // fallback
+
+chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
+  if (response?.keys) {
+    DATA_STORAGE_KEYS = response.keys;
+  }
+});
 ```
 
-**⚠️ Senkronizasyon:** constants.js'de key ekleme/çıkarma yapıldığında TÜM inline kopyaları güncelle!
+**✅ Avantaj:** Yeni key eklerken sadece background.js'i güncelle!
+
+### clearInspectorData - Centralized Pattern
+
+**SINGLE SOURCE OF TRUTH:** `scripts/background.js`
+
+```javascript
+// background.js - Merkezi fonksiyon
+function clearInspectorData(options = {}) {
+  const { includeAutoStopReason = false, includeLogs = true, dataOnly = false } = options;
+  // ... keys hesapla ve sil
+}
+```
+
+**Diğer script'ler message ile çağırır:**
+```javascript
+// content.js / popup.js
+chrome.runtime.sendMessage({
+  type: 'CLEAR_INSPECTOR_DATA',
+  options: { dataOnly: true }  // veya { includeLogs: false }
+}, callback);
+```
+
+**Options:**
+| Option | Varsayılan | Açıklama |
+|--------|------------|----------|
+| `dataOnly` | false | Sadece ölçüm verileri (state korunur) |
+| `includeLogs` | true | debug_logs dahil mi |
+| `includeAutoStopReason` | false | autoStoppedReason dahil mi |
+
+### Diğer Duplicate Sabitler (popup.js only)
+
+```javascript
+const DESTINATION_TYPES = { SPEAKERS: 'speakers', MEDIA_STREAM: 'MediaStreamDestination' };
+const MAX_AUDIO_CONTEXTS = 4; // UI limit
+```
+
+Bu sabitler sadece popup.js'de kullanıldığından inline kalabilir.
 
 ## ENCODER_KEYWORDS (Codec Detection)
 

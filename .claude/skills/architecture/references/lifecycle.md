@@ -14,32 +14,33 @@ Extension yaşam döngüsü olayları ve temizlik mekanizmaları.
 | Tab switch (monitoring sırasında) | `tabs.onActivated` | Sadece `inspectorEnabled` |
 | Window switch (monitoring sırasında) | `windows.onFocusChanged` | Sadece `inspectorEnabled` |
 
-## clearInspectorData() Helper'ları
+## clearInspectorData() - Centralized Pattern
 
-Üç farklı dosyada tanımlı, **kasıtlı farklar** var:
+**SINGLE SOURCE OF TRUTH:** `background.js`
+
+Tüm script'ler merkezi fonksiyonu message ile çağırır:
 
 ```javascript
-// background.js - TAM TEMİZLİK (lifecycle events için)
+// background.js - Merkezi implementasyon
 function clearInspectorData(options = {}) {
-  const keys = ['inspectorEnabled', 'lockedTab', 'debug_logs', 'pendingAutoStart', ...DATA_STORAGE_KEYS];
-  if (options.includeAutoStopReason) {
-    keys.push('autoStoppedReason');
-  }
-  return chrome.storage.local.remove(keys);
+  const { includeAutoStopReason = false, includeLogs = true, dataOnly = false } = options;
+  // dataOnly: sadece ölçüm verileri, state korunur
+  // includeLogs: debug_logs dahil mi (background.js default true)
 }
 
-// content.js & popup.js - LOGLAR KORUNUR
-function clearInspectorData(callback) {
-  chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'pendingAutoStart', ...DATA_STORAGE_KEYS], callback);
-}
+// content.js & popup.js - Message ile çağırır
+chrome.runtime.sendMessage({
+  type: 'CLEAR_INSPECTOR_DATA',
+  options: { includeLogs: false }  // veya { dataOnly: true }
+}, callback);
 ```
 
-| Helper | Dosya | debug_logs | Kullanım |
-|--------|-------|------------|----------|
-| `clearInspectorData()` | background.js | ✅ Siler | Tab close, navigation |
-| `clearInspectorData()` | content.js | ❌ Korur | User actions |
-| `clearInspectorData()` | popup.js | ❌ Korur | UI actions |
-| `clearMeasurementData()` | Tümü | ❌ Korur | Sadece DATA_STORAGE_KEYS |
+| Çağıran | Options | debug_logs | Kullanım |
+|---------|---------|------------|----------|
+| background.js (doğrudan) | `{}` | ✅ Siler | Tab close, navigation |
+| content.js (message) | `{ includeLogs: false }` | ❌ Korur | User actions |
+| popup.js (message) | `{ includeLogs: false }` | ❌ Korur | UI actions |
+| Tümü | `{ dataOnly: true }` | ❌ Korur | Sadece DATA_STORAGE_KEYS |
 
 ## windows.onRemoved Pattern
 
@@ -80,6 +81,7 @@ Inspector aktifken başka tab/window'a geçişte otomatik durdurma.
 | `'navigation'` | Cross-origin navigation |
 | `'origin_change'` | Origin değişikliği (content.js) |
 | `'injection_failed'` | Script enjeksiyonu başarısız |
+| `'new_recording'` | İkinci kayıt başladı (MediaRecorder.start) |
 
 **Akış:**
 ```

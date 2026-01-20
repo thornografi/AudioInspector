@@ -13,29 +13,39 @@ const DESTINATION_TYPES = {
 };
 const MAX_AUDIO_CONTEXTS = 4; // UI_LIMITS.MAX_AUDIO_CONTEXTS in constants.js
 
-// Storage keys for collected data
-// SOURCE OF TRUTH: src/core/constants.js:74 → DATA_STORAGE_KEYS
-// (popup.js cannot import ES modules, inline copy required)
-const DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRY: Storage keys fetched from background.js (single source of truth)
+// Fallback array used until background.js responds (prevents race condition)
+// ═══════════════════════════════════════════════════════════════════════════════
+let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+
+// Fetch actual keys from background.js (async, updates DATA_STORAGE_KEYS)
+chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
+  if (response?.keys) {
+    DATA_STORAGE_KEYS = response.keys;
+  }
+});
 
 /**
  * Clear inspector state and all measurement data from storage
- *
- * SYNC NOTE: background.js version also clears 'debug_logs' (log owner)
- * See also: content.js:94, background.js:23
- *
+ * DRY: Delegates to background.js (single source of truth)
  * @returns {Promise<void>}
  */
 function clearInspectorData() {
-  return chrome.storage.local.remove(['inspectorEnabled', 'lockedTab', 'pendingAutoStart', ...DATA_STORAGE_KEYS]);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { includeLogs: false } }, () => resolve());
+  });
 }
 
 /**
  * Clear only measurement data from storage (keep inspector state)
+ * DRY: Delegates to background.js (single source of truth)
  * @returns {Promise<void>}
  */
 function clearMeasurementData() {
-  return chrome.storage.local.remove(DATA_STORAGE_KEYS);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { dataOnly: true } }, () => resolve());
+  });
 }
 
 /**
@@ -379,7 +389,8 @@ function showAutoStopBanner(reason) {
     'injection_failed': 'Injection failed - please reload page',
     'tab_switch': '⚠️ Inspecting stopped: Switched to different tab',
     'navigation': '⚠️ Inspector stopped: Navigated to different site',
-    'window_switch': '⚠️ Inspector stopped: Switched to different window'
+    'window_switch': '⚠️ Inspector stopped: Switched to different window',
+    'new_recording': '⚠️ Inspector stopped: New recording started'
   };
   banner.textContent = messages[reason] || 'Inspector stopped';
   banner.classList.add('visible');
@@ -1068,7 +1079,7 @@ function renderACStats(contexts, audioConnections = null) {
   // ━━━ Audio Connection Graph ━━━ (if connections available)
   const filteredConnections = filterConnectionsByContext(audioConnections?.connections, contextArray);
   if (filteredConnections.length > 0) {
-    html += renderConnectionGraph(filteredConnections);
+    html += renderConnectionGraph(filteredConnections, contextArray);
   }
 
   container.innerHTML = html;
@@ -1078,96 +1089,147 @@ function renderACStats(contexts, audioConnections = null) {
  * Render audio connection graph as a visual chain
  * Shows how AudioNodes are connected to each other
  * @param {Array} connections - Array of { sourceType, sourceId, destType, destId, ... }
+ * @param {Array} [contexts] - Optional array of AudioContext data for enhanced AudioWorklet detection
  * @returns {string} HTML string
  */
-function renderConnectionGraph(connections) {
+function renderConnectionGraph(connections, contexts = []) {
   if (!connections || connections.length === 0) {
     return '';
   }
 
-  // Build adjacency list to find chains
-  // Format: sourceId → [destId1, destId2, ...]
-  const adjacency = new Map();
-  const nodeTypes = new Map(); // nodeId → nodeType
+  // ═══════════════════════════════════════════════════════════════════════════
+  // USER-FRIENDLY SUMMARY: Show source, effects, and output in simple format
+  // Instead of technical node connections, show what the user cares about
+  // ═══════════════════════════════════════════════════════════════════════════
 
+  // Helper: Check if an AudioWorkletNode processor name looks like VU meter
+  const isVUMeterProcessor = (name) => {
+    if (!name) return false;
+    const lower = name.toLowerCase();
+    return lower.includes('peak') || lower.includes('level') || lower.includes('meter') || lower.includes('vu');
+  };
+
+  // Get AudioWorkletNode processor names from contexts for VU meter detection
+  const audioWorkletProcessorNames = [];
+  for (const ctx of contexts) {
+    const processors = ctx.pipeline?.processors || [];
+    for (const p of processors) {
+      if (p.type === 'audioWorkletNode' && p.processorName) {
+        audioWorkletProcessorNames.push(p.processorName);
+      }
+    }
+  }
+
+  // Check if any AudioWorkletNode is a VU meter
+  const hasVUMeter = audioWorkletProcessorNames.some(name => isVUMeterProcessor(name));
+
+  // Collect unique node types
+  const nodeTypes = new Set();
   for (const conn of connections) {
-    const srcKey = conn.sourceId;
-    const dstKey = conn.destId;
-
-    // Store node types
-    nodeTypes.set(srcKey, conn.sourceType);
-    nodeTypes.set(dstKey, conn.destType);
-
-    // Build adjacency
-    if (!adjacency.has(srcKey)) {
-      adjacency.set(srcKey, []);
-    }
-    adjacency.get(srcKey).push(dstKey);
+    nodeTypes.add(conn.sourceType);
+    nodeTypes.add(conn.destType);
   }
 
-  // Find starting nodes (nodes with no incoming edges)
-  const hasIncoming = new Set();
+  // Categorize nodes
+  const sources = [];
+  const effects = [];
+  const outputs = [];
+
+  // Node type mappings for user-friendly names
+  const nodeLabels = {
+    // Sources
+    'MediaStreamAudioSource': { label: 'Microphone', category: 'source', icon: '🎤' },
+    'MediaStreamSource': { label: 'Microphone', category: 'source', icon: '🎤' },
+    'OscillatorNode': { label: 'Oscillator', category: 'source', icon: '〰️' },
+    'Oscillator': { label: 'Oscillator', category: 'source', icon: '〰️' },
+    'BufferSource': { label: 'Audio Buffer', category: 'source', icon: '📁' },
+    // Effects
+    'Gain': { label: 'Volume', category: 'effect', icon: '🔊' },
+    'BiquadFilter': { label: 'EQ', category: 'effect', icon: '🎚️' },
+    'Convolver': { label: 'Reverb', category: 'effect', icon: '🏛️' },
+    'Delay': { label: 'Delay', category: 'effect', icon: '⏱️' },
+    'DynamicsCompressor': { label: 'Compressor', category: 'effect', icon: '📊' },
+    'WaveShaper': { label: 'Distortion', category: 'effect', icon: '⚡' },
+    'Analyser': { label: 'Analyser', category: 'effect', icon: '📈' },
+    'StereoPanner': { label: 'Panner', category: 'effect', icon: '↔️' },
+    // Processors
+    'AudioWorklet': { label: 'Processor', category: 'effect', icon: '⚙️' },
+    'ScriptProcessor': { label: 'Processor', category: 'effect', icon: '⚙️' },
+    // Outputs
+    'AudioDestination': { label: 'Speaker', category: 'output', icon: '🔈' },
+    'MediaStreamAudioDestination': { label: 'Stream', category: 'output', icon: '⏺️' },
+    'MediaStreamDestination': { label: 'Stream', category: 'output', icon: '⏺️' }
+  };
+
+  // Categorize each unique node type
+  for (const type of nodeTypes) {
+    // Special handling: If AudioWorklet and we detected VU meter processor, use VU Meter label
+    let info;
+    if (type === 'AudioWorklet' && hasVUMeter) {
+      info = { label: 'VU Meter', category: 'effect', icon: '📊' };
+    } else {
+      info = nodeLabels[type] || { label: type, category: 'effect', icon: '🔧' };
+    }
+    const item = { type, label: info.label, icon: info.icon };
+
+    if (info.category === 'source' && !sources.some(s => s.label === info.label)) {
+      sources.push(item);
+    } else if (info.category === 'output' && !outputs.some(o => o.label === info.label)) {
+      outputs.push(item);
+    } else if (info.category === 'effect' && !effects.some(e => e.label === info.label)) {
+      effects.push(item);
+    }
+  }
+
+  // Detect feedback loops (Delay → Gain → Delay pattern)
+  let hasFeedback = false;
   for (const conn of connections) {
-    hasIncoming.add(conn.destId);
-  }
-
-  const startNodes = [...nodeTypes.keys()].filter(id => !hasIncoming.has(id));
-
-  // If no clear start, just use first node
-  if (startNodes.length === 0 && connections.length > 0) {
-    startNodes.push(connections[0].sourceId);
-  }
-
-  // Build chains from start nodes
-  const chains = [];
-  const visited = new Set();
-
-  function buildChain(nodeId, chain) {
-    if (visited.has(nodeId)) return;
-    visited.add(nodeId);
-
-    chain.push({
-      id: nodeId,
-      type: nodeTypes.get(nodeId) || 'Unknown'
-    });
-
-    const nextNodes = adjacency.get(nodeId) || [];
-    for (const nextId of nextNodes) {
-      buildChain(nextId, chain);
+    if (conn.sourceType === 'Delay' && conn.destType === 'Gain') {
+      // Check if any Gain connects back to Delay
+      const gainToDelay = connections.some(c =>
+        c.sourceType === 'Gain' && c.destType === 'Delay'
+      );
+      if (gainToDelay) hasFeedback = true;
     }
   }
 
-  for (const startId of startNodes) {
-    const chain = [];
-    buildChain(startId, chain);
-    if (chain.length > 0) {
-      chains.push(chain);
-    }
-  }
-
-  // Render chains
+  // Build HTML - use same table structure as Audio Path for consistency
   let html = `
     <div class="ac-section">
       <div class="ac-section-header">
         <span class="ac-section-title">Audio Graph</span>
-        <span class="ac-detected-time-subtle">(${connections.length} connection${connections.length !== 1 ? 's' : ''})</span>
+        <span class="ac-detected-time-subtle">(${connections.length})</span>
       </div>
-      <div class="chain-vertical">
+      <table class="ac-main-table">
   `;
 
-  // Render each chain
-  for (const chain of chains) {
-    chain.forEach((node, i) => {
-      html += `<div class="chain-node">`;
-      html += `<span class="chain-node-name">${escapeHtml(node.type)}</span>`;
-      html += `</div>`;
-      if (i < chain.length - 1) {
-        html += `<span class="chain-arrow">↓</span>`;
-      }
-    });
+  // Source row
+  if (sources.length > 0) {
+    const sourceText = sources.map(s => s.label).join(', ');
+    html += `<tr><td>Source</td><td>${sourceText}</td></tr>`;
   }
 
-  html += `</div></div>`;
+  // Effects row (only show meaningful effects, skip Gain if only used for routing)
+  const meaningfulEffects = effects.filter(e =>
+    e.label !== 'Volume' && e.label !== 'Processor' && e.label !== 'Analyser'
+  );
+  if (meaningfulEffects.length > 0) {
+    const effectText = meaningfulEffects.map(e => e.label).join(', ');
+    html += `<tr><td>Effects</td><td>${effectText}</td></tr>`;
+  }
+
+  // Feedback indicator - shows cyclic connections (e.g., Delay → Gain → Delay)
+  if (hasFeedback) {
+    html += `<tr><td><span class="has-tooltip" data-tooltip="Audio signal loops back (e.g., echo/reverb effect)">Loop</span></td><td class="graph-feedback">Feedback</td></tr>`;
+  }
+
+  // Output row
+  if (outputs.length > 0) {
+    const outputText = outputs.map(o => o.label).join(', ');
+    html += `<tr><td>Output</td><td>${outputText}</td></tr>`;
+  }
+
+  html += `</table></div>`;
   return html;
 }
 
@@ -1347,20 +1409,20 @@ const ENCODER_DETECTORS = [
       if (enc.workerFilename) {
         rows.push({
           label: 'Encoder',
-          value: `<span class="has-tooltip" data-tooltip="JavaScript/WASM encoder library">🔧 ${enc.workerFilename}</span>`,
+          value: `<span class="has-tooltip" data-tooltip="WASM Encoder - Worker: ${enc.workerFilename}">🔧 ${enc.workerFilename}</span>`,
           isMetric: false
         });
       } else if (enc.processorName) {
         rows.push({
           label: 'Encoder',
-          value: `<span class="has-tooltip" data-tooltip="AudioWorklet-based encoder">🔧 ${enc.processorName}</span>`,
+          value: `<span class="has-tooltip" data-tooltip="WASM Encoder - AudioWorklet: ${enc.processorName}">🔧 ${enc.processorName}</span>`,
           isMetric: false
         });
       } else {
         // Fallback - WASM encoder detected but no specific name
         rows.push({
           label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="JavaScript/WASM encoder (library name not detected)">🔧 WASM</span>',
+          value: '<span class="has-tooltip" data-tooltip="JavaScript/WASM encoder (library name not detected)">🔧 WASM Encoder</span>',
           isMetric: false
         });
       }
@@ -1426,10 +1488,10 @@ const ENCODER_DETECTORS = [
       const rows = [
         { label: 'Codec', value: codec, isMetric: true },
         { label: 'Bitrate', value: `${bitrateKbps} kbps`, isMetric: true },
-        // Encoder type - Native browser WebRTC encoder
+        // Encoder type - Browser's built-in WebRTC encoder
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in WebRTC audio encoder">🌐 Native</span>',
+          value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in WebRTC audio encoder">🌐 WebRTC Native</span>',
           isMetric: false
         }
       ];
@@ -1492,11 +1554,11 @@ const ENCODER_DETECTORS = [
 
       rows.push({ label: 'Bitrate', value: `${bitrateKbps} kbps`, isMetric: true });
 
-      // Encoder type - Native browser MediaRecorder API (not WASM)
+      // Encoder type - Browser's built-in MediaRecorder API (not WASM)
       // This distinguishes from WASM encoders like opus-recorder, lamejs, etc.
       rows.push({
         label: 'Encoder',
-        value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in MediaRecorder encoder - not a JavaScript/WASM library">🌐 Native</span>',
+        value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in MediaRecorder API - not a JavaScript/WASM library">🌐 MediaRecorder API</span>',
         isMetric: false
       });
 

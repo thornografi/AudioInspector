@@ -962,52 +962,195 @@ class AudioContextCollector extends BaseCollector {
   }
 
   /**
+   * Check if a connection already exists in audioConnections
+   * Compares by sourceId + destId + outputIndex + inputIndex (unique connection key)
+   * @private
+   * @param {Object} connection - Connection to check
+   * @returns {boolean} true if duplicate exists
+   */
+  _isConnectionDuplicate(connection) {
+    if (!this.audioConnections || this.audioConnections.length === 0) return false;
+
+    return this.audioConnections.some(existing =>
+      existing.sourceId === connection.sourceId &&
+      existing.destId === connection.destId &&
+      existing.outputIndex === connection.outputIndex &&
+      existing.inputIndex === connection.inputIndex
+    );
+  }
+
+  /**
    * Handle audio connection (AudioNode.connect() calls)
    * Captures the audio graph topology to show data flow between nodes
    * @private
    * @param {Object} connection - { sourceType, sourceId, destType, destId, outputIndex, inputIndex, timestamp }
+   * @param {boolean} shouldEmit - If true, emit data event; if false, silent add (for early sync)
    */
-  _handleAudioConnection(connection) {
+  _handleAudioConnection(connection, shouldEmit = true) {
       if (!this.active) return;  // Only process when collector is active
 
       const { sourceType, sourceId, destType, destId, outputIndex, inputIndex, timestamp } = connection;
       const contextId = connection.contextId || null;
 
-      // Find context that owns this connection
-      // Strategy: Match by looking for any context that has the source or destination node
-      // NOTE: We don't have direct access to context from node ID, so we store connections globally
-      // and associate them with the most recently active context or emit as global graph data
-
-      // For now, store connections in a global array on the collector
-      // and emit as separate data type for UI to render
+      // Initialize connections array if needed
       if (!this.audioConnections) {
         this.audioConnections = [];
       }
 
-      // Add connection to list
+      // Normalize connection object
       const normalizedConnection = {
         sourceType,
         sourceId,
         destType,
         destId,
-        outputIndex,
-        inputIndex,
+        outputIndex: outputIndex ?? 0,
+        inputIndex: inputIndex ?? 0,
         timestamp,
         contextId
       };
 
+      // ═══════════════════════════════════════════════════════════════════
+      // DUPLICATE CHECK: Prevent same connection from being added twice
+      // This can happen when:
+      // 1. Early capture + real-time capture for same connect() call
+      // 2. reEmit() after connections already synced
+      // ═══════════════════════════════════════════════════════════════════
+      if (this._isConnectionDuplicate(normalizedConnection)) {
+        return; // Already exists, skip
+      }
+
+      // Add connection to list
       this.audioConnections.push(normalizedConnection);
 
-      // Emit connection data as separate type
+      // Emit connection data as separate type (unless silent mode)
+      if (shouldEmit) {
+        this.emit(EVENTS.DATA, {
+          type: DATA_TYPES.AUDIO_CONNECTION,
+          timestamp,
+          connection: normalizedConnection,
+          // Also include full connection list for graph rendering
+          allConnections: [...this.audioConnections]
+        });
+
+        logger.info(this.logPrefix, `Audio connection: ${sourceType} → ${destType}`);
+      }
+  }
+
+  /**
+   * Sync early-captured connections from early-inject.js
+   * Called during start() to restore connections made before inspector started
+   * @private
+   */
+  _syncEarlyConnections() {
+    // @ts-ignore
+    const earlyConnections = window.__earlyCaptures?.connections;
+    if (!earlyConnections || earlyConnections.length === 0) {
+      return;
+    }
+
+    // Get the set of contextIds we're tracking (for filtering)
+    const trackedContextIds = new Set();
+    for (const [, ctxData] of this.activeContexts.entries()) {
+      if (ctxData.contextId) {
+        trackedContextIds.add(ctxData.contextId);
+      }
+    }
+
+    let syncedCount = 0;
+    let skippedCount = 0;
+
+    for (const connection of earlyConnections) {
+      // Filter: Only sync connections belonging to tracked contexts
+      // If contextId is null/undefined, include it (legacy or unknown context)
+      if (connection.contextId && trackedContextIds.size > 0 && !trackedContextIds.has(connection.contextId)) {
+        skippedCount++;
+        continue;
+      }
+
+      // Add silently (don't emit per-connection, we'll emit batch at end)
+      this._handleAudioConnection(connection, false);
+      syncedCount++;
+    }
+
+    // Emit all connections at once if any were synced
+    if (syncedCount > 0 && this.audioConnections.length > 0) {
       this.emit(EVENTS.DATA, {
         type: DATA_TYPES.AUDIO_CONNECTION,
-        timestamp,
-        connection: normalizedConnection,
-        // Also include full connection list for graph rendering
+        timestamp: Date.now(),
         allConnections: [...this.audioConnections]
       });
 
-      logger.info(this.logPrefix, `Audio connection: ${sourceType} → ${destType}`);
+      logger.info(this.logPrefix, `📡 Synced ${syncedCount} early connection(s) from early-inject.js`);
+    }
+
+    if (skippedCount > 0) {
+      logger.info(this.logPrefix, `Skipped ${skippedCount} connection(s) from other contexts`);
+    }
+
+    // Clear early connections after sync to prevent re-processing on next start()
+    // But keep the array reference intact for new connections
+    // @ts-ignore
+    window.__earlyCaptures.connections = [];
+  }
+
+  /**
+   * Sync early-captured AudioWorkletNodes from early-inject.js
+   * Called during start() to restore AudioWorkletNodes (e.g., peak-worklet-processor)
+   * created before inspector started - ensures UI consistency on refresh vs initial start
+   * @private
+   */
+  _syncEarlyAudioWorkletNodes() {
+    // @ts-ignore
+    const earlyNodes = window.__earlyCaptures?.audioWorkletNodes;
+    if (!earlyNodes || earlyNodes.length === 0) {
+      return;
+    }
+
+    let syncedCount = 0;
+
+    for (const capture of earlyNodes) {
+      const { context, processorName, options, timestamp, contextId } = capture;
+
+      // Find context in activeContexts
+      const ctxData = context ? this.activeContexts.get(context) : null;
+
+      if (ctxData) {
+        // Add AudioWorkletNode to pipeline processors (duplicate check)
+        const processorEntry = {
+          type: 'audioWorkletNode',
+          processorName: processorName,
+          options: options,
+          timestamp: timestamp
+        };
+
+        // Duplicate check - same processorName
+        const existingIdx = ctxData.pipeline.processors.findIndex(
+          p => p.type === 'audioWorkletNode' && p.processorName === processorName
+        );
+
+        if (existingIdx < 0) {
+          ctxData.pipeline.processors.push(processorEntry);
+          ctxData.pipeline.timestamp = Date.now();
+          syncedCount++;
+        }
+      } else {
+        logger.info(this.logPrefix, `Skipping early AudioWorkletNode (${processorName}) - context not in activeContexts`);
+      }
+    }
+
+    // Batch emit updated contexts
+    if (syncedCount > 0) {
+      for (const [ctx, ctxData] of this.activeContexts.entries()) {
+        if (ctx.state !== 'closed') {
+          this.emit(EVENTS.DATA, ctxData);
+        }
+      }
+      logger.info(this.logPrefix, `📡 Synced ${syncedCount} early AudioWorkletNode(s) from early-inject.js`);
+    }
+
+    // Clear after sync
+    // @ts-ignore
+    window.__earlyCaptures.audioWorkletNodes = [];
   }
 
   /**
@@ -1051,16 +1194,24 @@ class AudioContextCollector extends BaseCollector {
       this._handleAudioWorkletNode(node, args);
     };
 
-    // 5. Clear any stale WASM encoder detection
+    // 5. Re-register audio connection handler
+    // @ts-ignore
+    window.__audioConnectionHandler = (connection) => {
+      this._handleAudioConnection(connection);
+    };
+
+    // 6. Clear any stale WASM encoder detection
     // @ts-ignore
     window.__wasmEncoderDetected = null;
 
-    // 6. Register new recording session handler (stale data fix)
+    // 7. Register new recording session handler
     // When MediaRecorder starts a new recording, reset encoder detection state
-    // This prevents second recording from showing first recording's encoder info
+    // Note: Data cleanup is no longer needed here - inspector will auto-stop
+    // via AUTO_STOP_NEW_RECORDING message (early-inject.js → content.js)
     // @ts-ignore
     window.__newRecordingSessionHandler = () => {
       if (this.active) {
+        // Reset encoder detection state (prevents stale encoder info on restart)
         this.currentEncoderData = null;
         logger.info(this.logPrefix, '🔄 New recording session - encoder detection reset');
       }
@@ -1185,21 +1336,31 @@ class AudioContextCollector extends BaseCollector {
     }
 
     // ───────────────────────────────────────────────────────────────────
-    // 4. INITIALIZE CONNECTIONS (clean slate - early captures were cleared above)
-    // New connections will be captured in real-time via __audioConnectionHandler
+    // 4. SYNC EARLY CONNECTIONS from early-inject.js
+    // These are AudioNode.connect() calls made before inspector started
+    // Critical for sites that set up audio graph immediately on page load
     // ───────────────────────────────────────────────────────────────────
-    this.audioConnections = [];
+    this.audioConnections = [];  // Start fresh
+    this._syncEarlyConnections();  // Sync from __earlyCaptures.connections
+
+    // ───────────────────────────────────────────────────────────────────
+    // 5. SYNC EARLY AUDIOWORKLETNODES from early-inject.js
+    // These are AudioWorkletNodes (e.g., VU meters) created before inspector started
+    // Critical for UI consistency: same data on initial start vs page refresh
+    // ───────────────────────────────────────────────────────────────────
+    this._syncEarlyAudioWorkletNodes();  // Sync from __earlyCaptures.audioWorkletNodes
 
     logger.info(this.logPrefix, 'Started - ready to capture new audio activity');
   }
 
   /**
-   * Re-emit current data from active contexts
+   * Re-emit current data from active contexts and connections
    * Called when UI needs to be refreshed (e.g., after data reset)
    */
   reEmit() {
     if (!this.active) return;
 
+    // 1. Re-emit AudioContext metadata
     let emittedCount = 0;
     for (const [ctx, metadata] of this.activeContexts.entries()) {
       // Skip and clean up closed contexts
@@ -1215,6 +1376,16 @@ class AudioContextCollector extends BaseCollector {
 
     if (emittedCount > 0) {
       logger.info(this.logPrefix, `Re-emitted ${emittedCount} AudioContext(s)`);
+    }
+
+    // 2. Re-emit audio connections (for Audio Graph UI)
+    if (this.audioConnections && this.audioConnections.length > 0) {
+      this.emit(EVENTS.DATA, {
+        type: DATA_TYPES.AUDIO_CONNECTION,
+        timestamp: Date.now(),
+        allConnections: [...this.audioConnections]
+      });
+      logger.info(this.logPrefix, `Re-emitted ${this.audioConnections.length} audio connection(s)`);
     }
   }
 
@@ -1236,6 +1407,8 @@ class AudioContextCollector extends BaseCollector {
     window.__audioWorkletNodeHandler = null;
     // @ts-ignore
     window.__newRecordingSessionHandler = null;
+    // @ts-ignore - Connection handler: null so new connections go to earlyCaptures only
+    window.__audioConnectionHandler = null;
     logger.info(this.logPrefix, 'Cleared all handlers on stop');
 
     // Clear stale WASM encoder detection
