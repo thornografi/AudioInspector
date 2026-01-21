@@ -1,6 +1,5 @@
 // Side panel script
 let latestData = null;
-let autoRefresh = true;
 let enabled = false; // Default to false (stopped)
 let drawerOpen = false; // Console drawer state
 let currentTabId = null; // Track which tab this panel is associated with
@@ -448,19 +447,19 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// UI helper - pulsing status text (Detecting / Waiting / Pending / Loading)
+function renderStatusPulse(text, tooltip) {
+  const safeText = escapeHtml(text);
+  if (tooltip) {
+    return `<span class="has-tooltip status-pulse" data-tooltip="${escapeHtml(tooltip)}">${safeText}</span>`;
+  }
+  return `<span class="status-pulse">${safeText}</span>`;
+}
+
 // Format jitter (seconds to ms)
 function formatJitter(jitterSec) {
   if (!jitterSec) return 'N/A';
   return `${(jitterSec * 1000).toFixed(2)} ms`;
-}
-
-// Format bitrate
-function formatBitrate(bytes, duration) {
-  if (!bytes || !duration) return 'N/A';
-  const bps = (bytes * 8) / duration;
-  if (bps > 1000000) return `${(bps / 1000000).toFixed(2)} Mbps`;
-  if (bps > 1000) return `${(bps / 1000).toFixed(2)} Kbps`;
-  return `${bps.toFixed(0)} bps`;
 }
 
 // Color code values
@@ -1266,12 +1265,20 @@ function renderACStats(contexts, audioConnections = null) {
       // Output
       html += `<tr><td>Output</td><td>${ctx.pipeline?.destinationType || 'Speakers'}</td></tr>`;
 
-      // Monitor (VU Analyser)
-      if (monitors.length > 0) {
-        html += `<tr><td>Monitor</td><td>VU Analyser</td></tr>`;
-      }
-
       html += `</tbody></table></div>`;
+
+      // Monitor (VU Analyser) - side-tap, not part of main audio path chain
+      if (monitors.length > 0) {
+        const monitorCount = monitors.length;
+        const monitorLabel = monitorCount > 1 ? `VU Analyser ×${monitorCount}` : 'VU Analyser';
+        html += `
+          <div class="ac-section monitor-section">
+            <div class="processing-item">
+              <span class="detail-label">Monitor</span>
+              <span class="detail-value detail-value-muted has-tooltip" data-tooltip="AnalyserNode is a monitoring tap (VU/visualizer). It does not change the main Input → Chain → Output path.">${escapeHtml(monitorLabel)}</span>
+            </div>
+          </div>`;
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1577,7 +1584,7 @@ const ENCODER_DETECTORS = [
       const isUnknownCodec = typeof rawCodec === 'string' && rawCodec.toLowerCase() === 'unknown';
       // Show "Detecting..." for unknown codec (will be confirmed when Blob is created)
       const codecBase = isUnknownCodec
-        ? '<span class="has-tooltip detecting-codec" data-tooltip="Codec will be confirmed when recording stops and audio file is created">Detecting...</span>'
+        ? renderStatusPulse('Detecting...', 'Codec will be confirmed when recording stops and audio file is created')
         : String(rawCodec).toUpperCase();
       const codecDisplay = enc.applicationName
         ? `${codecBase} (${enc.applicationName})`
@@ -1589,7 +1596,9 @@ const ENCODER_DETECTORS = [
       ];
 
       // Encoder info (lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js)
-      if (enc.encoder) {
+      // Note: PCM/WAV ("linear-pcm") is rendered as a friendly label in the Blob-only branch below.
+      const isLinearPcmBlob = String(enc.encoder || '').toLowerCase() === 'linear-pcm' && enc.pattern === 'audio-blob';
+      if (enc.encoder && !isLinearPcmBlob) {
         rows.push({ label: 'Encoder', value: enc.encoder, isMetric: true });
       }
 
@@ -1645,28 +1654,8 @@ const ENCODER_DETECTORS = [
         rows.push({ label: 'Frame', value: `${enc.frameSize} ${unit}`, isMetric: false });
       }
 
-      // Encoder/Worker info (show worker filename if available)
-      // Note: Blob URL UUIDs are filtered at source (early-inject.js)
-      if (enc.workerFilename) {
-        rows.push({
-          label: 'Encoder',
-          value: `<span class="has-tooltip" data-tooltip="WASM Encoder - Worker: ${enc.workerFilename}">🔧 ${enc.workerFilename}</span>`,
-          isMetric: false
-        });
-      } else if (enc.processorName) {
-        rows.push({
-          label: 'Encoder',
-          value: `<span class="has-tooltip" data-tooltip="WASM Encoder - AudioWorklet: ${enc.processorName}">🔧 ${enc.processorName}</span>`,
-          isMetric: false
-        });
-      } else {
-        // Fallback - WASM encoder detected but no specific name
-        rows.push({
-          label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="JavaScript/WASM encoder (library name not detected)">🔧 WASM Encoder</span>',
-          isMetric: false
-        });
-      }
+      // NOTE: Worker/Worklet implementation details are shown via "Confidence" (via ...)
+      // to avoid duplicating "Encoder" with technical filenames (e.g., encoderWorker.min.js).
 
       // Input source - get from MediaRecorder if available (shows audio origin)
       // This is useful when WASM encoder is used with MediaRecorder
@@ -1696,13 +1685,16 @@ const ENCODER_DETECTORS = [
       // Confidence indicator with source info on separate line
       // Note: Blob URL UUIDs are filtered at source (early-inject.js)
       const confidence = DETECTION_LABELS[enc.pattern] || DETECTION_LABELS['unknown'];
-      const viaInfo = enc.processorName || enc.workerFilename || enc.encoderPath?.split('/').pop() || null;
-      const confidenceText = viaInfo
-        ? `${confidence.icon} ${confidence.text}<br><span class="confidence-source">(via ${viaInfo})</span>`
-        : `${confidence.icon} ${confidence.text}`;
+      const evidenceParts = [];
+      if (enc.workerFilename) evidenceParts.push(`Worker: ${enc.workerFilename}`);
+      if (enc.processorName) evidenceParts.push(`Worklet: ${enc.processorName}`);
+      if (enc.encoderPath) evidenceParts.push(`Path: ${String(enc.encoderPath).split('/').pop()}`);
+      const evidenceText = evidenceParts.length > 0 ? ` | ${evidenceParts.join(', ')}` : '';
+      const confidenceText = `${confidence.icon} ${confidence.text}`;
+      const confidenceTooltip = `${confidence.tooltip}${evidenceText}`;
       rows.push({
         label: 'Confidence',
-        value: `<span class="has-tooltip" data-tooltip="${confidence.tooltip}">${confidenceText}</span>`,
+        value: `<span class="has-tooltip" data-tooltip="${escapeHtml(confidenceTooltip)}">${confidenceText}</span>`,
         isMetric: false
       });
 
@@ -1883,22 +1875,22 @@ const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: '<span class="has-tooltip detecting-codec" data-tooltip="No encoder evidence yet. Codec will be confirmed when encoding starts or when the final audio Blob is created.">Detecting...</span>',
+            value: renderStatusPulse('Detecting...', 'No encoder evidence yet. Codec will be confirmed when encoding starts or when the final audio Blob is created.'),
             isMetric: true
           },
           {
             label: 'Bitrate',
-            value: '<span class="has-tooltip" data-tooltip="Waiting for encoding data. This path may encode only when recording stops.">Waiting...</span>',
+            value: renderStatusPulse('Waiting...', 'Waiting for encoding data. This path may encode only when recording stops.'),
             isMetric: false
           },
           {
             label: 'Encoder',
-            value: `<span class="has-tooltip" data-tooltip="WebAudio pipeline detected (${pipelineType}). No explicit encoder detected yet.">⏳ Pending</span>`,
+            value: renderStatusPulse('Pending...', `WebAudio pipeline detected (${pipelineType}). No explicit encoder detected yet.`),
             isMetric: false
           },
           {
             label: 'Confidence',
-            value: '<span class="has-tooltip" data-tooltip="This is a heuristic based on the detected WebAudio pipeline, not a confirmed codec.">○ Pending</span>',
+            value: renderStatusPulse('Pending...', 'This is a heuristic based on the detected WebAudio pipeline, not a confirmed codec.'),
             isMetric: false
           }
         ]

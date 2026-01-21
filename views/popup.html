@@ -221,23 +221,6 @@
       letter-spacing: 0.5px;
     }
 
-    .card-icon {
-      width: 20px;
-      height: 20px;
-      border-radius: 4px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 11px;
-    }
-
-    .card-icon.rtc { background: rgba(88, 166, 255, 0.15); }
-    .card-icon.gum { background: rgba(63, 185, 80, 0.15); }
-    .card-icon.ac { background: rgba(163, 113, 247, 0.15); }
-    .card-icon.aw { background: rgba(210, 153, 34, 0.15); }
-    .card-icon.mr { background: rgba(248, 81, 73, 0.15); }
-    .card-icon.log { background: rgba(139, 148, 158, 0.15); }
-
     .timestamp {
       font-size: 11px;
       color: var(--text-muted);
@@ -630,11 +613,9 @@
     }
 
     /* Tooltip varyantları (ikon) - sol margin ile metinden ayrılır */
-    .has-tooltip--info,
-    .has-tooltip--warning,
-    .has-tooltip--success,
-    .has-tooltip--error {
+    .has-tooltip--info {
       margin-left: 4px;
+      color: var(--accent-blue);
     }
 
     .has-tooltip::after {
@@ -665,14 +646,8 @@
       margin-left: 0;
     }
 
-    /* Tooltip varyantları - sadece ikon rengi değişir */
-    .has-tooltip--warning { color: var(--accent-orange); }
-    .has-tooltip--info { color: var(--accent-blue); }
-    .has-tooltip--success { color: var(--accent-green); }
-    .has-tooltip--error { color: var(--accent-red); }
-
-    /* Detecting codec - pulsing animation */
-    .detecting-codec {
+    /* Pulsing status text (Detecting / Waiting / Pending / Loading) */
+    .status-pulse {
       color: var(--accent-orange);
       animation: pulse-detecting 1.5s ease-in-out infinite;
     }
