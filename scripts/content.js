@@ -89,14 +89,23 @@ let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_wor
 const ENCODER_MERGE_FIELDS = [
   'encoder', 'bitRate', 'channels', 'sampleRate', 'application',
   'applicationName', 'frameSize', 'processorName', 'originalSampleRate',
-  'wavBitDepth', 'container', 'encoderPath'
+  'wavBitDepth', 'container', 'encoderPath', 'sessionId',
+  'recordingDuration', 'calculatedBitRate', 'isLiveEstimate', 'mimeType', 'blobSize', 'status'
 ];
 
 function mergeEncoderData(existing, payload) {
   const merged = { ...existing, ...payload };
 
-  // Special: codec can come from 'codec' or 'type' field
-  merged.codec = payload.codec ?? payload.type ?? existing.codec;
+  // Special: codec can come from 'codec' (preferred) or legacy 'type' field.
+  // IMPORTANT: payload.type is usually the message type (e.g., "wasmEncoder") - never treat that as a codec.
+  const codecCandidate = payload.codec ?? payload.type;
+  if (typeof codecCandidate === 'string') {
+    const lc = codecCandidate.toLowerCase();
+    const allowed = ['opus', 'mp3', 'aac', 'vorbis', 'flac', 'pcm', 'unknown'];
+    merged.codec = allowed.includes(lc) ? lc : existing.codec;
+  } else {
+    merged.codec = existing.codec;
+  }
 
   // Null-safe merge: preserve existing values if payload has null/undefined
   for (const field of ENCODER_MERGE_FIELDS) {
@@ -119,23 +128,13 @@ chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
 });
 
 /**
- * Clear inspector state and all measurement data from storage
+ * Clear current session artifacts (measurement data + debug logs), keep state.
  * DRY: Delegates to background.js (single source of truth)
+ * Used on every START to ensure refresh/navigation behaves consistently.
  * @param {Function} [callback] - Optional callback after removal
  */
-function clearInspectorData(callback) {
-  chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { includeLogs: false } }, () => {
-    if (callback) callback();
-  });
-}
-
-/**
- * Clear only measurement data from storage (keep inspector state)
- * DRY: Delegates to background.js (single source of truth)
- * @param {Function} [callback] - Optional callback after removal
- */
-function clearMeasurementData(callback) {
-  chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { dataOnly: true } }, () => {
+function clearSessionData(callback) {
+  chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', preset: 'SESSION' }, () => {
     if (callback) callback();
   });
 }
@@ -270,8 +269,38 @@ const MESSAGE_HANDLERS = {
   // MERGE STRATEGY: Zengin field'ları koru, null override'i engelle
   wasmEncoder: (payload) => {
     chrome.storage.local.get(['wasm_encoder'], (result) => {
-      const existing = result.wasm_encoder || {};
-      const merged = mergeEncoderData(existing, payload);
+      const existing = result.wasm_encoder || null;
+      const existingSessionId = Number.isInteger(existing?.sessionId) ? existing.sessionId : null;
+      const incomingSessionId = Number.isInteger(payload?.sessionId) ? payload.sessionId : null;
+
+      // New recording session signal: clear stale encoder info
+      // IMPORTANT: Reset must be monotonic by sessionId to avoid race where reset arrives after encoder data.
+      if (payload?.reset === true) {
+        if (incomingSessionId !== null && existingSessionId !== null && existingSessionId >= incomingSessionId) {
+          return; // Ignore stale/duplicate reset
+        }
+
+        chrome.storage.local.remove(['wasm_encoder'], () => {
+          if (chrome.runtime.lastError) {
+            persistLogs(createLog('Content', `❌ wasm_encoder RESET error: ${chrome.runtime.lastError.message}`, 'error'));
+          } else {
+            persistLogs(createLog('Content', '🧹 wasm_encoder cleared (new recording session)'));
+          }
+        });
+        return;
+      }
+
+      // Ignore stale encoder events from previous sessions
+      if (incomingSessionId !== null && existingSessionId !== null && incomingSessionId < existingSessionId) {
+        return;
+      }
+
+      const merged = mergeEncoderData(existing || {}, payload);
+      if (incomingSessionId !== null) {
+        merged.sessionId = incomingSessionId;
+      } else if (existingSessionId !== null) {
+        merged.sessionId = existingSessionId;
+      }
 
       chrome.storage.local.set({
         wasm_encoder: { ...merged, sourceTabId: currentTabId },
@@ -280,7 +309,8 @@ const MESSAGE_HANDLERS = {
         if (chrome.runtime.lastError) {
           persistLogs(createLog('Content', `❌ wasm_encoder SET error: ${chrome.runtime.lastError.message}`, 'error'));
         } else {
-          const sourceInfo = payload.source === existing.source ? payload.source : `${payload.source} (merged with ${existing.source || 'none'})`;
+          const existingSource = existing?.source;
+          const sourceInfo = payload.source === existingSource ? payload.source : `${payload.source} (merged with ${existingSource || 'none'})`;
           persistLogs(createLog('Content', `🔧 WASM Encoder stored: ${sourceInfo}`));
         }
       });
@@ -355,39 +385,10 @@ window.addEventListener('message', (event) => {
 
   // Handle DEBUG_LOG - forward to extension console panel
   if (event.data.type === 'DEBUG_LOG') {
-    const { prefix, message } = event.data.payload || {};
+    const { prefix, message, level } = event.data.payload || {};
     if (message) {
-      persistLogs(createLog(prefix || 'Debug', message));
+      persistLogs(createLog(prefix || 'Debug', message, level || 'info'));
     }
-    return;
-  }
-
-  // Handle AUTO_STOP_NEW_RECORDING - stop inspector when new recording starts
-  // This prevents stale data accumulation (gain(x6) etc.) across recording sessions
-  // User can restart inspector via Refresh Modal for fresh state
-  if (event.data.type === 'AUTO_STOP_NEW_RECORDING') {
-    chrome.storage.local.get(['inspectorEnabled'], async (result) => {
-      // Only stop if inspector is currently running
-      if (result.inspectorEnabled !== true) {
-        return;
-      }
-
-      logContent('🔄 New recording detected - auto-stopping inspector');
-      persistLogs(createLog('Content', '🔄 Auto-stopped: new recording session started'));
-
-      // Set autoStoppedReason for UI feedback
-      await chrome.storage.local.set({
-        inspectorEnabled: false,
-        autoStoppedReason: 'new_recording'
-      });
-
-      // Signal PageInspector to stop collectors
-      window.postMessage({
-        __audioPipelineInspector: true,
-        type: 'SET_ENABLED',
-        enabled: false
-      }, '*');
-    });
     return;
   }
 
@@ -416,42 +417,44 @@ window.addEventListener('message', (event) => {
           if (!response) {
               logContent('⚠️ No response from background.js');
               return;
-          }
+           }
 
-          logContent(`📥 Background response: action=${response.action}`, response);
-          persistLogs(createLog('Content', `Background decision: ${response.action}`));
+           logContent(`📥 Background response: action=${response.action}`, response);
 
-          // Execute action based on background.js decision
-          switch (response.action) {
-              case 'START':
-                  // Clear stale data then start
-                  clearMeasurementData(() => {
-                      logContent('🧹 Cleared stale data before restore');
-                      window.postMessage({
-                          __audioPipelineInspector: true,
-                          type: 'SET_ENABLED',
+           // Execute action based on background.js decision
+           switch (response.action) {
+               case 'START':
+                   // Refresh/navigation/session restore: always start with a clean session (data + logs)
+                   clearSessionData(() => {
+                       persistLogs(createLog('Content', 'Background decision: START'));
+                       logContent('🧹 Cleared stale session data before restore');
+                       window.postMessage({
+                           __audioPipelineInspector: true,
+                           type: 'SET_ENABLED',
                           enabled: true
                       }, '*');
                   });
                   break;
 
-              case 'STOP':
-                  // Just ensure page script is stopped (background already updated storage)
-                  window.postMessage({
-                      __audioPipelineInspector: true,
-                      type: 'SET_ENABLED',
-                      enabled: false
+               case 'STOP':
+                   // Just ensure page script is stopped (background already updated storage)
+                   persistLogs(createLog('Content', 'Background decision: STOP'));
+                   window.postMessage({
+                       __audioPipelineInspector: true,
+                       type: 'SET_ENABLED',
+                       enabled: false
                   }, '*');
                   break;
 
-              case 'NONE':
-              default:
-                  // Do nothing - inspector should stay stopped
-                  logContent('Inspector READY but staying stopped (background decision: NONE)');
-                  break;
-          }
-      });
-      return;
+               case 'NONE':
+               default:
+                   // Do nothing - inspector should stay stopped
+                   persistLogs(createLog('Content', `Background decision: ${response.action || 'NONE'}`));
+                   logContent('Inspector READY but staying stopped (background decision: NONE)');
+                   break;
+           }
+       });
+       return;
   }
 
   // Separate handling for direct types like LOG_ENTRY
@@ -479,24 +482,6 @@ window.addEventListener('message', (event) => {
       lastUpdate: Date.now()
     });
 
-    // Check if new recording started - clear all audio data first
-    if (payload.resetData) {
-      clearMeasurementData(() => {
-        logContent('🧹 New recording started - cleared all audio data');
-
-        logContent(logMsg, logData || payload);
-        chrome.storage.local.set(createDataToStore());
-
-        // Signal collectors to re-emit their current data
-        window.postMessage({
-          __audioPipelineInspector: true,
-          type: 'RE_EMIT_ALL'
-        }, '*');
-        logContent('📤 Sent RE_EMIT_ALL signal to collectors');
-      });
-      return; // Early return - async callback handles the rest
-    }
-
     // Normal flow (no reset needed)
     logContent(logMsg, logData || payload);
 
@@ -520,12 +505,12 @@ async function handleSetEnabled(message) {
   // Persist state (await to ensure completion)
   await chrome.storage.local.set({ inspectorEnabled: message.enabled });
 
-  // Clear all data storage on start - AWAIT completion to prevent race condition
-  // This ensures old encoding data is fully removed before collectors start emitting new data
+  // Clear session artifacts on start (data + logs) - AWAIT completion to prevent race condition
+  // This ensures old encoding data/logs are fully removed before collectors start emitting new data
   if (message.enabled) {
     await new Promise(resolve => {
-      clearMeasurementData(() => {
-        logContent('🧹 Cleared stale data from storage');
+      clearSessionData(() => {
+        logContent('🧹 Cleared stale session data from storage');
         resolve();
       });
     });
@@ -560,5 +545,10 @@ if (window.self === window.top) {
   logContent(`⚠️ Running in iframe - message handling disabled`);
 }
 
-// Inject immediately
-injectPageScript();
+// Inject immediately (top frame only - prevents duplicate PageInspector instances & duplicate logs)
+if (window.self === window.top) {
+  injectPageScript();
+} else {
+  // Avoid injecting into iframes - top frame acts as single source of truth
+  injected = true;
+}

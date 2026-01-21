@@ -21,8 +21,27 @@ import { getInstanceRegistry, cleanupClosedAudioContexts } from '../core/utils/E
  * @param {Object<string, string>} [fieldMap] - Maps data fields to entry fields with defaults: { fieldName: 'defaultValue' }
  */
 const createProcessorHandler = (type, fieldMap = {}) => (data, pipeline) => {
-  if (pipeline.processors.some(p => p.type === type && p.timestamp === data.timestamp)) return;
-  const entry = { type, timestamp: data.timestamp };
+  if (!pipeline?.processors) return;
+
+  const nodeId = data?.nodeId || null;
+  const timestamp = data?.timestamp || Date.now();
+
+  // Prefer stable nodeId dedup when available (prevents stale duplicates across sessions)
+  if (nodeId) {
+    const existingIdx = pipeline.processors.findIndex(p => p?.nodeId === nodeId);
+    if (existingIdx >= 0) {
+      const updated = { ...pipeline.processors[existingIdx], type, nodeId, timestamp };
+      for (const [field, defaultVal] of Object.entries(fieldMap)) {
+        updated[field] = data[field] ?? defaultVal;
+      }
+      pipeline.processors[existingIdx] = updated;
+      return;
+    }
+  } else if (pipeline.processors.some(p => p.type === type && p.timestamp === timestamp)) {
+    return;
+  }
+
+  const entry = { type, nodeId, timestamp };
   for (const [field, defaultVal] of Object.entries(fieldMap)) {
     entry[field] = data[field] ?? defaultVal;
   }
@@ -30,9 +49,17 @@ const createProcessorHandler = (type, fieldMap = {}) => (data, pipeline) => {
 };
 
 const METHOD_CALL_SYNC_HANDLERS = {
-  // Special handlers (non-processor)
-  mediaStreamSource: (data, pipeline) => { pipeline.inputSource = 'microphone'; },
-  mediaStreamDestination: (data, pipeline) => { pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM; },
+  // Special handlers - also add to processors array for cleanup tracking
+  mediaStreamSource: (data, pipeline) => {
+    pipeline.inputSource = 'microphone';
+    // Also add as processor for proper cleanup on disconnect
+    createProcessorHandler('mediaStreamSource')(data, pipeline);
+  },
+  mediaStreamDestination: (data, pipeline) => {
+    pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
+    // Also add as processor for proper cleanup on disconnect
+    createProcessorHandler('mediaStreamDestination')(data, pipeline);
+  },
 
   // Processor handlers - OCP: Add new DSP node with single line
   scriptProcessor: createProcessorHandler('scriptProcessor', { bufferSize: 4096, inputChannels: 2, outputChannels: 2 }),
@@ -77,6 +104,29 @@ class AudioContextCollector extends BaseCollector {
      */
     this.pendingWasmEncoder = null;
 
+    /** @type {number} */
+    this.recordingSessionId = 0;
+
+    /**
+     * Connection emit debounce timer
+     * Batches multiple rapid connection events (e.g., graph build) into single UI update
+     * @type {number|null}
+     */
+    this.connectionEmitTimer = null;
+
+    /**
+     * Flag to track if connections were modified since last emit
+     * @type {boolean}
+     */
+    this.connectionsDirty = false;
+
+    /**
+     * Context emit debounce timers (per contextId)
+     * Batches rapid context updates (e.g., inputSource + connections) into single UI update
+     * @type {Map<string, number>}
+     */
+    this.contextEmitTimers = new Map();
+
     // NOTE: Original method references are not stored because:
     // 1. We hook on prototype level, not instance level
     // 2. Restoring would break other extensions that also hook these methods
@@ -92,6 +142,38 @@ class AudioContextCollector extends BaseCollector {
     const map = new WeakMap();
     win.__audioInspectorContextIdMap = map;
     return map;
+  }
+
+  _getNodeIdMap() {
+    const win = /** @type {any} */ (window);
+    const existing = win.__audioInspectorNodeIdMap;
+    if (existing && typeof existing.get === 'function' && typeof existing.set === 'function') {
+      return existing;
+    }
+    const map = new WeakMap();
+    win.__audioInspectorNodeIdMap = map;
+    return map;
+  }
+
+  /**
+   * @param {any} node
+   * @returns {string|null}
+   */
+  _getOrAssignNodeId(node) {
+    if (!node || (typeof node !== 'object' && typeof node !== 'function')) return null;
+    const map = this._getNodeIdMap();
+    let id = map.get(node);
+    if (!id) {
+      const win = /** @type {any} */ (window);
+      const current = Number.isInteger(win.__audioInspectorNodeIdCounter)
+        ? win.__audioInspectorNodeIdCounter
+        : 0;
+      const next = current + 1;
+      win.__audioInspectorNodeIdCounter = next;
+      id = `node_${next}`;
+      map.set(node, id);
+    }
+    return id;
   }
 
   _syncContextIdCounterFromId(contextId) {
@@ -744,8 +826,11 @@ class AudioContextCollector extends BaseCollector {
 
           ctxData.pipeline.inputSource = inputSource;
           ctxData.pipeline.timestamp = Date.now();
-          // Re-emit updated context data
-          this.emit(EVENTS.DATA, ctxData);
+
+          // Use debounced emit to batch with upcoming connections
+          // Connections are emitted ~16ms later, this waits 20ms to catch both
+          this._emitContextDebounced(ctxData);
+
           logger.info(this.logPrefix, `MediaStreamSource created - ${inputSource} connected to AudioContext (context: ${ctxData.contextId}, stream: ${stream?.id})`);
       } else {
           logger.warn(this.logPrefix, `MediaStreamSource created but context is ${node.context === null ? 'null' : 'undefined'}`);
@@ -792,6 +877,21 @@ class AudioContextCollector extends BaseCollector {
    */
   _handleWasmEncoder(encoderInfo) {
       logger.info(this.logPrefix, 'WASM encoder detected:', encoderInfo);
+
+      const incomingSessionId = Number.isInteger(encoderInfo?.sessionId)
+        ? encoderInfo.sessionId
+        : this.recordingSessionId;
+
+      // Ignore stale encoder events arriving late from a previous session
+      if (incomingSessionId < this.recordingSessionId) {
+        logger.info(this.logPrefix, `Ignoring stale encoder event (session ${incomingSessionId} < current ${this.recordingSessionId})`);
+        return;
+      }
+
+      // Keep session in sync (single source may be early-inject.js)
+      if (incomingSessionId > this.recordingSessionId) {
+        this.recordingSessionId = incomingSessionId;
+      }
 
       // ═══════════════════════════════════════════════════════════════════
       // PATTERN PRIORITY: Prevent lower-priority patterns from overwriting better ones
@@ -875,12 +975,16 @@ class AudioContextCollector extends BaseCollector {
       const encoderData = {
           type: DATA_TYPES.WASM_ENCODER,
           timestamp: Date.now(),
-          codec: encoderInfo.type || 'opus',
+          sessionId: incomingSessionId,
+          codec: encoderInfo.type || encoderInfo.codec || 'unknown',
           encoder: encoderInfo.encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
           source: encoderInfo.source || 'direct',  // audioworklet-port veya direct
           sampleRate: encoderInfo.sampleRate,
           originalSampleRate: encoderInfo.originalSampleRate,
           bitRate: encoderInfo.bitRate,
+          calculatedBitRate: encoderInfo.calculatedBitRate,
+          recordingDuration: encoderInfo.recordingDuration,
+          isLiveEstimate: encoderInfo.isLiveEstimate,
           channels: encoderInfo.channels || 1,
           application: encoderInfo.application, // 2048=Voice, 2049=FullBand, 2051=LowDelay
           applicationName: appName, // 'Voice', 'Audio', 'LowDelay'
@@ -913,7 +1017,7 @@ class AudioContextCollector extends BaseCollector {
       const containerInfo = encoderInfo.container ? ` [${encoderInfo.container.toUpperCase()}]` : '';
       logger.info(
           this.logPrefix,
-          `🔧 WASM Encoder: ${encoderInfo.type || 'opus'}${containerInfo} @ ${(encoderInfo.bitRate || 0)/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels || 1}ch, app=${appName || encoderInfo.application}`
+          `🔧 WASM Encoder: ${(encoderInfo.type || encoderInfo.codec || 'unknown')}${containerInfo} @ ${(encoderInfo.bitRate || 0)/1000}kbps, ${encoderInfo.sampleRate}Hz, ${encoderInfo.channels || 1}ch, app=${appName || encoderInfo.application}`
       );
   }
 
@@ -933,18 +1037,22 @@ class AudioContextCollector extends BaseCollector {
       const ctxData = this._getContextData(context);
 
       if (ctxData) {
+          const nodeId = this._getOrAssignNodeId(node);
+
           // Add AudioWorkletNode to pipeline processors
           const processorEntry = {
             type: 'audioWorkletNode',
+            nodeId,
             processorName: processorName,
             options: options,
             timestamp: Date.now()
           };
 
-          // Duplicate check - aynı processorName varsa güncelle
-          const existingIdx = ctxData.pipeline.processors.findIndex(
-            p => p.type === 'audioWorkletNode' && p.processorName === processorName
-          );
+          // Duplicate check - same nodeId (stable identity). Do not dedup by processorName:
+          // if the page creates another node with same processor, it should appear as x2.
+          const existingIdx = nodeId
+            ? ctxData.pipeline.processors.findIndex(p => p.type === 'audioWorkletNode' && p.nodeId === nodeId)
+            : ctxData.pipeline.processors.findIndex(p => p.type === 'audioWorkletNode' && p.processorName === processorName);
           if (existingIdx >= 0) {
             ctxData.pipeline.processors[existingIdx] = processorEntry;
           } else {
@@ -959,6 +1067,72 @@ class AudioContextCollector extends BaseCollector {
       } else {
           logger.warn(this.logPrefix, `AudioWorkletNode created but context is ${context === null ? 'null' : 'undefined'}`);
       }
+  }
+
+  /**
+   * Emit context update after debounce delay
+   * Prevents UI thrashing when context properties update rapidly (e.g., inputSource + connections)
+   * @private
+   * @param {Object} ctxData - Context data to emit
+   */
+  _emitContextDebounced(ctxData) {
+    if (!ctxData || !ctxData.contextId) return;
+
+    const contextId = ctxData.contextId;
+
+    // Clear existing timer for this context
+    const existingTimer = this.contextEmitTimers.get(contextId);
+    if (existingTimer !== undefined) {
+      clearTimeout(existingTimer);
+    }
+
+    // Schedule emit after 20ms (enough to batch inputSource + connections)
+    const timer = setTimeout(() => {
+      // Find latest context data
+      const latestCtx = this.activeContexts.get(
+        Array.from(this.activeContexts.keys()).find(key => {
+          const ctx = this.activeContexts.get(key);
+          return ctx && ctx.contextId === contextId;
+        })
+      );
+
+      if (latestCtx) {
+        this.emit(EVENTS.DATA, latestCtx);
+      }
+
+      this.contextEmitTimers.delete(contextId);
+    }, 20);
+
+    this.contextEmitTimers.set(contextId, timer);
+  }
+
+  /**
+   * Emit connection graph update after debounce delay
+   * Prevents UI thrashing when multiple connections are added rapidly
+   * @private
+   */
+  _emitConnectionsDebounced() {
+    // Clear existing timer
+    if (this.connectionEmitTimer !== null) {
+      clearTimeout(this.connectionEmitTimer);
+    }
+
+    // Mark connections as dirty
+    this.connectionsDirty = true;
+
+    // Schedule emit after 16ms (1 frame @ 60fps)
+    this.connectionEmitTimer = setTimeout(() => {
+      if (this.connectionsDirty && this.audioConnections) {
+        this.emit(EVENTS.DATA, {
+          type: DATA_TYPES.AUDIO_CONNECTION,
+          timestamp: Date.now(),
+          allConnections: [...this.audioConnections]
+        });
+
+        this.connectionsDirty = false;
+      }
+      this.connectionEmitTimer = null;
+    }, 16);
   }
 
   /**
@@ -988,6 +1162,12 @@ class AudioContextCollector extends BaseCollector {
    */
   _handleAudioConnection(connection, shouldEmit = true) {
       if (!this.active) return;  // Only process when collector is active
+
+      // DISCONNECT EVENT: Handle node disconnections (AudioNode.disconnect())
+      if (connection.action === 'disconnect') {
+        this._handleDisconnection(connection, shouldEmit);
+        return;
+      }
 
       const { sourceType, sourceId, destType, destId, outputIndex, inputIndex, timestamp } = connection;
       const contextId = connection.contextId || null;
@@ -1022,18 +1202,170 @@ class AudioContextCollector extends BaseCollector {
       // Add connection to list
       this.audioConnections.push(normalizedConnection);
 
-      // Emit connection data as separate type (unless silent mode)
+      // Emit connection data (unless silent mode)
       if (shouldEmit) {
-        this.emit(EVENTS.DATA, {
-          type: DATA_TYPES.AUDIO_CONNECTION,
-          timestamp,
-          connection: normalizedConnection,
-          // Also include full connection list for graph rendering
-          allConnections: [...this.audioConnections]
-        });
+        // Use debounced emit to batch rapid connections (e.g., graph build)
+        // This prevents UI thrashing when 4+ connections fire in same frame
+        this._emitConnectionsDebounced();
 
         logger.info(this.logPrefix, `Audio connection: ${sourceType} → ${destType}`);
       }
+  }
+
+  /**
+   * Handle audio disconnection (AudioNode.disconnect() calls)
+   * Removes connections from audioConnections array.
+   * IMPORTANT: Does NOT delete pipeline.processors entries on disconnect.
+   * @private
+   * @param {Object} disconnectData - { action: 'disconnect', sourceId, destId, outputIndex, inputIndex, sourceType, destType, contextId, timestamp }
+   * @param {boolean} shouldEmit - If true, emit data event; if false, silent update (for early sync)
+   */
+  _handleDisconnection(disconnectData, shouldEmit = true) {
+    const { sourceId, destId, outputIndex, inputIndex, sourceType, contextId } = disconnectData;
+
+    if (!this.audioConnections) {
+      this.audioConnections = [];
+    }
+
+    const beforeCount = this.audioConnections.length;
+    let removedCount = 0;
+
+    const hasDest = destId !== null && destId !== undefined;
+    const hasOutput = typeof outputIndex === 'number';
+    const hasInput = typeof inputIndex === 'number';
+
+    // Modes:
+    // 1) disconnect() → remove ALL connections from sourceId
+    // 2) disconnect(output) → remove all connections from sourceId with outputIndex
+    // 3) disconnect(destination) → remove all connections from sourceId to destId
+    // 4) disconnect(destination, output[, input]) → remove specific connection(s)
+    if (!hasDest && !hasOutput && !hasInput) {
+      this.audioConnections = this.audioConnections.filter(conn => {
+        if (conn.sourceId === sourceId) {
+          removedCount++;
+          return false;
+        }
+        return true;
+      });
+    } else if (!hasDest && hasOutput && !hasInput) {
+      this.audioConnections = this.audioConnections.filter(conn => {
+        if (conn.sourceId === sourceId && conn.outputIndex === outputIndex) {
+          removedCount++;
+          return false;
+        }
+        return true;
+      });
+    } else if (hasDest && !hasOutput && !hasInput) {
+      this.audioConnections = this.audioConnections.filter(conn => {
+        if (conn.sourceId === sourceId && conn.destId === destId) {
+          removedCount++;
+          return false;
+        }
+        return true;
+      });
+    } else {
+      this.audioConnections = this.audioConnections.filter(conn => {
+        const match = conn.sourceId === sourceId &&
+          (!hasDest || conn.destId === destId) &&
+          (!hasOutput || conn.outputIndex === outputIndex) &&
+          (!hasInput || conn.inputIndex === inputIndex);
+        if (match) {
+          removedCount++;
+          return false;
+        }
+        return true;
+      });
+    }
+
+    if (removedCount > 0) {
+      logger.info(this.logPrefix,
+        `Disconnection: removed ${removedCount} connection(s) from ${sourceType} (total: ${beforeCount} → ${this.audioConnections.length})`);
+
+      // ═══════════════════════════════════════════════════════════════════
+      // PIPELINE CLEANUP: Remove ALL orphaned processors (no connections)
+      // ═══════════════════════════════════════════════════════════════════
+      // STRATEGY: After each disconnection, sweep through ALL contexts and
+      // remove processors that have NO remaining connections (as source OR dest)
+      // This handles cases where nodes are GC'd without explicit disconnect()
+
+      for (const [, ctxData] of this.activeContexts.entries()) {
+        if (!ctxData?.pipeline?.processors) continue;
+
+        const beforeProcCount = ctxData.pipeline.processors.length;
+
+        // Filter out processors with NO connections
+        ctxData.pipeline.processors = ctxData.pipeline.processors.filter(proc => {
+          const nodeId = proc.nodeId;
+          if (!nodeId) return true; // Keep processors without nodeId (shouldn't happen)
+
+          // Check if this node has ANY connections (as source OR destination)
+          const hasConnections = this.audioConnections.some(
+            conn => conn.sourceId === nodeId || conn.destId === nodeId
+          );
+
+          return hasConnections; // Keep if has connections, remove if orphaned
+        });
+
+        const removedProcCount = beforeProcCount - ctxData.pipeline.processors.length;
+        if (removedProcCount > 0) {
+          logger.info(this.logPrefix,
+            `Pipeline sweep: removed ${removedProcCount} orphaned processor(s) from context ${ctxData.contextId || 'unknown'}`);
+        }
+
+        // Also clean up pipeline metadata fields when their nodes are removed
+        // Check if mediaStreamSource processor was removed → clear inputSource
+        const hasMediaStreamSource = ctxData.pipeline.processors.some(
+          proc => proc.type === 'mediaStreamSource'
+        );
+        if (!hasMediaStreamSource && ctxData.pipeline.inputSource) {
+          ctxData.pipeline.inputSource = null;
+          logger.info(this.logPrefix,
+            `Pipeline sweep: cleared inputSource (mediaStreamSource removed)`);
+        }
+
+        // Check if mediaStreamDestination processor was removed → clear destinationType
+        const hasMediaStreamDestination = ctxData.pipeline.processors.some(
+          proc => proc.type === 'mediaStreamDestination'
+        );
+        if (!hasMediaStreamDestination && ctxData.pipeline.destinationType) {
+          ctxData.pipeline.destinationType = null;
+          logger.info(this.logPrefix,
+            `Pipeline sweep: cleared destinationType (mediaStreamDestination removed)`);
+        }
+      }
+
+      if (shouldEmit) {
+        // Use debounced emit for disconnections too
+        this._emitConnectionsDebounced();
+      }
+    }
+  }
+
+  /**
+   * Find context metadata by nodeId (used for pipeline cleanup)
+   * @private
+   * @param {string} nodeId - Node identifier
+   * @param {string} [contextId] - Optional context hint for faster lookup
+   * @returns {Object|null} Context metadata or null
+   */
+  _findContextByNodeId(nodeId, contextId = null) {
+    // Fast path: if contextId provided, try direct lookup
+    if (contextId) {
+      for (const [, ctxData] of this.activeContexts.entries()) {
+        if (ctxData.contextId === contextId) {
+          return ctxData;
+        }
+      }
+    }
+
+    // Fallback: search all contexts (check if nodeId exists in pipeline.processors)
+    for (const [, ctxData] of this.activeContexts.entries()) {
+      if (ctxData.pipeline?.processors?.some(proc => proc.nodeId === nodeId)) {
+        return ctxData;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -1072,8 +1404,8 @@ class AudioContextCollector extends BaseCollector {
       syncedCount++;
     }
 
-    // Emit all connections at once if any were synced
-    if (syncedCount > 0 && this.audioConnections.length > 0) {
+    // Emit all connections at once if any were synced (including empty → clears stale UI)
+    if (syncedCount > 0) {
       this.emit(EVENTS.DATA, {
         type: DATA_TYPES.AUDIO_CONNECTION,
         timestamp: Date.now(),
@@ -1109,7 +1441,8 @@ class AudioContextCollector extends BaseCollector {
     let syncedCount = 0;
 
     for (const capture of earlyNodes) {
-      const { context, processorName, options, timestamp, contextId } = capture;
+      const { instance, context, processorName, options, timestamp } = capture;
+      const nodeId = capture?.nodeId || this._getOrAssignNodeId(instance);
 
       // Find context in activeContexts
       const ctxData = context ? this.activeContexts.get(context) : null;
@@ -1118,15 +1451,16 @@ class AudioContextCollector extends BaseCollector {
         // Add AudioWorkletNode to pipeline processors (duplicate check)
         const processorEntry = {
           type: 'audioWorkletNode',
+          nodeId,
           processorName: processorName,
           options: options,
           timestamp: timestamp
         };
 
-        // Duplicate check - same processorName
-        const existingIdx = ctxData.pipeline.processors.findIndex(
-          p => p.type === 'audioWorkletNode' && p.processorName === processorName
-        );
+        // Duplicate check - same nodeId (stable identity)
+        const existingIdx = nodeId
+          ? ctxData.pipeline.processors.findIndex(p => p.type === 'audioWorkletNode' && p.nodeId === nodeId)
+          : ctxData.pipeline.processors.findIndex(p => p.type === 'audioWorkletNode' && p.processorName === processorName);
 
         if (existingIdx < 0) {
           ctxData.pipeline.processors.push(processorEntry);
@@ -1206,13 +1540,27 @@ class AudioContextCollector extends BaseCollector {
 
     // 7. Register new recording session handler
     // When MediaRecorder starts a new recording, reset encoder detection state
-    // Note: Data cleanup is no longer needed here - inspector will auto-stop
-    // via AUTO_STOP_NEW_RECORDING message (early-inject.js → content.js)
+    // IMPORTANT: Do not stop inspector here. Only reset session-scoped data to prevent stale codec info.
     // @ts-ignore
-    window.__newRecordingSessionHandler = () => {
+    window.__newRecordingSessionHandler = (sessionId) => {
       if (this.active) {
+        if (Number.isInteger(sessionId) && sessionId >= 0) {
+          this.recordingSessionId = sessionId;
+        } else {
+          this.recordingSessionId += 1;
+        }
+
         // Reset encoder detection state (prevents stale encoder info on restart)
         this.currentEncoderData = null;
+        this.pendingWasmEncoder = null;
+
+        // Clear stored wasm_encoder in extension storage (content.js handles reset=true)
+        this.emit(EVENTS.DATA, {
+          type: DATA_TYPES.WASM_ENCODER,
+          reset: true,
+          sessionId: this.recordingSessionId,
+          timestamp: Date.now()
+        });
         logger.info(this.logPrefix, '🔄 New recording session - encoder detection reset');
       }
     };
@@ -1395,6 +1743,19 @@ class AudioContextCollector extends BaseCollector {
    */
   async stop() {
     this.active = false;
+
+    // Clear pending connection emit timer
+    if (this.connectionEmitTimer !== null) {
+      clearTimeout(this.connectionEmitTimer);
+      this.connectionEmitTimer = null;
+    }
+    this.connectionsDirty = false;
+
+    // Clear pending context emit timers
+    for (const timer of this.contextEmitTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.contextEmitTimers.clear();
 
     // Clear all global handlers to prevent stale data and memory leaks
     // This is critical - without this, EarlyHook continues to detect and store encoder info

@@ -4,6 +4,7 @@ let autoRefresh = true;
 let enabled = false; // Default to false (stopped)
 let drawerOpen = false; // Console drawer state
 let currentTabId = null; // Track which tab this panel is associated with
+let updateUITimer = null; // Debounce timer for updateUI() calls
 
 // Constants - MUST be kept in sync with src/core/constants.js
 // (popup.js cannot import ES modules, so values are duplicated here)
@@ -27,25 +28,42 @@ chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
 });
 
 /**
- * Clear inspector state and all measurement data from storage
+ * Centralized cleanup request helper
  * DRY: Delegates to background.js (single source of truth)
+ * @param {string} preset - One of background.js CLEANUP_PRESETS keys
+ * @param {Object} [options] - Optional overrides (rare)
  * @returns {Promise<void>}
  */
-function clearInspectorData() {
+function requestCleanup(preset, options) {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { includeLogs: false } }, () => resolve());
+    chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', preset, options }, () => resolve());
   });
 }
 
 /**
- * Clear only measurement data from storage (keep inspector state)
- * DRY: Delegates to background.js (single source of truth)
+ * Clear inspector state + data + logs (full cleanup)
+ * @param {Object} [options]
  * @returns {Promise<void>}
  */
-function clearMeasurementData() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'CLEAR_INSPECTOR_DATA', options: { dataOnly: true } }, () => resolve());
-  });
+function clearInspectorData(options) {
+  return requestCleanup('FULL', options);
+}
+
+/**
+ * Clear measurement data + logs, keep state (session cleanup)
+ * @param {Object} [options]
+ * @returns {Promise<void>}
+ */
+function clearSessionData(options) {
+  return requestCleanup('SESSION', options);
+}
+
+/**
+ * Clear only debug logs
+ * @returns {Promise<void>}
+ */
+function clearLogsOnly() {
+  return requestCleanup('LOGS_ONLY');
 }
 
 /**
@@ -73,6 +91,19 @@ function debugLog(message) {
   };
 
   chrome.runtime.sendMessage({ type: 'ADD_LOG', entry: entry });
+}
+
+// Debounced UI update wrapper
+// Batches rapid storage changes (e.g., audio_contexts + audio_connections) into single UI update
+function updateUIDebounced() {
+  if (updateUITimer !== null) {
+    clearTimeout(updateUITimer);
+  }
+
+  updateUITimer = setTimeout(() => {
+    updateUI();
+    updateUITimer = null;
+  }, 50); // 50ms debounce - waits for both context (20ms) + connections (16ms) debounces
 }
 
 // Main update function
@@ -198,11 +229,7 @@ async function toggleInspector() {
     await chrome.storage.local.remove(['inspectorEnabled']);
   }
 
-  // Clear data ONLY when starting (not when stopping)
-  // This allows users to review collected data after stopping
-  if (enabled) {
-    await clearMeasurementData();
-  }
+  // NOTE: Session cleanup (data + logs) is handled by content.js before collectors start emitting.
 
   // Update button AND UI to reflect new state
   // Note: checkTabLock() is called by storage listener when lockedTab changes (line 933)
@@ -389,8 +416,7 @@ function showAutoStopBanner(reason) {
     'injection_failed': 'Injection failed - please reload page',
     'tab_switch': '⚠️ Inspecting stopped: Switched to different tab',
     'navigation': '⚠️ Inspector stopped: Navigated to different site',
-    'window_switch': '⚠️ Inspector stopped: Switched to different window',
-    'new_recording': '⚠️ Inspector stopped: New recording started'
+    'window_switch': '⚠️ Inspector stopped: Switched to different window'
   };
   banner.textContent = messages[reason] || 'Inspector stopped';
   banner.classList.add('visible');
@@ -671,6 +697,13 @@ function filterOutgoingContexts(contexts) {
 
   const getContextTimestamp = (ctx) => ctx.pipeline?.timestamp || ctx.static?.timestamp || 0;
 
+  // ═══ DEBUG: Initial contexts ═══
+  console.log(`[AudioInspector] 🔍 filterOutgoingContexts: input has ${contexts.length} context(s)`);
+  contexts.forEach((ctx, i) => {
+    const purpose = getContextPurpose(ctx);
+    console.log(`[AudioInspector] 🔍 Input Context[${i}]: ${ctx.contextId} - purpose="${purpose.label}", inputSource=${ctx.pipeline?.inputSource}, state=${ctx.static?.state}`);
+  });
+
   // İlk geçiş: tüm potansiyel context'leri topla
   const candidates = contexts.filter(ctx => {
     const purpose = getContextPurpose(ctx);
@@ -687,20 +720,26 @@ function filterOutgoingContexts(contexts) {
     return isRunning || isRecent;
   });
 
+  console.log(`[AudioInspector] 🔍 filterOutgoingContexts: ${candidates.length} candidate(s) after first pass`);
+
   // Mic Input varsa, sadece Mic Input context'lerini döndür
   // Bu, "hazırlık" context'lerini (sadece destination) gizler
   const micInputContexts = candidates.filter(ctx =>
     getContextPurpose(ctx).label === 'Mic Input'
   );
 
+  console.log(`[AudioInspector] 🔍 filterOutgoingContexts: ${micInputContexts.length} Mic Input context(s) found`);
+
   if (micInputContexts.length > 0) {
     const sortedMicInputs = [...micInputContexts].sort(
       (a, b) => getContextTimestamp(b) - getContextTimestamp(a)
     );
+    console.log(`[AudioInspector] 🔍 filterOutgoingContexts: returning NEWEST Mic Input context: ${sortedMicInputs[0].contextId}`);
     return [sortedMicInputs[0]];
   }
 
   // Mic Input yoksa tüm adayları döndür
+  console.log(`[AudioInspector] 🔍 filterOutgoingContexts: no Mic Input, returning all ${candidates.length} candidate(s)`);
   return candidates;
 }
 
@@ -717,6 +756,149 @@ function filterConnectionsByContext(connections, contexts) {
   if (!hasContextIds) return connections;
 
   return connections.filter(conn => contextIds.has(conn.contextId));
+}
+
+function mapNodeTypeToProcessorType(nodeType) {
+  if (!nodeType || typeof nodeType !== 'string') return null;
+  switch (nodeType) {
+    case 'AudioWorklet': return 'audioWorkletNode';
+    case 'ScriptProcessor': return 'scriptProcessor';
+    case 'Analyser': return 'analyser';
+    case 'Gain': return 'gain';
+    case 'BiquadFilter': return 'biquadFilter';
+    case 'DynamicsCompressor': return 'dynamicsCompressor';
+    case 'Oscillator': return 'oscillator';
+    case 'Delay': return 'delay';
+    case 'Convolver': return 'convolver';
+    case 'WaveShaper': return 'waveShaper';
+    case 'Panner': return 'panner';
+    default:
+      // Best-effort: "FooBar" → "fooBar"
+      return nodeType.charAt(0).toLowerCase() + nodeType.slice(1);
+  }
+}
+
+function isDestinationNodeType(nodeType) {
+  if (!nodeType || typeof nodeType !== 'string') return false;
+  return nodeType === 'AudioDestination' ||
+    nodeType === 'MediaStreamAudioDestination' ||
+    nodeType === 'MediaStreamDestination';
+}
+
+/**
+ * Derive the main Audio Path chain from the connection graph.
+ * This avoids "stacking" old processors across multiple recordings by rendering
+ * only currently-connected nodes (connections are pruned on disconnect()).
+ *
+ * Falls back to pipeline processors if graph path cannot be resolved.
+ *
+ * @param {Array} connections
+ * @param {Object} ctx
+ * @returns {Array}
+ */
+function deriveMainChainProcessorsFromConnections(connections, ctx) {
+  if (!connections || connections.length === 0) return [];
+
+  // nodeId → pipeline processor (has processorName/options for worklets)
+  const pipelineByNodeId = new Map();
+  const pipelineProcessors = ctx?.pipeline?.processors || [];
+  for (const p of pipelineProcessors) {
+    if (p?.nodeId) {
+      pipelineByNodeId.set(p.nodeId, p);
+    }
+  }
+
+  // nodeId → human-readable node type (from connect() hook)
+  const nodeTypeById = new Map();
+  const edges = new Map(); // sourceId → destId[]
+
+  for (const c of connections) {
+    if (!c?.sourceId || !c?.destId) continue;
+    if (typeof c.destType === 'string' && c.destType.startsWith('AudioParam(')) continue;
+
+    if (c.sourceType) nodeTypeById.set(c.sourceId, c.sourceType);
+    if (c.destType) nodeTypeById.set(c.destId, c.destType);
+
+    const list = edges.get(c.sourceId) || [];
+    list.push(c.destId);
+    edges.set(c.sourceId, list);
+  }
+
+  const startIds = connections
+    .filter(c => c?.sourceType === 'MediaStreamAudioSource' && c?.sourceId)
+    .map(c => c.sourceId);
+
+  const destIds = new Set(
+    connections
+      .filter(c => isDestinationNodeType(c?.destType) && c?.destId)
+      .map(c => c.destId)
+  );
+
+  const findPath = (startId) => {
+    const queue = [startId];
+    const prev = new Map();
+    prev.set(startId, null);
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      if (destIds.has(cur)) {
+        // Reconstruct path
+        const path = [];
+        let n = cur;
+        while (n) {
+          path.push(n);
+          n = prev.get(n);
+        }
+        path.reverse();
+        return path;
+      }
+
+      const neighbors = edges.get(cur) || [];
+      for (const next of neighbors) {
+        if (!next || prev.has(next)) continue;
+        prev.set(next, cur);
+        queue.push(next);
+      }
+    }
+    return null;
+  };
+
+  let bestPath = null;
+  for (const startId of startIds) {
+    const path = findPath(startId);
+    if (!path) continue;
+    if (!bestPath || path.length < bestPath.length) {
+      bestPath = path;
+    }
+  }
+
+  if (!bestPath || bestPath.length < 2) return [];
+
+  const processors = [];
+  for (const nodeId of bestPath) {
+    const nodeType = nodeTypeById.get(nodeId);
+    if (nodeType === 'MediaStreamAudioSource') continue;
+    if (isDestinationNodeType(nodeType)) continue;
+
+    const fromPipeline = pipelineByNodeId.get(nodeId);
+    if (fromPipeline) {
+      if (fromPipeline.type !== 'analyser') {
+        processors.push(fromPipeline);
+      }
+      continue;
+    }
+
+    const mappedType = mapNodeTypeToProcessorType(nodeType);
+    if (!mappedType || mappedType === 'analyser') continue;
+
+    const entry = { type: mappedType, nodeId, timestamp: Date.now() };
+    if (mappedType === 'audioWorkletNode') {
+      entry.processorName = '?';
+    }
+    processors.push(entry);
+  }
+
+  return processors;
 }
 
 /**
@@ -958,8 +1140,19 @@ function renderACStats(contexts, audioConnections = null) {
 
   let html = '';
 
+  // ═══ DEBUG: Context Rendering ═══
+  console.log(`[AudioInspector] 🔍 renderACStats: rendering ${contextArray.length} context(s)`);
   contextArray.forEach((ctx, index) => {
+    console.log(`[AudioInspector] 🔍 Context[${index}]:`, {
+      contextId: ctx.contextId,
+      inputSource: ctx.pipeline?.inputSource,
+      hasMediaStreamSource: ctx.pipeline?.processors?.some(p => p.type === 'mediaStreamSource'),
+      processorCount: ctx.pipeline?.processors?.length,
+      state: ctx.static?.state
+    });
+
     const purpose = getContextPurpose(ctx);
+    console.log(`[AudioInspector] 🔍 Context[${index}] purpose: ${purpose.label} (${purpose.icon})`);
 
     // Page Audio context → minimal görünüm (mikrofon yok mesajı ile)
     if (purpose.label === 'Page Audio') {
@@ -1013,7 +1206,30 @@ function renderACStats(contexts, audioConnections = null) {
     const hasOutput = !!ctx.pipeline?.destinationType;
 
     // Filter processors: separate main chain from monitors
-    const mainProcessors = ctx.pipeline?.processors?.filter(p => p.type !== 'analyser') || [];
+    const ctxConnections = filterConnectionsByContext(audioConnections?.connections, [ctx]);
+    console.log(`[AudioInspector] 🔍 Audio Path: ctxConnections.length=${ctxConnections.length}`);
+    const mainFromGraph = ctxConnections.length > 0
+      ? deriveMainChainProcessorsFromConnections(ctxConnections, ctx)
+      : [];
+    console.log(`[AudioInspector] 🔍 Audio Path: mainFromGraph.length=${mainFromGraph.length}`);
+    let mainProcessors = mainFromGraph.length > 0
+      ? mainFromGraph
+      : (ctx.pipeline?.processors?.filter(p => p.type !== 'analyser') || []);
+    console.log(`[AudioInspector] 🔍 Audio Path: mainProcessors (before fallback)=`, mainProcessors);
+
+    // FALLBACK: If inputSource exists, ensure MediaStreamSource is in the chain
+    // When connections are missing, ctx.pipeline.processors doesn't include mediaStreamSource
+    // because it's tracked separately via inputSource field
+    if (hasInputSource && !mainProcessors.some(p => p.type === 'mediaStreamSource')) {
+      // Prepend mediaStreamSource to chain (it's always first)
+      mainProcessors = [
+        { type: 'mediaStreamSource', timestamp: ctx.pipeline?.timestamp },
+        ...mainProcessors
+      ];
+      console.log(`[AudioInspector] 🔍 Audio Path: FALLBACK applied! Added mediaStreamSource to chain`);
+    }
+    console.log(`[AudioInspector] 🔍 Audio Path: FINAL mainProcessors.length=${mainProcessors.length}`);
+
     const monitors = ctx.pipeline?.processors?.filter(p => p.type === 'analyser') || [];
     const hasMainProcessors = mainProcessors.length > 0;
 
@@ -1077,12 +1293,18 @@ function renderACStats(contexts, audioConnections = null) {
   });
 
   // ━━━ Audio Connection Graph ━━━ (if connections available)
+  console.log(`[AudioInspector] 🔍 renderACStats: audioConnections=`, audioConnections);
+  console.log(`[AudioInspector] 🔍 renderACStats: audioConnections?.connections?.length=`, audioConnections?.connections?.length);
   const filteredConnections = filterConnectionsByContext(audioConnections?.connections, contextArray);
+  console.log(`[AudioInspector] 🔍 renderACStats: filteredConnections.length=`, filteredConnections.length);
   if (filteredConnections.length > 0) {
     html += renderConnectionGraph(filteredConnections, contextArray);
   }
 
+  console.log(`[AudioInspector] 🔍 renderACStats: HTML length=${html.length}, container=`, container);
+  console.log(`[AudioInspector] 🔍 renderACStats: HTML preview (first 500 chars):`, html.substring(0, 500));
   container.innerHTML = html;
+  console.log(`[AudioInspector] 🔍 renderACStats: DOM updated, container.children.length=`, container.children.length);
 }
 
 /**
@@ -1322,13 +1544,26 @@ const ENCODER_DETECTORS = [
       // Skip if no WASM encoder data
       if (!data.wasmEncoder) return false;
 
-      // If MediaRecorder is active and WASM encoder is from Blob detection only,
-      // defer to MediaRecorder detector - it's native browser encoding, not WASM
-      // Pattern 'audio-blob' means encoder was detected from Blob, not Worker/AudioWorklet
+      // If MediaRecorder is ACTIVE and WASM encoder is from Blob detection only,
+      // defer to MediaRecorder detector only when blob format matches MediaRecorder output.
+      // Otherwise keep Blob signal (e.g., PCM/WAV export while a MediaRecorder exists on the page).
       const isOnlyBlobDetection = data.wasmEncoder.pattern === 'audio-blob';
-      const hasActiveMediaRecorder = data.mediaRecorder?.mimeType;
+      const mr = data.mediaRecorder;
+      const mrIsActive = mr?.state === 'recording' || mr?.state === 'paused';
+      const hasActiveMediaRecorder = mrIsActive && !!mr?.mimeType && mr?.hasAudioTrack !== false;
       if (isOnlyBlobDetection && hasActiveMediaRecorder) {
-        return false; // Let MediaRecorder detector handle this
+        const normalizeMime = (m) => (typeof m === 'string' ? m.split(';')[0].trim().toLowerCase() : '');
+        const blobMimeBase = normalizeMime(data.wasmEncoder.mimeType);
+        const mrMimeBase = normalizeMime(mr.mimeType);
+        const sameBaseMime = blobMimeBase && mrMimeBase && blobMimeBase === mrMimeBase;
+
+        const blobCodec = String(data.wasmEncoder.codec || '').toLowerCase();
+        const blobContainer = String(data.wasmEncoder.container || '').toLowerCase();
+        const isWavLike = blobCodec === 'pcm' || blobContainer === 'wav' || blobMimeBase === 'audio/wav' || blobMimeBase === 'audio/wave';
+
+        if (!isWavLike && sameBaseMime) {
+          return false; // Let MediaRecorder detector handle native recorder output
+        }
       }
 
       return true;
@@ -1338,7 +1573,7 @@ const ENCODER_DETECTORS = [
 
       // Build codec display with application type suffix if available
       // e.g., "OPUS (VoIP)", "OPUS (Audio)", "OPUS (LowDelay)"
-      const rawCodec = enc.codec ?? 'opus';
+      const rawCodec = enc.codec ?? 'unknown';
       const isUnknownCodec = typeof rawCodec === 'string' && rawCodec.toLowerCase() === 'unknown';
       // Show "Detecting..." for unknown codec (will be confirmed when Blob is created)
       const codecBase = isUnknownCodec
@@ -1375,6 +1610,12 @@ const ENCODER_DETECTORS = [
       // Bitrate (if available, show VBR if not specified)
       if (enc.bitRate && enc.bitRate > 0) {
         rows.push({ label: 'Bitrate', value: `${Math.round(enc.bitRate / 1000)} kbps`, isMetric: true });
+      } else if (enc.isLiveEstimate === true) {
+        rows.push({
+          label: 'Bitrate',
+          value: '<span class="has-tooltip" data-tooltip="Recording in progress - bitrate will be calculated as more audio data is captured">Calculating...</span>',
+          isMetric: false
+        });
       } else if (enc.blobSize && enc.blobSize > 0) {
         // Estimate bitrate from blob size (assume ~5 sec avg recording)
         // Better: track actual duration, but this gives a rough estimate
@@ -1466,7 +1707,7 @@ const ENCODER_DETECTORS = [
       });
 
       return {
-        codec: enc.codec || 'OPUS',
+        codec: enc.codec ? String(enc.codec).toUpperCase() : 'UNKNOWN',
         bitrateKbps: enc.bitRate ? `${Math.round(enc.bitRate / 1000)}` : '-',
         source: enc.workerFilename || enc.processorName || 'Worker',
         timestamp: enc.timestamp || Date.now(),
@@ -1600,6 +1841,67 @@ const ENCODER_DETECTORS = [
         source: 'MediaRecorder',
         timestamp: mr.timestamp || Date.now(),
         rows
+      };
+    }
+  },
+  {
+    name: 'PendingWebAudio',
+    detect: (data) => {
+      if (data.wasmEncoder) return false;
+      if (data.rtcStats?.peerConnections?.length > 0) return false;
+      if (data.mediaRecorder?.mimeType) return false;
+      if (!data.audioContext) return false;
+
+      const contexts = Array.isArray(data.audioContext) ? data.audioContext : [data.audioContext];
+      return contexts.some(ctx => {
+        const input = ctx?.pipeline?.inputSource;
+        const processors = ctx?.pipeline?.processors || [];
+        const hasProcessing = processors.some(p => p.type === 'audioWorkletNode' || p.type === 'scriptProcessor');
+        return (input === 'microphone' || input === 'system' || input === 'synthesized') && hasProcessing;
+      });
+    },
+    extract: (data) => {
+      const contexts = Array.isArray(data.audioContext) ? data.audioContext : [data.audioContext];
+      const ctx = contexts.find(c => {
+        const input = c?.pipeline?.inputSource;
+        const processors = c?.pipeline?.processors || [];
+        const hasProcessing = processors.some(p => p.type === 'audioWorkletNode' || p.type === 'scriptProcessor');
+        return (input === 'microphone' || input === 'system' || input === 'synthesized') && hasProcessing;
+      });
+      if (!ctx) return null;
+
+      const processors = ctx.pipeline?.processors || [];
+      const pipelineType = processors.some(p => p.type === 'audioWorkletNode')
+        ? 'AudioWorklet'
+        : (processors.some(p => p.type === 'scriptProcessor') ? 'ScriptProcessor' : 'WebAudio');
+
+      return {
+        codec: 'Detecting...',
+        bitrateKbps: '-',
+        source: 'WebAudio',
+        timestamp: ctx.pipeline?.timestamp || ctx.static?.timestamp || Date.now(),
+        rows: [
+          {
+            label: 'Codec',
+            value: '<span class="has-tooltip detecting-codec" data-tooltip="No encoder evidence yet. Codec will be confirmed when encoding starts or when the final audio Blob is created.">Detecting...</span>',
+            isMetric: true
+          },
+          {
+            label: 'Bitrate',
+            value: '<span class="has-tooltip" data-tooltip="Waiting for encoding data. This path may encode only when recording stops.">Waiting...</span>',
+            isMetric: false
+          },
+          {
+            label: 'Encoder',
+            value: `<span class="has-tooltip" data-tooltip="WebAudio pipeline detected (${pipelineType}). No explicit encoder detected yet.">⏳ Pending</span>`,
+            isMetric: false
+          },
+          {
+            label: 'Confidence',
+            value: '<span class="has-tooltip" data-tooltip="This is a heuristic based on the detected WebAudio pipeline, not a confirmed codec.">○ Pending</span>',
+            isMetric: false
+          }
+        ]
       };
     }
   },
@@ -1861,8 +2163,8 @@ async function clearData() {
     }
   }
 
-  // Then clear all storage
-  await chrome.storage.local.clear();
+  // Then clear inspector storage (centralized) - keep persistent keys like platformInfo
+  await clearInspectorData({ includeAutoStopReason: true });
   location.reload();
 }
 
@@ -1901,7 +2203,7 @@ async function copyLogs() {
 
 // Clear logs only
 async function clearLogs() {
-  await chrome.storage.local.remove('debug_logs');
+  await clearLogsOnly();
   renderDebugLogs([]);
   updateLogBadge(0);
 }
@@ -1944,7 +2246,7 @@ async function handleRefreshAndStart() {
   debugLog(`🔄 Refreshing tab ${tabId} and setting pendingAutoStart`);
 
   // Clear previous session data first
-  await clearInspectorData();
+  await clearInspectorData({ includeAutoStopReason: true });
 
   // Set pendingAutoStart flag - content.js will auto-start after reload
   await chrome.storage.local.set({ pendingAutoStart: tabId });
@@ -2002,7 +2304,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     const shouldUpdate = Object.keys(changes).some(key => DATA_STORAGE_KEYS.includes(key));
 
     if (shouldUpdate) {
-      updateUI();
+      // Use debounced update to batch rapid storage changes
+      // (e.g., audio_contexts + audio_connections written separately but close together)
+      updateUIDebounced();
     }
 
     // Update logs if they changed
@@ -2064,7 +2368,7 @@ loadEnabledState().then(async () => {
   // (lockedTab varsa veriler o tab'a ait, review için korunmalı)
   const { lockedTab } = await chrome.storage.local.get(['lockedTab']);
   if (!enabled && !lockedTab) {
-    await clearMeasurementData();
+    await clearSessionData();
   }
   updateUI();
 });

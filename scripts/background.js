@@ -11,6 +11,19 @@ const DATA_STORAGE_KEYS = [
   'audio_connections'
 ];
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cleanup presets (single source of truth)
+// Other scripts should call via CLEAR_INSPECTOR_DATA with { preset }
+// This prevents option drift and ensures consistent behavior.
+// ═══════════════════════════════════════════════════════════════════════════════
+const CLEANUP_PRESETS = Object.freeze({
+  FULL: { includeLogs: true, includeAutoStopReason: false, dataOnly: false, logsOnly: false },
+  FULL_WITH_AUTOSTOP: { includeLogs: true, includeAutoStopReason: true, dataOnly: false, logsOnly: false },
+  DATA_ONLY: { includeLogs: false, includeAutoStopReason: false, dataOnly: true, logsOnly: false },
+  SESSION: { includeLogs: true, includeAutoStopReason: false, dataOnly: true, logsOnly: false },
+  LOGS_ONLY: { includeLogs: true, includeAutoStopReason: false, dataOnly: false, logsOnly: true }
+});
+
 /**
  * Clear inspector state and data from storage
  * SINGLE SOURCE OF TRUTH: Other scripts call via CLEAR_INSPECTOR_DATA message
@@ -19,24 +32,38 @@ const DATA_STORAGE_KEYS = [
  * @param {boolean} [options.includeAutoStopReason=false] - Include autoStoppedReason key
  * @param {boolean} [options.includeLogs=true] - Include debug_logs (default true for background.js)
  * @param {boolean} [options.dataOnly=false] - Only clear measurement data, keep state
+ * @param {boolean} [options.logsOnly=false] - Only clear debug logs (and optionally autoStoppedReason)
  * @returns {Promise<void>}
  */
 function clearInspectorData(options = {}) {
-  const { includeAutoStopReason = false, includeLogs = true, dataOnly = false } = options;
+  const { includeAutoStopReason = false, includeLogs = true, dataOnly = false, logsOnly = false } = options;
 
-  let keys;
-  if (dataOnly) {
-    // Only measurement data - used by content.js/popup.js clearMeasurementData()
+  /** @type {string[]} */
+  let keys = [];
+
+  if (logsOnly) {
+    keys = ['debug_logs'];
+  } else if (dataOnly) {
+    // Only measurement data - used by content.js/popup.js
     keys = [...DATA_STORAGE_KEYS];
   } else {
-    // Full clear - state + data + optionally logs
+    // Full clear - state + data
     keys = ['inspectorEnabled', 'lockedTab', 'pendingAutoStart', ...DATA_STORAGE_KEYS];
-    if (includeLogs) {
-      keys.push('debug_logs');
-    }
-    if (includeAutoStopReason) {
-      keys.push('autoStoppedReason');
-    }
+  }
+
+  // Allow clearing logs in dataOnly mode (SESSION preset)
+  if (includeLogs && !keys.includes('debug_logs')) {
+    keys.push('debug_logs');
+  }
+
+  if (includeAutoStopReason && !keys.includes('autoStoppedReason')) {
+    keys.push('autoStoppedReason');
+  }
+
+  // If we're clearing logs, also reset the in-memory log pipeline so old queued
+  // entries can't repopulate debug_logs after storage.remove().
+  if (includeLogs || logsOnly) {
+    resetLogPipeline();
   }
 
   return chrome.storage.local.remove(keys);
@@ -46,22 +73,33 @@ function clearInspectorData(options = {}) {
 // Merkezi log yönetimi - race condition önleme
 let logQueue = [];
 let isProcessingLogs = false;
+let logWriteGeneration = 0;
 
 const LOG_LIMIT = 1000;
+
+function resetLogPipeline() {
+  logWriteGeneration += 1;
+  logQueue.length = 0;
+}
 
 async function processLogQueue() {
   if (isProcessingLogs || logQueue.length === 0) return;
 
+  const generation = logWriteGeneration;
   isProcessingLogs = true;
+  const batch = logQueue.splice(0, logQueue.length);
 
   try {
     const result = await chrome.storage.local.get(['debug_logs']);
+
+    // Logs were cleared while we were awaiting storage - drop this batch.
+    if (generation !== logWriteGeneration) {
+      return;
+    }
     let logs = result.debug_logs || [];
 
     // Kuyruktaki tüm logları ekle
-    while (logQueue.length > 0) {
-      logs.push(logQueue.shift());
-    }
+    logs.push(...batch);
 
     // Sınırı aştıysa en yeni LOG_LIMIT kadar tut
     if (logs.length > LOG_LIMIT) {
@@ -89,7 +127,7 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('AudioInspector installed');
 
   // Reset ALL state on install/update - clean slate
-  clearInspectorData({ includeAutoStopReason: true });
+  clearInspectorData(CLEANUP_PRESETS.FULL_WITH_AUTOSTOP);
   updateBadge(false);
 
   // Reload test pages immediately on install/update
@@ -99,7 +137,7 @@ chrome.runtime.onInstalled.addListener(() => {
 // Chrome başlatıldığında temizlik - browser restart sonrası clean slate
 chrome.runtime.onStartup.addListener(() => {
   console.log('AudioInspector startup - cleaning previous session');
-  clearInspectorData({ includeAutoStopReason: true });
+  clearInspectorData(CLEANUP_PRESETS.FULL_WITH_AUTOSTOP);
   updateBadge(false);
 });
 
@@ -389,10 +427,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DRY: Centralized data clearing - prevents duplicate clearInspectorData() in each file
-  // Options: { dataOnly: true } for measurement data only, { includeLogs: false } to keep logs
+  // Preferred: use { preset } to avoid option drift:
+  // - SESSION: data + logs (keep state)
+  // - FULL: state + data + logs
+  // - FULL_WITH_AUTOSTOP: FULL + autoStoppedReason
+  // - LOGS_ONLY: only debug_logs
   // ═══════════════════════════════════════════════════════════════════════════
   if (message.type === 'CLEAR_INSPECTOR_DATA') {
-    clearInspectorData(message.options || {}).then(() => {
+    const presetOptions = message.preset ? CLEANUP_PRESETS[message.preset] : null;
+    const resolvedOptions = presetOptions ? { ...presetOptions, ...(message.options || {}) } : (message.options || {});
+
+    clearInspectorData(resolvedOptions).then(() => {
       sendResponse({ success: true });
     });
     return true; // async response
@@ -413,7 +458,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * | NO               | YES              | YES       | YES     | YES        | START  |
  * | NO               | YES              | YES       | YES     | NO         | STOP (origin change) |
  * | NO               | YES              | YES       | NO      | -          | NONE (different tab) |
- * | NO               | NO/missing       | YES       | YES     | -          | NONE + clear lockedTab |
+ * | NO               | NO/missing       | YES       | YES     | -          | NONE + full cleanup (stale session) |
  * | NO               | NO/missing       | NO        | -       | -          | NONE   |
  *
  * @param {Object} message - { tabId, url, origin, title }
@@ -490,10 +535,11 @@ async function handlePageReady(message, sender) {
   // PRIORITY 3: Inspector stopped - cleanup stale lockedTab
   // ─────────────────────────────────────────────────────────────────────────
   if (result.lockedTab && result.lockedTab.id === tabId) {
-    // Page refreshed while inspector was stopped - clear stale lockedTab
-    // This prevents Refresh Modal from appearing unnecessarily
-    console.log('[Background] 🧹 Clearing stale lockedTab (page refresh while stopped)');
-    await chrome.storage.local.remove(['lockedTab']);
+    // Page refreshed while inspector was stopped (review state).
+    // Treat as a stale session and do a full cleanup so UI/storage doesn't drift.
+    // This also prevents Refresh Modal from appearing unnecessarily on next Start.
+    console.log('[Background] 🧹 Page refresh while stopped - clearing stale session (state + data + logs)');
+    await clearInspectorData(CLEANUP_PRESETS.FULL_WITH_AUTOSTOP);
   }
 
   return { action: 'NONE', reason: 'inspector_stopped' };

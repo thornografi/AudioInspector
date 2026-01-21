@@ -98,17 +98,7 @@ class MediaRecorderCollector extends BaseCollector {
       }
       metadata.events.push(eventData);
 
-      // Signal content.js to clear all audio data when a new recording starts
-      if (eventType === 'start') {
-        metadata.resetData = true;
-      }
-
       this.emit(EVENTS.DATA, metadata);  // Emit metadata directly
-
-      // Clear resetData flag after emit to prevent repeated resets
-      if (metadata.resetData) {
-        delete metadata.resetData;
-      }
 
       // Sadece önemli event'leri logla (start, stop, pause, resume, error)
       if (eventType === 'error') {

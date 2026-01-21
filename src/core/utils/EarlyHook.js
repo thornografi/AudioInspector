@@ -24,6 +24,46 @@ const instanceRegistry = {
   audioWorkletNodes: []
 };
 
+// Shared AudioNode ID map - single source of truth across early-inject.js + collectors
+function getNodeIdMap() {
+  // @ts-ignore
+  const existing = window.__audioInspectorNodeIdMap;
+  if (existing && typeof existing.get === 'function' && typeof existing.set === 'function') {
+    return existing;
+  }
+  const map = new WeakMap();
+  // @ts-ignore
+  window.__audioInspectorNodeIdMap = map;
+  return map;
+}
+
+function getNextNodeId() {
+  // @ts-ignore
+  const current = Number.isInteger(window.__audioInspectorNodeIdCounter)
+    // @ts-ignore
+    ? window.__audioInspectorNodeIdCounter
+    : 0;
+  const next = current + 1;
+  // @ts-ignore
+  window.__audioInspectorNodeIdCounter = next;
+  return `node_${next}`;
+}
+
+/**
+ * @param {any} node
+ * @returns {string|null}
+ */
+function getOrAssignNodeId(node) {
+  if (!node || (typeof node !== 'object' && typeof node !== 'function')) return null;
+  const map = getNodeIdMap();
+  let id = map.get(node);
+  if (!id) {
+    id = getNextNodeId();
+    map.set(node, id);
+  }
+  return id;
+}
+
 /**
  * Factory function to create constructor hooks with common pattern
  * @param {Object} config - Hook configuration
@@ -193,7 +233,7 @@ function hookAudioWorkletNodePort(node, processorName) {
         if (n.includes('aac')) return 'aac';
         if (n.includes('vorbis') || n.includes('ogg')) return 'vorbis';
         if (n.includes('flac')) return 'flac';
-        return 'opus'; // default
+        return 'unknown'; // don't guess - blob can confirm post-hoc
       };
 
       // Detect encoder from processor name
@@ -236,10 +276,10 @@ function hookAudioWorkletNodePort(node, processorName) {
         // Opus application type mapping (official terminology)
         // OPUS_APPLICATION_VOIP, OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_LOWDELAY
         const appNames = { 2048: 'VoIP', 2049: 'Audio', 2051: 'LowDelay' };
-        const application = config.encoderApplication || config.application;
+        const application = config.encoderApplication ?? config.application;
 
-        // Detect codec - default opus if application is set, otherwise check config
-        let codec = 'opus';
+        // Detect codec: prefer explicit hints, otherwise keep as unknown (blob can confirm post-hoc)
+        let codec = (application !== undefined && application !== null) ? 'opus' : 'unknown';
         if (config.mp3BitRate || config.lameConfig) codec = 'mp3';
         else if (config.aacProfile || config.aacObjectType) codec = 'aac';
         else if (config.vorbisQuality) codec = 'vorbis';
@@ -513,8 +553,8 @@ export function installEarlyHooks() {
           return 'flac';
         }
 
-        // Default to opus (most common for WebRTC/voice)
-        return 'opus';
+        // Unknown: avoid false "opus" positives; blob detection can confirm post-hoc
+        return 'unknown';
       };
 
       // Helper: Detect encoder name from worker URL or message
@@ -918,6 +958,7 @@ function createMethodHook(proto, config, protoName) {
       entry.methodCalls = entry.methodCalls || [];
       const methodCallData = {
         type: registryKey,
+        nodeId: getOrAssignNodeId(node),
         ...extractMetadata(args, node)
       };
       entry.methodCalls.push(methodCallData);
