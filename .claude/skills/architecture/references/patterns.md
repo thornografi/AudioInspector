@@ -115,8 +115,8 @@ Start'ta TÜM önceki state temizlenir - stale data önlenir.
 **AudioContextCollector.start() temizlik:**
 1. `activeContexts.clear()` + `contextIdCounter = 0`
 2. `cleanupClosedAudioContexts()` - EarlyHook registry temizle
-3. `__wasmEncoderHandler` yeniden kaydet
-4. `__wasmEncoderDetected = null`
+3. `__detectedEncoderHandler` yeniden kaydet
+4. `__detectedEncoderData = null`
 5. Sadece `state !== 'closed'` context'leri sync et
 
 ## Constants Management (DRY Pattern)
@@ -131,7 +131,7 @@ popup.js, content.js, background.js ES module olmadığı için `constants.js`'d
 // background.js - Tek doğru kaynak
 const DATA_STORAGE_KEYS = [
   'rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet',
-  'media_recorder', 'wasm_encoder', 'audio_connections'
+  'media_recorder', 'detected_encoder', 'audio_connections', 'recording_active'
 ];
 ```
 

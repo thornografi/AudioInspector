@@ -94,6 +94,21 @@
     }
   };
 
+  // ═══════════════════════════════════════════════════════════════════
+  // SINGLE SOURCE OF TRUTH: Broadcast recording state changes to storage
+  // This is the ONLY reliable way to know if recording is active
+  // ═══════════════════════════════════════════════════════════════════
+  const broadcastRecordingState = (active) => {
+    window.postMessage({
+      __audioPipelineInspector: true,
+      type: 'RECORDING_STATE',
+      payload: {
+        active: active,
+        timestamp: Date.now()
+      }
+    }, '*');
+  };
+
   const installConsoleForwarding = () => {
     if (console.__audioInspectorForwardingInstalled) return;
     console.__audioInspectorForwardingInstalled = true;
@@ -208,6 +223,24 @@
         };
         window.__earlyCaptures.getUserMedia.push(capture);
 
+        // ═══════════════════════════════════════════════════════════════
+        // NEW SESSION SIGNAL: Reset encoder detection on new mic capture
+        // This ensures stale encoder data is cleared BEFORE recording starts
+        // Critical for PCM/WAV recordings where Blob is created only at END
+        // ═══════════════════════════════════════════════════════════════
+        if (window.__recordingState) {
+          window.__recordingState.sessionCount = (window.__recordingState.sessionCount || 0) + 1;
+          const sessionNum = window.__recordingState.sessionCount;
+
+          // Clear stale encoder detection
+          window.__detectedEncoderData = null;
+          if (window.__newRecordingSessionHandler) {
+            window.__newRecordingSessionHandler(sessionNum);
+          }
+
+          console.log(`[AudioInspector] Early: New recording session #${sessionNum} (getUserMedia trigger)`);
+        }
+
         // Notify collector handler if already registered (late page.js load)
         if (window.__getUserMediaCollectorHandler) {
           window.__getUserMediaCollectorHandler(stream, [constraints]);
@@ -306,6 +339,27 @@
                 timestamp: Date.now()
               });
 
+              // ═══════════════════════════════════════════════════════════
+              // RECORDING START SIGNAL: When microphone connects to AudioContext
+              // This is the earliest reliable signal for PCM/WAV recordings
+              // Check if stream is from getUserMedia (microphone capture)
+              // IMPORTANT: Only broadcast if NO MediaRecorder exists
+              // Sites with MediaRecorder should wait for MediaRecorder.start()
+              // ═══════════════════════════════════════════════════════════
+              if (methodName === 'createMediaStreamSource' && methodArgs[0]) {
+                const stream = methodArgs[0];
+                const isMicrophoneStream = window.__earlyCaptures?.getUserMedia?.some(
+                  gum => gum.stream?.id === stream.id
+                );
+                const hasMediaRecorder = window.__earlyCaptures?.mediaRecorders?.length > 0;
+                if (isMicrophoneStream && !window.__recordingState?.active && !hasMediaRecorder) {
+                  // PCM/WAV path: Microphone connected to AudioContext, no MediaRecorder
+                  // This is likely the start of a raw audio recording
+                  broadcastRecordingState(true);
+                  console.log('[AudioInspector] Early: Microphone connected (PCM/WAV path) - recording state: ACTIVE');
+                }
+              }
+
               console.log('[AudioInspector] Early: ' + methodName + '() captured');
               return result;
             };
@@ -373,6 +427,24 @@
             ...extractMethodArgs(methodName, args),
             timestamp: Date.now()
           });
+
+          // ═══════════════════════════════════════════════════════════
+          // RECORDING START SIGNAL: When microphone connects to AudioContext
+          // This is the earliest reliable signal for PCM/WAV recordings
+          // IMPORTANT: Only broadcast if NO MediaRecorder exists
+          // ═══════════════════════════════════════════════════════════
+          if (methodName === 'createMediaStreamSource' && args[0]) {
+            const stream = args[0];
+            const isMicrophoneStream = window.__earlyCaptures?.getUserMedia?.some(
+              gum => gum.stream?.id === stream.id
+            );
+            const hasMediaRecorder = window.__earlyCaptures?.mediaRecorders?.length > 0;
+            if (isMicrophoneStream && !window.__recordingState?.active && !hasMediaRecorder) {
+              // PCM/WAV path: Microphone connected, no MediaRecorder
+              broadcastRecordingState(true);
+              console.log('[AudioInspector] Early (proto): Microphone connected (PCM/WAV path) - recording state: ACTIVE');
+            }
+          }
 
           console.log('[AudioInspector] Early (proto): ' + methodName + '() captured');
           return result;
@@ -677,11 +749,10 @@
         window.__earlyCaptures.mediaRecorders.push(capture);
 
         // Track recording duration for bitrate calculation
+        // NOTE: Session reset is now handled in getUserMedia hook (earlier signal)
+        // This prevents double reset when getUserMedia → MediaRecorder flow is used
         instance.addEventListener('start', () => {
-          // Increment session count FIRST
-          window.__recordingState.sessionCount++;
-          const sessionNum = window.__recordingState.sessionCount;
-
+          // Timing state only - session management moved to getUserMedia
           window.__recordingState.startTime = Date.now();
           window.__recordingState.duration = null;
           window.__recordingState.totalBytes = 0;
@@ -690,23 +761,18 @@
           window.__recordingState.lastBitrateUpdateAt = 0;
           window.__recordingState.active = true;
 
-          // ═══════════════════════════════════════════════════════════════
-          // STALE DATA FIX: Reset encoder detection for new recording session
-          // Without this, second recording on same page keeps first recording's encoder info
-          // Signal to AudioContextCollector to reset currentEncoderData
-          // ═══════════════════════════════════════════════════════════════
-          window.__wasmEncoderDetected = null;
-          if (window.__newRecordingSessionHandler) {
-            window.__newRecordingSessionHandler(sessionNum);
-          }
+          // Broadcast to storage for popup's PendingWebAudio detector
+          broadcastRecordingState(true);
 
-          debugLog('MediaRecorder started', `Session #${sessionNum}`);
+          debugLog('MediaRecorder started', `Session #${window.__recordingState.sessionCount}`);
         });
 
         instance.addEventListener('stop', () => {
           if (window.__recordingState.startTime) {
             window.__recordingState.duration = (Date.now() - window.__recordingState.startTime) / 1000;
             window.__recordingState.active = false;
+            // Broadcast to storage for popup's PendingWebAudio detector
+            broadcastRecordingState(false);
             debugLog('MediaRecorder stopped', `Duration: ${window.__recordingState.duration.toFixed(1)}s`);
           }
         });
@@ -726,7 +792,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // Worker Hook - Capture WASM encoder worker URLs
+  // Worker Hook - Capture encoder worker URLs (WASM and others)
   // Critical for detecting encoder modules (opus, mp3, etc.)
   // ═══════════════════════════════════════════════════════════════════
   const OriginalWorker = window.Worker;
@@ -820,7 +886,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // Worker.postMessage Hook - Detect WASM encoder init (lamejs, opus-recorder, etc.)
+  // Worker.postMessage Hook - Detect encoder init (WASM: lamejs, opus-recorder, etc.)
   // Captures encoder configuration BEFORE recording starts (real-time detection)
   // ═══════════════════════════════════════════════════════════════════
   const originalWorkerPostMessage = Worker.prototype.postMessage;
@@ -828,9 +894,18 @@
   Worker.prototype.postMessage = function(message, ...args) {
     workerMessageCount++;
 
+    // ═══════════════════════════════════════════════════════════════════
+    // EARLY RETURN: Skip encode/data commands immediately (performance)
+    // These fire every ~85ms with huge audio buffers - no analysis needed
+    // Only "init" commands contain encoder configuration we need to capture
+    // ═══════════════════════════════════════════════════════════════════
+    const cmd = message?.cmd || message?.command || message?.type;
+    if (cmd === 'encode' || cmd === 'data' || cmd === 'chunk' || cmd === 'process') {
+      return originalWorkerPostMessage.apply(this, [message, ...args]);
+    }
+
     // ─────────────────────────────────────────────────────────────────
-    // DEBUG: Log ALL Worker.postMessage calls to understand the pattern
-    // Logs go to both DevTools console AND extension console panel
+    // DEBUG: Log Worker.postMessage calls (only init/config messages reach here)
     // ─────────────────────────────────────────────────────────────────
     const msgType = message === null ? 'null' :
                     message === undefined ? 'undefined' :
@@ -839,15 +914,13 @@
                     Array.isArray(message) ? `Array(${message.length})` :
                     typeof message;
 
-    // Log first 10 messages or any that look like config (to extension console)
-    // Also log to browser console for DevTools debugging
     if (workerMessageCount <= 10) {
       const logData = typeof message === 'object' && message !== null && !ArrayBuffer.isView(message)
         ? JSON.stringify(message, null, 2).substring(0, 500)
         : '(binary/array data)';
       debugLog(`Worker.postMessage #${workerMessageCount} type=${msgType}`, logData);
 
-      // Also log full message to browser console for detailed inspection
+      // Also log to browser console for DevTools debugging
       if (typeof message === 'object' && message !== null && !ArrayBuffer.isView(message)) {
         console.log(`[Early] Worker.postMessage #${workerMessageCount} type=${msgType}:`, JSON.stringify(message, null, 2).substring(0, 500));
 
@@ -868,6 +941,7 @@
       // DEBUG: Log audio-related Worker.postMessage calls
       // ─────────────────────────────────────────────────────────────────
       const msgKeys = Object.keys(message);
+      const msgCmd = message.cmd || message.command || message.type;
       const isLikelyAudio = msgKeys.some(k =>
         ['sample', 'rate', 'bit', 'channel', 'encode', 'init', 'config', 'audio', 'buffer'].some(
           term => k.toLowerCase().includes(term)
@@ -970,6 +1044,19 @@
         return defaultLibraries[codec] || null;
       };
 
+      // Get generic encoder type from codec (process type, not library)
+      const getEncoderType = (codec) => {
+        const encoderTypes = {
+          mp3: 'mp3-wasm',
+          opus: 'opus-wasm',
+          aac: 'aac-wasm',
+          vorbis: 'vorbis-wasm',
+          flac: 'flac-wasm',
+          pcm: 'pcm'
+        };
+        return encoderTypes[codec] || null;
+      };
+
       if (isInitCommand && hasEncoderFields) {
         // Get Worker metadata FIRST (needed for codec detection)
         // 'this' is the Worker instance in postMessage context
@@ -988,11 +1075,13 @@
 
         // Detect library from worker metadata and message fields
         const library = detectLibrary(codec, workerMeta, config);
+        const encoder = getEncoderType(codec);
 
         encoderInfo = {
           type: codec,
           codec: codec,
-          library: library,  // LAME, libopus, FDK AAC, libvorbis, libFLAC
+          encoder: encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           // Container: keep separate from codec (PCM → WAV container)
           container: codec === 'unknown' ? null : (codec === 'pcm' ? 'wav' : codec),
           sampleRate: config.sampleRate || config.encoderSampleRate || 44100,
@@ -1021,9 +1110,9 @@
         // sessionCount is incremented on MediaRecorder start or BlobTracking start
         encoderInfo.sessionId = window.__recordingState?.sessionCount || 0;
 
-        console.log(`[Early] Notifying handler, registered: ${!!window.__wasmEncoderHandler}`);
-        if (window.__wasmEncoderHandler) {
-          window.__wasmEncoderHandler(encoderInfo);
+        console.log(`[Early] Notifying handler, registered: ${!!window.__detectedEncoderHandler}`);
+        if (window.__detectedEncoderHandler) {
+          window.__detectedEncoderHandler(encoderInfo);
         } else {
           console.log(`[Early] WARNING: Handler not registered, encoderInfo will be lost!`);
         }
@@ -1040,17 +1129,20 @@
   // ═══════════════════════════════════════════════════════════════════
   const OriginalBlob = window.Blob;
   if (OriginalBlob) {
-    // Audio MIME types that indicate encoding (with encoder info)
+    // Audio MIME types that indicate encoding
+    // encoder: generic process type (opus-wasm, mp3-wasm, etc.)
+    // library: underlying C library (libopus, LAME, etc.)
+    // libraryPackage: JS/NPM package name if detectable (opus-recorder, lamejs, etc.)
     const AUDIO_MIME_TYPES = {
-      'audio/mp3': { codec: 'mp3', container: 'mp3', encoder: 'lamejs' },
-      'audio/mpeg': { codec: 'mp3', container: 'mp3', encoder: 'lamejs' },
-      'audio/wav': { codec: 'pcm', container: 'wav', encoder: null },
-      'audio/wave': { codec: 'pcm', container: 'wav', encoder: null },
-      'audio/ogg': { codec: 'vorbis', container: 'ogg', encoder: 'vorbis.js' },
-      'audio/opus': { codec: 'opus', container: 'ogg', encoder: 'opus-recorder' },
-      'audio/webm': { codec: 'opus', container: 'webm', encoder: 'opus-recorder' },
-      'audio/aac': { codec: 'aac', container: 'aac', encoder: 'fdk-aac.js' },
-      'audio/flac': { codec: 'flac', container: 'flac', encoder: 'libflac.js' }
+      'audio/mp3': { codec: 'mp3', container: 'mp3', encoder: 'mp3-wasm', library: 'LAME' },
+      'audio/mpeg': { codec: 'mp3', container: 'mp3', encoder: 'mp3-wasm', library: 'LAME' },
+      'audio/wav': { codec: 'pcm', container: 'wav', encoder: 'pcm', library: null },
+      'audio/wave': { codec: 'pcm', container: 'wav', encoder: 'pcm', library: null },
+      'audio/ogg': { codec: 'vorbis', container: 'ogg', encoder: 'vorbis-wasm', library: 'libvorbis' },
+      'audio/opus': { codec: 'opus', container: 'ogg', encoder: 'opus-wasm', library: 'libopus' },
+      'audio/webm': { codec: 'opus', container: 'webm', encoder: 'opus-wasm', library: 'libopus' },
+      'audio/aac': { codec: 'aac', container: 'aac', encoder: 'aac-wasm', library: 'FDK AAC' },
+      'audio/flac': { codec: 'flac', container: 'flac', encoder: 'flac-wasm', library: 'libFLAC' }
     };
 
     const getLastGumAt = () => {
@@ -1152,10 +1244,33 @@
                     recordingState.finalizeTimer = null;
                   }
 
-                  // Increment session count FIRST (monotonic)
-                  recordingState.sessionCount = (recordingState.sessionCount || 0) + 1;
-                  const sessionNum = recordingState.sessionCount;
+                  // Check if getUserMedia already started a new session recently
+                  // getUserMedia hook increments sessionCount and triggers reset
+                  // We don't want to double-increment if getUserMedia already handled it
+                  const lastGumTimestamp = getLastGumAt();
+                  const gumTriggeredSession = lastGumTimestamp > 0 &&
+                    (now - lastGumTimestamp) < 5000 && // Within 5 seconds
+                    recordingState.sessionCount > 0;   // Session already incremented
 
+                  let sessionNum;
+                  if (gumTriggeredSession) {
+                    // getUserMedia already started this session - reuse it
+                    sessionNum = recordingState.sessionCount;
+                    debugLog('Blob tracking', `Using existing session #${sessionNum} (getUserMedia triggered)`);
+                  } else {
+                    // FALLBACK: Custom recorder without getUserMedia - increment here
+                    recordingState.sessionCount = (recordingState.sessionCount || 0) + 1;
+                    sessionNum = recordingState.sessionCount;
+
+                    // Reset encoder detection (fallback path only)
+                    window.__detectedEncoderData = null;
+                    if (window.__newRecordingSessionHandler) {
+                      window.__newRecordingSessionHandler(sessionNum);
+                    }
+                    debugLog('Recording started', `Session #${sessionNum} (source: BlobTracking fallback)`);
+                  }
+
+                  // Timing state - always update
                   recordingState.startTime = now;
                   recordingState.duration = null;
                   recordingState.totalBytes = 0;
@@ -1168,17 +1283,13 @@
                   recordingState.startedByBlob = true;
                   window.__recordingState = recordingState;
 
+                  // Broadcast to storage for popup's PendingWebAudio detector
+                  broadcastRecordingState(true);
+
                   // Log only once for initial fallback activation
-                  if (sessionNum === 1) {
+                  if (sessionNum === 1 && !gumTriggeredSession) {
                     debugLog('Blob tracking started', 'No MediaRecorder events detected, using blob-based tracking');
                   }
-
-                  // Treat this as a new recording session for stale encoder cleanup
-                  window.__wasmEncoderDetected = null;
-                  if (window.__newRecordingSessionHandler) {
-                    window.__newRecordingSessionHandler(sessionNum);
-                  }
-                  debugLog('Recording started', `Session #${sessionNum} (source: BlobTracking)`);
 
                   return sessionNum;
                 };
@@ -1214,8 +1325,16 @@
                   startBlobSession();
                 } else if (blobSessionInactive && !likelyExportBlob && gapSinceLastBlob > 0 && gapSinceLastBlob <= RESUME_GRACE_MS) {
                   // Resume: blobs continued after a short gap (avoid premature finalize splitting a session)
+                  // CRITICAL: Clear finalize timer to prevent it from setting active=false
+                  // Without this, timer fires 1s later → active=false → isLiveEstimate=false → pulse lost
+                  if (recordingState.finalizeTimer) {
+                    clearTimeout(recordingState.finalizeTimer);
+                    recordingState.finalizeTimer = null;
+                  }
                   recordingState.active = true;
                   recordingState.duration = null;
+                  // Broadcast resumed state
+                  broadcastRecordingState(true);
                 }
 
                 const elapsedSec = recordingState.startTime
@@ -1270,7 +1389,8 @@
                 const encoderInfo = {
                   type: audioInfo.codec,
                   codec: audioInfo.codec,
-                  encoder: audioInfo.encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
+                  encoder: audioInfo.encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+                  library: audioInfo.library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
                   container: audioInfo.container,
                   mimeType: mimeType,
                   blobSize: blobSize,
@@ -1289,9 +1409,9 @@
               const bitrateInfo = calculatedBitRate ? `, ~${Math.round(calculatedBitRate / 1000)}kbps` : '';
               debugLog(`Audio Blob created`, `${mimeType}${encoderNameInfo}, ${(blobSize / 1024).toFixed(1)}KB${durationInfo}${bitrateInfo}`);
 
-                // Notify WASM encoder handler (unified detection)
-                // Note: All blob data goes through wasmEncoderHandler for pattern priority
-                if (shouldUpdateBitrate && window.__wasmEncoderHandler) {
+                // Notify encoder handler (unified detection)
+                // Note: All blob data goes through detectedEncoderHandler for pattern priority
+                if (shouldUpdateBitrate && window.__detectedEncoderHandler) {
                   const sessionId = recordingState.sessionCount || 0;
 
                   // WAV: enrich via header (bitDepth/channels/sampleRate/duration/bitrate) for stable UI
@@ -1313,20 +1433,20 @@
                         }
                       }
 
-                      if (window.__wasmEncoderHandler) {
+                      if (window.__detectedEncoderHandler) {
                         encoderInfo.sessionId = sessionId;
-                        window.__wasmEncoderHandler(encoderInfo);
+                        window.__detectedEncoderHandler(encoderInfo);
                       }
                     }).catch(() => {
                       // Header parse failed - fall back to size/duration based estimate
-                      if (window.__wasmEncoderHandler) {
+                      if (window.__detectedEncoderHandler) {
                         encoderInfo.sessionId = sessionId;
-                        window.__wasmEncoderHandler(encoderInfo);
+                        window.__detectedEncoderHandler(encoderInfo);
                       }
                     });
                   } else {
                     encoderInfo.sessionId = sessionId;
-                    window.__wasmEncoderHandler(encoderInfo);
+                    window.__detectedEncoderHandler(encoderInfo);
                   }
                 }
 
@@ -1341,6 +1461,8 @@
                     recordingState.duration = (Date.now() - recordingState.startTime) / 1000;
                     recordingState.active = false;
                     recordingState.finalizedAt = Date.now();
+                    // Broadcast finalized state
+                    broadcastRecordingState(false);
 
                     const finalBytes = recordingState.totalBytes || blobSize;
                     const finalDuration = recordingState.duration || recordingDuration;
@@ -1348,8 +1470,8 @@
                       ? Math.round((finalBytes * 8) / finalDuration)
                     : null;
 
-                  if (window.__wasmEncoderHandler) {
-                    window.__wasmEncoderHandler({
+                  if (window.__detectedEncoderHandler) {
+                    window.__detectedEncoderHandler({
                       ...encoderInfo,
                       sessionId: recordingState.sessionCount || 0,
                       isLiveEstimate: false,

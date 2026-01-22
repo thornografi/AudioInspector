@@ -80,14 +80,14 @@ async function injectPageScript(attempt = 1) {
 // DRY: Storage keys fetched from background.js (single source of truth)
 // Fallback array used until background.js responds (prevents race condition)
 // ═══════════════════════════════════════════════════════════════════════════════
-let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'detected_encoder', 'audio_connections', 'recording_active'];
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DRY HELPER: WASM Encoder data merge with null-safe field preservation
+// DRY HELPER: Detected Encoder data merge with null-safe field preservation
 // OCP: Add new fields to ENCODER_MERGE_FIELDS array, no logic change needed
 // ═══════════════════════════════════════════════════════════════════════════════
 const ENCODER_MERGE_FIELDS = [
-  'encoder', 'bitRate', 'channels', 'sampleRate', 'application',
+  'encoder', 'library', 'bitRate', 'channels', 'sampleRate', 'application',
   'applicationName', 'frameSize', 'processorName', 'originalSampleRate',
   'wavBitDepth', 'container', 'encoderPath', 'sessionId',
   'recordingDuration', 'calculatedBitRate', 'isLiveEstimate', 'mimeType', 'blobSize', 'status'
@@ -97,7 +97,7 @@ function mergeEncoderData(existing, payload) {
   const merged = { ...existing, ...payload };
 
   // Special: codec can come from 'codec' (preferred) or legacy 'type' field.
-  // IMPORTANT: payload.type is usually the message type (e.g., "wasmEncoder") - never treat that as a codec.
+  // IMPORTANT: payload.type is usually the message type (e.g., "detectedEncoder") - never treat that as a codec.
   const codecCandidate = payload.codec ?? payload.type;
   if (typeof codecCandidate === 'string') {
     const lc = codecCandidate.toLowerCase();
@@ -218,8 +218,8 @@ function processAudioContextQueue() {
               ? payload.pipeline.processors  // Use new array (even if empty = reset)
               : existing.pipeline?.processors || []
           },
-          // wasmEncoder root level'da kalır
-          wasmEncoder: payload.wasmEncoder || existing.wasmEncoder
+          // detectedEncoder root level'da kalır
+          detectedEncoder: payload.detectedEncoder || existing.detectedEncoder
         };
       } else {
         // New context
@@ -263,61 +263,84 @@ const MESSAGE_HANDLERS = {
 
   mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
-  // CANONICAL: Tüm WASM encoder tespitleri bu handler'dan geçer
+  // CANONICAL: Tüm encoder tespitleri bu handler'dan geçer (WASM, PCM, native)
   // AudioContextCollector hem URL pattern hem opus hook için buraya emit eder
   // popup.js bu storage key'den okur (tek doğru kaynak)
   // MERGE STRATEGY: Zengin field'ları koru, null override'i engelle
-  wasmEncoder: (payload) => {
-    chrome.storage.local.get(['wasm_encoder'], (result) => {
-      const existing = result.wasm_encoder || null;
-      const existingSessionId = Number.isInteger(existing?.sessionId) ? existing.sessionId : null;
+  detectedEncoder: (() => {
+    // In-memory session tracking to prevent race condition between reset and encoder data
+    // When reset arrives, we track the new sessionId so concurrent encoder events
+    // from the OLD session don't merge with stale storage data
+    let currentSessionId = null;
+
+    return (payload) => {
       const incomingSessionId = Number.isInteger(payload?.sessionId) ? payload.sessionId : null;
 
       // New recording session signal: clear stale encoder info
-      // IMPORTANT: Reset must be monotonic by sessionId to avoid race where reset arrives after encoder data.
       if (payload?.reset === true) {
-        if (incomingSessionId !== null && existingSessionId !== null && existingSessionId >= incomingSessionId) {
-          return; // Ignore stale/duplicate reset
+        // Update in-memory session tracker FIRST (sync, immediate)
+        if (incomingSessionId !== null) {
+          currentSessionId = incomingSessionId;
         }
 
-        chrome.storage.local.remove(['wasm_encoder'], () => {
+        chrome.storage.local.remove(['detected_encoder'], () => {
           if (chrome.runtime.lastError) {
-            persistLogs(createLog('Content', `❌ wasm_encoder RESET error: ${chrome.runtime.lastError.message}`, 'error'));
+            persistLogs(createLog('Content', `❌ detected_encoder RESET error: ${chrome.runtime.lastError.message}`, 'error'));
           } else {
-            persistLogs(createLog('Content', '🧹 wasm_encoder cleared (new recording session)'));
+            persistLogs(createLog('Content', `🧹 detected_encoder cleared (session #${incomingSessionId})`));
           }
         });
-        return;
+        return null;
       }
 
-      // Ignore stale encoder events from previous sessions
-      if (incomingSessionId !== null && existingSessionId !== null && incomingSessionId < existingSessionId) {
-        return;
+      // CRITICAL: If incoming session is older than our tracked session, ignore it
+      // This prevents race condition where old encoder data arrives after reset
+      if (currentSessionId !== null && incomingSessionId !== null && incomingSessionId < currentSessionId) {
+        persistLogs(createLog('Content', `⏭️ Ignoring stale encoder (session ${incomingSessionId} < current ${currentSessionId})`));
+        return null;
       }
 
-      const merged = mergeEncoderData(existing || {}, payload);
-      if (incomingSessionId !== null) {
-        merged.sessionId = incomingSessionId;
-      } else if (existingSessionId !== null) {
-        merged.sessionId = existingSessionId;
+      // Update session tracker if newer session
+      if (incomingSessionId !== null && (currentSessionId === null || incomingSessionId > currentSessionId)) {
+        currentSessionId = incomingSessionId;
       }
 
-      chrome.storage.local.set({
-        wasm_encoder: { ...merged, sourceTabId: currentTabId },
-        lastUpdate: Date.now()
-      }, () => {
-        if (chrome.runtime.lastError) {
-          persistLogs(createLog('Content', `❌ wasm_encoder SET error: ${chrome.runtime.lastError.message}`, 'error'));
-        } else {
-          const existingSource = existing?.source;
-          const sourceInfo = payload.source === existingSource ? payload.source : `${payload.source} (merged with ${existingSource || 'none'})`;
-          persistLogs(createLog('Content', `🔧 WASM Encoder stored: ${sourceInfo}`));
+      chrome.storage.local.get(['detected_encoder'], (result) => {
+        const existing = result.detected_encoder || null;
+        const existingSessionId = Number.isInteger(existing?.sessionId) ? existing.sessionId : null;
+
+        // Double-check: if storage has older session data, don't merge with it
+        // This handles the case where reset's remove() hasn't completed yet
+        const shouldMerge = existingSessionId === null ||
+                           incomingSessionId === null ||
+                           existingSessionId === incomingSessionId;
+
+        const merged = shouldMerge
+          ? mergeEncoderData(existing || {}, payload)
+          : { ...payload }; // Fresh start, no merge with stale data
+
+        if (incomingSessionId !== null) {
+          merged.sessionId = incomingSessionId;
         }
-      });
-    });
 
-    return null; // Handled internally
-  },
+        chrome.storage.local.set({
+          detected_encoder: { ...merged, sourceTabId: currentTabId },
+          lastUpdate: Date.now()
+        }, () => {
+          if (chrome.runtime.lastError) {
+            persistLogs(createLog('Content', `❌ detected_encoder SET error: ${chrome.runtime.lastError.message}`, 'error'));
+          } else {
+            const mergeInfo = shouldMerge && existing?.source
+              ? ` (merged with ${existing.source})`
+              : ' (fresh)';
+            persistLogs(createLog('Content', `🔧 Encoder stored: ${payload.source}${mergeInfo}`));
+          }
+        });
+      });
+
+      return null; // Handled internally
+    };
+  })(),
 
   // Special handler for audioWorklet - uses queue to prevent race conditions with audioContext
   // NOTE: AudioContextCollector already handles worklets with proper context matching
@@ -461,6 +484,26 @@ window.addEventListener('message', (event) => {
   if (event.data.type === 'LOG_ENTRY') {
       persistLogs(event.data.payload);
       return;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // SINGLE SOURCE OF TRUTH: Recording state from early-inject.js
+  // This is the ONLY reliable indicator of active recording
+  // Used by popup's PendingWebAudio detector instead of complex heuristics
+  // ═══════════════════════════════════════════════════════════════════
+  if (event.data.type === 'RECORDING_STATE') {
+    const { active, timestamp } = event.data.payload || {};
+    chrome.storage.local.set({
+      recording_active: {
+        active: active === true,
+        timestamp: timestamp || Date.now(),
+        sourceTabId: currentTabId
+      },
+      lastUpdate: Date.now()
+    }, () => {
+      persistLogs(createLog('Content', `🎬 Recording state: ${active ? 'ACTIVE' : 'STOPPED'}`));
+    });
+    return;
   }
 
   const payload = event.data.payload;

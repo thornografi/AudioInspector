@@ -145,7 +145,7 @@ EarlyHook constructor hook'ları collector'lara bildirim:
 | `__rtcPeerConnectionCollectorHandler` | RTCPeerConnectionCollector | Yeni PeerConnection |
 | `__getUserMediaCollectorHandler` | GetUserMediaCollector | Yeni stream |
 | `__mediaRecorderCollectorHandler` | MediaRecorderCollector | Yeni MediaRecorder |
-| `__wasmEncoderHandler` | AudioContextCollector | WASM encoder |
+| `__detectedEncoderHandler` | AudioContextCollector | Encoder tespiti (WASM, PCM, native) |
 | `__audioWorkletNodeHandler` | AudioContextCollector | Yeni AudioWorkletNode |
 | `__audioContextMethodCallHandler` | AudioContextCollector | Real-time method call sync |
 | `__audioConnectionHandler` | early-inject.js | AudioNode.connect events |
@@ -159,13 +159,13 @@ async stop() {
 
   // TÜM handler'ları temizle
   window.__audioContextCollectorHandler = null;
-  window.__wasmEncoderHandler = null;
+  window.__detectedEncoderHandler = null;
   window.__audioWorkletNodeHandler = null;
   window.__newRecordingSessionHandler = null;
-  window.__wasmEncoderDetected = null;
+  window.__detectedEncoderData = null;
   window.__audioWorkletEncoderDetected = null;
 
-  this.pendingWasmEncoder = null;
+  this.pendingEncoderData = null;
 
   // Sadece closed olanları temizle
   for (const [ctx] of this.activeContexts.entries()) {

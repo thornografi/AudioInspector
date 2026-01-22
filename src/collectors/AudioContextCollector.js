@@ -97,12 +97,12 @@ class AudioContextCollector extends BaseCollector {
     this.pendingWorklets = [];
 
     /**
-     * Pending WASM encoder data
-     * When WASM encoder is detected before collector is active (started),
+     * Pending encoder data
+     * When encoder is detected before collector is active (started),
      * we store it here and emit when start() is called.
      * @type {Object|null}
      */
-    this.pendingWasmEncoder = null;
+    this.pendingEncoderData = null;
 
     /** @type {number} */
     this.recordingSessionId = 0;
@@ -287,7 +287,7 @@ class AudioContextCollector extends BaseCollector {
     }
 
     // 8. Register WASM encoder handler (Worker.postMessage hook in EarlyHook.js)
-    this.registerGlobalHandler('__wasmEncoderHandler', (encoderInfo) => {
+    this.registerGlobalHandler('__detectedEncoderHandler', (encoderInfo) => {
       this._handleWasmEncoder(encoderInfo);
     });
 
@@ -624,15 +624,15 @@ class AudioContextCollector extends BaseCollector {
           // AudioWorkletNode instance'ı oluşturulduğunda (_handleAudioWorkletNode) eklenir
           // Bu duplicate'ı önler: AudioWorklet → Worklet(name) yerine sadece Worklet(name) görünür
 
-          // If encoder pattern detected, emit to canonical wasm_encoder storage
+          // If encoder pattern detected, emit to canonical detected_encoder storage
           if (isEncoder) {
               // Extract container from URL (ogg, webm)
               const container = urlLower.includes('ogg') ? 'ogg' :
                                urlLower.includes('webm') ? 'webm' : null;
 
-              // Emit to canonical wasm_encoder storage (not attached to audioContext)
+              // Emit to canonical detected_encoder storage (not attached to audioContext)
               this.emit(EVENTS.DATA, {
-                  type: DATA_TYPES.WASM_ENCODER,
+                  type: DATA_TYPES.DETECTED_ENCODER,
                   timestamp: Date.now(),
                   codec: 'opus',
                   container: container,  // Extracted from URL
@@ -646,7 +646,7 @@ class AudioContextCollector extends BaseCollector {
               });
 
               // Context'e sadece referans ekle (optional - UI enhancement için)
-              matchedContextData.wasmEncoder = { ref: true };
+              matchedContextData.detectedEncoder = { ref: true };
 
               logger.info(this.logPrefix, `🔧 WASM Encoder detected via AudioWorklet: ${moduleUrl}`);
           }
@@ -717,7 +717,7 @@ class AudioContextCollector extends BaseCollector {
       for (const worklet of matched) {
           logger.info(this.logPrefix, `✅ Deferred match: ${worklet.moduleUrl} → ${ctxData.contextId}`);
 
-          // If this is an encoder, emit wasm_encoder data
+          // If this is an encoder, emit detected_encoder data
           if (worklet.isEncoder) {
               // Extract container from URL (ogg, webm)
               const urlLower = (worklet.moduleUrl || '').toLowerCase();
@@ -725,7 +725,7 @@ class AudioContextCollector extends BaseCollector {
                                urlLower.includes('webm') ? 'webm' : null;
 
               this.emit(EVENTS.DATA, {
-                  type: DATA_TYPES.WASM_ENCODER,
+                  type: DATA_TYPES.DETECTED_ENCODER,
                   timestamp: Date.now(),
                   codec: 'opus',
                   container: container,  // Extracted from URL
@@ -738,7 +738,7 @@ class AudioContextCollector extends BaseCollector {
               });
 
               // Mark context as having encoder
-              ctxData.wasmEncoder = { ref: true };
+              ctxData.detectedEncoder = { ref: true };
 
               logger.info(this.logPrefix, `🔧 WASM Encoder detected via deferred matching: ${worklet.moduleUrl}`);
           }
@@ -863,7 +863,7 @@ class AudioContextCollector extends BaseCollector {
 
   /**
    * Handle WASM encoder detection (from Worker.postMessage or AudioWorkletNode.port.postMessage hook)
-   * Emits encoder to canonical wasm_encoder storage with optional context linking
+   * Emits encoder to canonical detected_encoder storage with optional context linking
    *
    * PATTERN PRIORITY (higher = better, should not be overwritten by lower):
    * - audioworklet-config: 5 (highest - full AudioWorklet config)
@@ -973,11 +973,12 @@ class AudioContextCollector extends BaseCollector {
 
       // Build encoder data object
       const encoderData = {
-          type: DATA_TYPES.WASM_ENCODER,
+          type: DATA_TYPES.DETECTED_ENCODER,
           timestamp: Date.now(),
           sessionId: incomingSessionId,
           codec: encoderInfo.type || encoderInfo.codec || 'unknown',
-          encoder: encoderInfo.encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
+          encoder: encoderInfo.encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: encoderInfo.library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           source: encoderInfo.source || 'direct',  // audioworklet-port veya direct
           sampleRate: encoderInfo.sampleRate,
           originalSampleRate: encoderInfo.originalSampleRate,
@@ -998,6 +999,7 @@ class AudioContextCollector extends BaseCollector {
           workerFilename: encoderInfo.workerFilename, // Worker JS filename
           blobSize: encoderInfo.blobSize, // Blob size in bytes (for bitrate calc)
           mimeType: encoderInfo.mimeType, // MIME type from Blob
+          wavBitDepth: encoderInfo.wavBitDepth, // WAV bit depth (16, 24, 32 for PCM)
           linkedContextId  // Context bağlantısı (null olabilir)
       };
 
@@ -1007,7 +1009,7 @@ class AudioContextCollector extends BaseCollector {
       // If collector is not active, store for later emission during start()
       // This handles the case where WASM encoder is detected before user clicks "Start"
       if (!this.active) {
-          this.pendingWasmEncoder = encoderData;
+          this.pendingEncoderData = encoderData;
           logger.info(this.logPrefix, '📦 WASM encoder queued (collector not active yet)');
       } else {
           // Emit immediately if active
@@ -1501,6 +1503,15 @@ class AudioContextCollector extends BaseCollector {
     // Cross-origin protection is handled by content.js tab/origin validation.
     // ═══════════════════════════════════════════════════════════════════
 
+    // Sync recordingSessionId with global state (handles inspector restart)
+    // Without this, restart could cause session mismatch with early-inject.js
+    // @ts-ignore
+    const globalSessionCount = window.__recordingState?.sessionCount;
+    if (Number.isInteger(globalSessionCount) && globalSessionCount > 0) {
+      this.recordingSessionId = globalSessionCount;
+      logger.info(this.logPrefix, `Session synced with global state: #${globalSessionCount}`);
+    }
+
     // 1. Clear activeContexts Map (our internal state)
     const previousSize = this.activeContexts.size;
     this.currentEncoderData = null; // Clear encoder pattern priority state
@@ -1518,7 +1529,7 @@ class AudioContextCollector extends BaseCollector {
 
     // 3. Re-register WASM encoder handler
     // @ts-ignore
-    window.__wasmEncoderHandler = (encoderInfo) => {
+    window.__detectedEncoderHandler = (encoderInfo) => {
       this._handleWasmEncoder(encoderInfo);
     };
 
@@ -1536,7 +1547,7 @@ class AudioContextCollector extends BaseCollector {
 
     // 6. Clear any stale WASM encoder detection
     // @ts-ignore
-    window.__wasmEncoderDetected = null;
+    window.__detectedEncoderData = null;
 
     // 7. Register new recording session handler
     // When MediaRecorder starts a new recording, reset encoder detection state
@@ -1552,11 +1563,11 @@ class AudioContextCollector extends BaseCollector {
 
         // Reset encoder detection state (prevents stale encoder info on restart)
         this.currentEncoderData = null;
-        this.pendingWasmEncoder = null;
+        this.pendingEncoderData = null;
 
-        // Clear stored wasm_encoder in extension storage (content.js handles reset=true)
+        // Clear stored detected_encoder in extension storage (content.js handles reset=true)
         this.emit(EVENTS.DATA, {
-          type: DATA_TYPES.WASM_ENCODER,
+          type: DATA_TYPES.DETECTED_ENCODER,
           reset: true,
           sessionId: this.recordingSessionId,
           timestamp: Date.now()
@@ -1668,19 +1679,19 @@ class AudioContextCollector extends BaseCollector {
       logger.info(this.logPrefix, 'No running AudioContexts to sync (will capture new ones)');
     }
 
-    // NOTE: __wasmEncoderDetected was cleared at start (clean slate approach)
+    // NOTE: __detectedEncoderData was cleared at start (clean slate approach)
     // WASM encoder will be detected fresh when encoding actually starts
 
     // ───────────────────────────────────────────────────────────────────
     // 3. EMIT PENDING WASM ENCODER (if detected before start())
     // Also restore currentEncoderData for pattern priority to work correctly
     // ───────────────────────────────────────────────────────────────────
-    if (this.pendingWasmEncoder) {
+    if (this.pendingEncoderData) {
       logger.info(this.logPrefix, '📤 Emitting pending WASM encoder data');
-      this.emit(EVENTS.DATA, this.pendingWasmEncoder);
+      this.emit(EVENTS.DATA, this.pendingEncoderData);
       // Restore currentEncoderData for pattern priority (e.g., Blob supplement)
-      this.currentEncoderData = this.pendingWasmEncoder;
-      this.pendingWasmEncoder = null;  // Clear pending after restore
+      this.currentEncoderData = this.pendingEncoderData;
+      this.pendingEncoderData = null;  // Clear pending after restore
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -1763,7 +1774,7 @@ class AudioContextCollector extends BaseCollector {
     // @ts-ignore
     window.__audioContextCollectorHandler = null;
     // @ts-ignore
-    window.__wasmEncoderHandler = null;
+    window.__detectedEncoderHandler = null;
     // @ts-ignore
     window.__audioWorkletNodeHandler = null;
     // @ts-ignore
@@ -1774,10 +1785,10 @@ class AudioContextCollector extends BaseCollector {
 
     // Clear stale WASM encoder detection
     // @ts-ignore
-    if (window.__wasmEncoderDetected) {
+    if (window.__detectedEncoderData) {
       // @ts-ignore
-      window.__wasmEncoderDetected = null;
-      logger.info(this.logPrefix, 'Cleared __wasmEncoderDetected on stop');
+      window.__detectedEncoderData = null;
+      logger.info(this.logPrefix, 'Cleared __detectedEncoderData on stop');
     }
 
     // Clear AudioWorklet encoder heuristic detection cache
@@ -1788,7 +1799,7 @@ class AudioContextCollector extends BaseCollector {
     }
 
     // Clear pending WASM encoder to prevent stale data on restart
-    this.pendingWasmEncoder = null;
+    this.pendingEncoderData = null;
 
     // Clear pending worklets to prevent memory leak in long sessions
     this.pendingWorklets = [];

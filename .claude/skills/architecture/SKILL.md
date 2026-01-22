@@ -63,10 +63,11 @@ await chrome.scripting.executeScript({
 - `inspectorEnabled` - Inspector aktif mi
 - `lockedTab` - `{ id, url, title }` kilitli tab
 - `pendingAutoStart` - Refresh sonrası auto-start için tab ID
+- `recording_active` - `{ active, timestamp, sourceTabId }` kayıt durumu (tek kaynak)
 
 **Data (DATA_STORAGE_KEYS):**
 - `rtc_stats`, `user_media`, `audio_contexts`, `audio_worklet`
-- `media_recorder`, `wasm_encoder`, `audio_connections`
+- `media_recorder`, `detected_encoder`, `audio_connections`, `recording_active`
 
 **Persistent:**
 - `debug_logs` - Merkezi log kayıtları
@@ -85,6 +86,7 @@ await chrome.scripting.executeScript({
 | `GET_STORAGE_KEYS` | content/popup→background | DRY: Storage key listesi al |
 | `CLEAR_INSPECTOR_DATA` | content/popup→background | DRY: Merkezi veri temizleme |
 | `AUTO_STOP_NEW_RECORDING` | page→content | İkinci kayıtta inspector'ı durdur |
+| `RECORDING_STATE` | early-inject→content | Kayıt durumu değişikliği (start/stop) |
 
 ## Merkezi State Yönetimi (Centralized Approach)
 
@@ -175,5 +177,6 @@ src/
 ```javascript
 window.__pageInspector         // Inspector instance
 window.__earlyCaptures         // Early hook registry
-window.__wasmEncoderDetected   // WASM encoder tespiti
+window.__detectedEncoderData   // Encoder tespiti (WASM, PCM, native)
+window.__recordingState        // Recording durumu (active, sessionCount, etc.)
 ```

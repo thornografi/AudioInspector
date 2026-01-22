@@ -58,6 +58,6 @@ UI'da Detection satırı:
 
 ## Neden Farklı Bilgi Miktarları
 
-- **Full config:** Encoder kütüphanesi zengin config göndermiş (opus-recorder)
+- **Full config:** Encoder kütüphanesi zengin config göndermiş (örn: opus-wasm + libopus)
 - **Basic init:** Sadece temel parametreler
 - Kullanıcı "Frame size neden yok?" → tooltip açıklama sağlar

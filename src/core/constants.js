@@ -18,7 +18,7 @@ export const DATA_TYPES = {
   AUDIO_CONTEXT: 'audioContext',
   AUDIO_WORKLET: 'audioWorklet',
   MEDIA_RECORDER: 'mediaRecorder',
-  WASM_ENCODER: 'wasmEncoder',
+  DETECTED_ENCODER: 'detectedEncoder',  // Renamed from WASM_ENCODER - handles all encoder types (WASM, PCM, native)
   AUDIO_CONNECTION: 'audioConnection',
   PLATFORM_DETECTED: 'platform_detected'
 };
@@ -78,8 +78,9 @@ export const DATA_STORAGE_KEYS = [
   'audio_contexts',
   'audio_worklet',
   'media_recorder',
-  'wasm_encoder',
-  'audio_connections'
+  'detected_encoder',  // Renamed from wasm_encoder - handles all encoder types
+  'audio_connections',
+  'recording_active'   // Single source of truth for recording state
 ];
 
 /**

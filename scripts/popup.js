@@ -17,7 +17,7 @@ const MAX_AUDIO_CONTEXTS = 4; // UI_LIMITS.MAX_AUDIO_CONTEXTS in constants.js
 // DRY: Storage keys fetched from background.js (single source of truth)
 // Fallback array used until background.js responds (prevents race condition)
 // ═══════════════════════════════════════════════════════════════════════════════
-let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'wasm_encoder', 'audio_connections'];
+let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'detected_encoder', 'audio_connections', 'recording_active'];
 
 // Fetch actual keys from background.js (async, updates DATA_STORAGE_KEYS)
 chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
@@ -113,8 +113,9 @@ async function updateUI() {
     'user_media',
     'audio_contexts',
     'audio_connections',
-    'wasm_encoder',
+    'detected_encoder',
     'media_recorder',
+    'recording_active',
     'debug_logs',
     'lastUpdate',
     'lockedTab'
@@ -138,19 +139,22 @@ async function updateUI() {
     ? result.audio_connections
     : null;
 
-  // CANONICAL: Read from wasm_encoder storage key (unified encoder detection)
+  // CANONICAL: Read from detected_encoder storage key (unified encoder detection)
   // Both URL pattern detection and opus hook detection emit to this key
-  const validWasmEncoder = isValidData(result.wasm_encoder) ? result.wasm_encoder : null;
+  const validDetectedEncoder = isValidData(result.detected_encoder) ? result.detected_encoder : null;
 
   // Render each section with validated data
   // Data from different tabs is filtered out to prevent stale data display
   const validRtcStats = isValidData(result.rtc_stats) ? result.rtc_stats : null;
   const validMediaRecorder = isValidData(result.media_recorder) ? result.media_recorder : null;
 
+  const validUserMedia = isValidData(result.user_media) ? result.user_media : null;
+  const validRecordingActive = isValidData(result.recording_active) ? result.recording_active : null;
+
   renderRTCStats(validRtcStats);
-  renderGUMStats(isValidData(result.user_media) ? result.user_media : null);
+  renderGUMStats(validUserMedia);
   renderACStats(validAudioContexts?.length > 0 ? validAudioContexts : null, validAudioConnections);
-  renderEncodingSection(validWasmEncoder, validRtcStats, validMediaRecorder, validAudioContexts?.length > 0 ? validAudioContexts : null);
+  renderEncodingSection(validDetectedEncoder, validRtcStats, validMediaRecorder, validAudioContexts?.length > 0 ? validAudioContexts : null, validUserMedia, validRecordingActive);
   renderDebugLogs(result.debug_logs);
 }
 
@@ -454,6 +458,127 @@ function renderStatusPulse(text, tooltip) {
     return `<span class="has-tooltip status-pulse" data-tooltip="${escapeHtml(tooltip)}">${safeText}</span>`;
   }
   return `<span class="status-pulse">${safeText}</span>`;
+}
+
+// Format encoder type for display (e.g., "opus-wasm" → "Opus (WASM)")
+function formatEncoderDisplay(encoder) {
+  if (!encoder) return 'Unknown';
+  const lower = String(encoder).toLowerCase();
+
+  // Generic WASM encoder types
+  const detectedEncoders = {
+    'opus-wasm': 'Opus (WASM)',
+    'mp3-wasm': 'MP3 (WASM)',
+    'aac-wasm': 'AAC (WASM)',
+    'vorbis-wasm': 'Vorbis (WASM)',
+    'flac-wasm': 'FLAC (WASM)',
+    'pcm': 'Linear PCM'
+  };
+
+  if (detectedEncoders[lower]) {
+    return detectedEncoders[lower];
+  }
+
+  // Legacy fallback - old format still in storage
+  const legacyEncoders = {
+    'opus-recorder': 'Opus (WASM)',
+    'lamejs': 'MP3 (WASM)',
+    'fdk-aac.js': 'AAC (WASM)',
+    'vorbis.js': 'Vorbis (WASM)',
+    'libflac.js': 'FLAC (WASM)',
+    'linear-pcm': 'Linear PCM'
+  };
+
+  if (legacyEncoders[lower]) {
+    return legacyEncoders[lower];
+  }
+
+  // Return as-is if not recognized
+  return encoder;
+}
+
+// Detect encoder input technology from pipeline processors
+// Priority: Worklet > ScriptProcessor > WebAudio > MediaStream
+// Returns the "technology" that processes audio before encoding
+function detectEncoderInputTechnology(processors) {
+  if (!processors || processors.length === 0) return null;
+
+  // Filter out analysers (monitors don't process audio for encoding)
+  const mainChain = processors.filter(p => p.type !== 'analyser');
+  if (mainChain.length === 0) return null;
+
+  // Look for Worklet (highest priority - modern audio processing)
+  const worklet = mainChain.find(p => {
+    const type = (p.type || '').toLowerCase();
+    return type === 'audioworkletnode' || type === 'audioworklet';
+  });
+  if (worklet) {
+    const name = worklet.name || worklet.processorName;
+    return name ? `Worklet (${name})` : 'Worklet';
+  }
+
+  // Look for ScriptProcessor (legacy audio processing)
+  const scriptProc = mainChain.find(p => {
+    const type = (p.type || '').toLowerCase();
+    return type === 'scriptprocessor' || type === 'scriptprocessornode';
+  });
+  if (scriptProc) {
+    return 'ScriptProcessor';
+  }
+
+  // Look for any WebAudio processing nodes (not sources)
+  const webAudioNodes = mainChain.filter(p => {
+    const type = (p.type || '').toLowerCase();
+    // Exclude source nodes - we want processing nodes
+    return !type.includes('source') && !type.includes('element');
+  });
+
+  if (webAudioNodes.length > 0) {
+    // Return the last WebAudio node in the chain
+    const lastNode = webAudioNodes[webAudioNodes.length - 1];
+    const nodeType = formatWebAudioNodeType(lastNode.type);
+    return `WebAudio (${nodeType})`;
+  }
+
+  // Only source nodes - direct stream
+  const sourceNode = mainChain.find(p => {
+    const type = (p.type || '').toLowerCase();
+    return type.includes('source');
+  });
+  if (sourceNode) {
+    return 'MediaStream (direct)';
+  }
+
+  return null;
+}
+
+// Format WebAudio node type to readable name
+function formatWebAudioNodeType(type) {
+  if (!type) return 'Unknown';
+  const t = type.toLowerCase();
+
+  const nodeNames = {
+    'gain': 'Gain',
+    'gainnode': 'Gain',
+    'biquadfilter': 'Filter',
+    'biquadfilternode': 'Filter',
+    'dynamicscompressor': 'Compressor',
+    'dynamicscompressornode': 'Compressor',
+    'convolver': 'Convolver',
+    'convolvernode': 'Convolver',
+    'waveshaper': 'WaveShaper',
+    'waveshapernode': 'WaveShaper',
+    'panner': 'Panner',
+    'pannernode': 'Panner',
+    'stereopanner': 'Panner',
+    'stereopannernode': 'Panner',
+    'delay': 'Delay',
+    'delaynode': 'Delay',
+    'iirfilter': 'IIRFilter',
+    'iirfilternode': 'IIRFilter'
+  };
+
+  return nodeNames[t] || type;
 }
 
 // Format jitter (seconds to ms)
@@ -942,6 +1067,22 @@ function groupConsecutiveProcessors(processors) {
 }
 
 /**
+ * MediaStreamSource tekrarlarını (aynı zincirde ardışık ya da tekrarlı) tek girdiye indirger
+ * Görselde "mediaStreamSource(x3)" yerine tek kaynak gösterir.
+ */
+function dedupeMediaStreamSources(processors) {
+  if (!processors || processors.length === 0) return [];
+
+  let seen = false;
+  return processors.filter(proc => {
+    if (proc.type !== 'mediaStreamSource') return true;
+    if (seen) return false;
+    seen = true;
+    return true;
+  });
+}
+
+/**
  * Format a single processor for display (Option B - with parameters)
  * Includes count suffix if > 1
  * Returns object with { name, params, tooltip } for flexible rendering
@@ -1227,6 +1368,9 @@ function renderACStats(contexts, audioConnections = null) {
       ];
       console.log(`[AudioInspector] 🔍 Audio Path: FALLBACK applied! Added mediaStreamSource to chain`);
     }
+
+    // UI cleanliness: Show a single MediaStreamSource even if multiple captures were synced
+    mainProcessors = dedupeMediaStreamSources(mainProcessors);
     console.log(`[AudioInspector] 🔍 Audio Path: FINAL mainProcessors.length=${mainProcessors.length}`);
 
     const monitors = ctx.pipeline?.processors?.filter(p => p.type === 'analyser') || [];
@@ -1474,8 +1618,8 @@ function renderConnectionGraph(connections, contexts = []) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Array.find() returns the FIRST matching detector, so order determines priority:
 //
-// 1. WASM Encoder          → Highest priority (explicit, most reliable)
-//    - Direct encoder detection via libopus/libmp3lame/etc.
+// 1. Detected Encoder        → Highest priority (explicit, most reliable)
+//    - Direct encoder detection via WASM (libopus/libmp3lame), Blob analysis, etc.
 //    - Provides: codec, bitrate, sample rate, channels
 //    - Reliability: ★★★★★ (Kesin tespit)
 //
@@ -1484,12 +1628,22 @@ function renderConnectionGraph(connections, contexts = []) {
 //    - Provides: codec, bitrate, packetization
 //    - Reliability: ★★★★☆ (Stats API'den kesin)
 //
-// 3. MediaRecorder          → Medium-high priority (explicit from API)
+// 3. PendingMediaRecorder    → MediaRecorder active but mimeType empty
+//    - Catches edge case where browser hasn't set mimeType yet
+//    - Shows pulse animation until mimeType becomes available
+//    - Reliability: ★★★☆☆ (API var ama codec henüz bilinmiyor)
+//
+// 4. MediaRecorder           → Medium-high priority (explicit from API)
 //    - MediaRecorder.mimeType detection
 //    - Provides: codec, bitrate (if specified)
 //    - Reliability: ★★★★☆ (API'den kesin)
 //
-// 4. ScriptProcessor       → LOWEST priority (heuristic guess)
+// 5. PendingWebAudio         → WebAudio pipeline detected, encoder pending
+//    - AudioWorklet/ScriptProcessor with mic/system input
+//    - Shows pulse animation until Blob is created
+//    - Reliability: ★★★☆☆ (Pipeline var, encoder henüz bilinmiyor)
+//
+// 6. ScriptProcessor         → LOWEST priority (heuristic guess)
 //    - ScriptProcessor presence in AudioContext pipeline
 //    - Provides: educated guess (may encode to WAV/MP3)
 //    - Reliability: ★★☆☆☆ (Tahmin - guarantee yok)
@@ -1546,26 +1700,26 @@ const DETECTION_LABELS = {
 
 const ENCODER_DETECTORS = [
   {
-    name: 'WASM',
+    name: 'DetectedEncoder',
     detect: (data) => {
-      // Skip if no WASM encoder data
-      if (!data.wasmEncoder) return false;
+      // Skip if no encoder data detected
+      if (!data.detectedEncoder) return false;
 
-      // If MediaRecorder is ACTIVE and WASM encoder is from Blob detection only,
+      // If MediaRecorder is ACTIVE and encoder is from Blob detection only,
       // defer to MediaRecorder detector only when blob format matches MediaRecorder output.
       // Otherwise keep Blob signal (e.g., PCM/WAV export while a MediaRecorder exists on the page).
-      const isOnlyBlobDetection = data.wasmEncoder.pattern === 'audio-blob';
+      const isOnlyBlobDetection = data.detectedEncoder.pattern === 'audio-blob';
       const mr = data.mediaRecorder;
       const mrIsActive = mr?.state === 'recording' || mr?.state === 'paused';
       const hasActiveMediaRecorder = mrIsActive && !!mr?.mimeType && mr?.hasAudioTrack !== false;
       if (isOnlyBlobDetection && hasActiveMediaRecorder) {
         const normalizeMime = (m) => (typeof m === 'string' ? m.split(';')[0].trim().toLowerCase() : '');
-        const blobMimeBase = normalizeMime(data.wasmEncoder.mimeType);
+        const blobMimeBase = normalizeMime(data.detectedEncoder.mimeType);
         const mrMimeBase = normalizeMime(mr.mimeType);
         const sameBaseMime = blobMimeBase && mrMimeBase && blobMimeBase === mrMimeBase;
 
-        const blobCodec = String(data.wasmEncoder.codec || '').toLowerCase();
-        const blobContainer = String(data.wasmEncoder.container || '').toLowerCase();
+        const blobCodec = String(data.detectedEncoder.codec || '').toLowerCase();
+        const blobContainer = String(data.detectedEncoder.container || '').toLowerCase();
         const isWavLike = blobCodec === 'pcm' || blobContainer === 'wav' || blobMimeBase === 'audio/wav' || blobMimeBase === 'audio/wave';
 
         if (!isWavLike && sameBaseMime) {
@@ -1576,16 +1730,28 @@ const ENCODER_DETECTORS = [
       return true;
     },
     extract: (data) => {
-      const enc = data.wasmEncoder;
+      const enc = data.detectedEncoder;
 
       // Build codec display with application type suffix if available
       // e.g., "OPUS (VoIP)", "OPUS (Audio)", "OPUS (LowDelay)"
       const rawCodec = enc.codec ?? 'unknown';
       const isUnknownCodec = typeof rawCodec === 'string' && rawCodec.toLowerCase() === 'unknown';
+
+      const normalizeMime = (m) => (typeof m === 'string' ? m.split(';')[0].trim().toLowerCase() : '');
+      const mimeBase = normalizeMime(enc.mimeType);
+      const codecLower = String(rawCodec || '').toLowerCase();
+      const containerLower = String(enc.container || '').toLowerCase();
+      const isLinearPcmWav = codecLower === 'pcm' && (
+        containerLower === 'wav' ||
+        mimeBase === 'audio/wav' ||
+        mimeBase === 'audio/wave'
+      );
+
       // Show "Detecting..." for unknown codec (will be confirmed when Blob is created)
+      // Codec = format (PCM, OPUS, MP3), Encoder = process (Linear PCM, Opus WASM)
       const codecBase = isUnknownCodec
         ? renderStatusPulse('Detecting...', 'Codec will be confirmed when recording stops and audio file is created')
-        : String(rawCodec).toUpperCase();
+        : (isLinearPcmWav ? 'PCM' : String(rawCodec).toUpperCase());
       const codecDisplay = enc.applicationName
         ? `${codecBase} (${enc.applicationName})`
         : codecBase;
@@ -1595,55 +1761,64 @@ const ENCODER_DETECTORS = [
         { label: 'Codec', value: codecDisplay, isMetric: true }
       ];
 
-      // Encoder info (lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js)
-      // Note: PCM/WAV ("linear-pcm") is rendered as a friendly label in the Blob-only branch below.
-      const isLinearPcmBlob = String(enc.encoder || '').toLowerCase() === 'linear-pcm' && enc.pattern === 'audio-blob';
-      if (enc.encoder && !isLinearPcmBlob) {
-        rows.push({ label: 'Encoder', value: enc.encoder, isMetric: true });
+      // Encoder info (opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm)
+      // Always show Encoder row - use "-" if not available
+      if (enc.encoder) {
+        // Display encoder type (e.g., "opus-wasm" → "Opus (WASM)", "pcm" → "Linear PCM")
+        const encoderDisplay = formatEncoderDisplay(enc.encoder);
+
+        // Build tooltip with library info (if available)
+        const tooltipParts = [];
+        if (enc.library) tooltipParts.push(`Library: ${enc.library}`);
+        if (enc.workerFilename) tooltipParts.push(`Worker: ${enc.workerFilename}`);
+        if (enc.encoderPath) tooltipParts.push(`Path: ${String(enc.encoderPath).split('/').pop()}`);
+        const encoderTooltip = tooltipParts.length > 0 ? tooltipParts.join(' | ') : '';
+
+        rows.push({
+          label: 'Encoder',
+          value: encoderTooltip
+            ? `<span class="has-tooltip" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`
+            : encoderDisplay,
+          isMetric: true
+        });
+      } else {
+        rows.push({ label: 'Encoder', value: '-', isMetric: false });
       }
 
-      // Container format (OGG, WebM, MP4)
-      // If container is detected, show it. If not, show "Unknown" with tooltip
+      // Container format (OGG, WebM, WAV, MP4, etc.)
+      // Always show - use "-" if not detected
       if (enc.container) {
         rows.push({ label: 'Container', value: enc.container.toUpperCase(), isMetric: true });
       } else {
-        // Container not detected from encoder config
-        // This might happen if the site uses a custom encoder pattern
-        rows.push({
-          label: 'Container',
-          value: '<span class="has-tooltip" data-tooltip="Container format could not be detected from encoder config">Unknown</span>',
-          isMetric: false
-        });
+        rows.push({ label: 'Container', value: '-', isMetric: false });
       }
 
-      // Bitrate (if available, show VBR if not specified)
+      // Library (underlying C library: libopus, LAME, FDK AAC, etc.)
+      // Always show - use "-" if not available (e.g., PCM has no library)
+      if (enc.library) {
+        rows.push({ label: 'Library', value: enc.library, isMetric: true });
+      } else {
+        rows.push({ label: 'Library', value: '-', isMetric: false });
+      }
+
+      // Bit Depth (important for PCM/WAV - shows sample format: 16-bit int, 32-bit float, etc.)
+      if (enc.wavBitDepth) {
+        rows.push({ label: 'Bit Depth', value: `${enc.wavBitDepth}bit`, isMetric: true });
+      } else {
+        rows.push({ label: 'Bit Depth', value: '-', isMetric: false });
+      }
+
+      // Bitrate - always show, dynamically calculated from blob size / duration
       if (enc.bitRate && enc.bitRate > 0) {
         rows.push({ label: 'Bitrate', value: `${Math.round(enc.bitRate / 1000)} kbps`, isMetric: true });
       } else if (enc.isLiveEstimate === true) {
         rows.push({
           label: 'Bitrate',
-          value: '<span class="has-tooltip" data-tooltip="Recording in progress - bitrate will be calculated as more audio data is captured">Calculating...</span>',
+          value: '<span class="has-tooltip" data-tooltip="Recording in progress - bitrate will be calculated when recording stops">Calculating...</span>',
           isMetric: false
         });
-      } else if (enc.blobSize && enc.blobSize > 0) {
-        // Estimate bitrate from blob size (assume ~5 sec avg recording)
-        // Better: track actual duration, but this gives a rough estimate
-        const estimatedKbps = Math.round((enc.blobSize * 8) / 5 / 1000);
-        rows.push({
-          label: 'Bitrate',
-          value: `<span class="has-tooltip" data-tooltip="Estimated from ${(enc.blobSize / 1024).toFixed(1)}KB blob (assumes ~5s recording)">~${estimatedKbps} kbps</span>`,
-          isMetric: true
-        });
-      } else if (enc.codec?.toLowerCase() === 'opus' || !enc.codec) {
-        // Opus typically uses VBR when bitrate not specified
-        rows.push({ label: 'Bitrate', value: 'VBR', isMetric: true });
       } else {
-        // MP3 without bitrate - show "Unknown" with tooltip
-        rows.push({
-          label: 'Bitrate',
-          value: '<span class="has-tooltip" data-tooltip="Bitrate not specified in encoder config. Site may use default (128-256 kbps for MP3).">Unknown</span>',
-          isMetric: false
-        });
+        rows.push({ label: 'Bitrate', value: '-', isMetric: false });
       }
 
       // Frame size (if available) - smart unit detection for Opus
@@ -1654,33 +1829,29 @@ const ENCODER_DETECTORS = [
         rows.push({ label: 'Frame', value: `${enc.frameSize} ${unit}`, isMetric: false });
       }
 
-      // NOTE: Worker/Worklet implementation details are shown via "Confidence" (via ...)
-      // to avoid duplicating "Encoder" with technical filenames (e.g., encoderWorker.min.js).
+      // Input: Detect technology from AudioContext pipeline
+      // Shows WHAT TECHNOLOGY processes audio before encoding (Worklet > ScriptProcessor > WebAudio)
+      const deriveEncoderInput = () => {
+        const contexts = Array.isArray(data.audioContext)
+          ? data.audioContext
+          : (data.audioContext ? [data.audioContext] : []);
 
-      // Input source - get from MediaRecorder if available (shows audio origin)
-      // This is useful when WASM encoder is used with MediaRecorder
-      console.log('[Popup] WASM Input Debug:', {
-        hasMediaRecorder: !!data.mediaRecorder,
-        mediaRecorderAudioSource: data.mediaRecorder?.audioSource,
-        mediaRecorderHasAudioTrack: data.mediaRecorder?.hasAudioTrack
-      });
-      if (data.mediaRecorder?.hasAudioTrack) {
-        const inputInfo = getInputSourceInfo(data.mediaRecorder.audioSource, true);
-        console.log('[Popup] WASM getInputSourceInfo result:', inputInfo);
-        if (inputInfo) {
-          rows.push({
-            label: 'Input',
-            value: inputInfo.tooltip
-              ? `<span class="has-tooltip" data-tooltip="${inputInfo.tooltip}">${inputInfo.icon} ${inputInfo.label}</span>`
-              : `${inputInfo.icon} ${inputInfo.label}`,
-            isMetric: false
-          });
-        } else {
-          console.log('[Popup] ⚠️ WASM inputInfo is null');
+        for (const ctx of contexts) {
+          const processors = ctx?.pipeline?.processors || [];
+          if (processors.length === 0) continue;
+
+          const technology = detectEncoderInputTechnology(processors);
+          if (technology) return technology;
         }
-      } else {
-        console.log('[Popup] ⚠️ WASM: No MediaRecorder or no audio track');
-      }
+        return null;
+      };
+
+      const encoderInput = deriveEncoderInput();
+      rows.push({
+        label: 'Input',
+        value: encoderInput || '-',
+        isMetric: !!encoderInput
+      });
 
       // Confidence indicator with source info on separate line
       // Note: Blob URL UUIDs are filtered at source (early-inject.js)
@@ -1751,6 +1922,71 @@ const ENCODER_DETECTORS = [
       };
     }
   },
+  // ─────────────────────────────────────────────────────────────────────
+  // PendingMediaRecorder Detector
+  // ─────────────────────────────────────────────────────────────────────
+  // Detects MediaRecorder that is actively recording but mimeType is not yet available.
+  // Some browsers/sites don't set mimeType until start() or first dataavailable event.
+  // This ensures we show "recording in progress" instead of "no encoder".
+  // Priority: BEFORE MediaRecorder (catches the "mimeType empty" edge case)
+  // ─────────────────────────────────────────────────────────────────────
+  {
+    name: 'PendingMediaRecorder',
+    detect: (data) => {
+      const mr = data.mediaRecorder;
+      if (!mr) return false;
+      const isActive = mr.state === 'recording' || mr.state === 'paused';
+      const hasMimeType = !!mr.mimeType;
+      // Active MediaRecorder without mimeType
+      return isActive && !hasMimeType;
+    },
+    extract: (data) => {
+      const mr = data.mediaRecorder;
+      const inputInfo = getInputSourceInfo(mr.audioSource, mr.hasAudioTrack);
+
+      const rows = [
+        {
+          label: 'Codec',
+          value: renderStatusPulse('Detecting...', 'Codec will be determined when first audio data is available'),
+          isMetric: false
+        },
+        {
+          label: 'Container',
+          value: renderStatusPulse('Detecting...', 'Container format will be determined from mimeType'),
+          isMetric: false
+        },
+        {
+          label: 'Bitrate',
+          value: mr.audioBitsPerSecond
+            ? `${Math.round(mr.audioBitsPerSecond / 1000)} kbps`
+            : renderStatusPulse('Detecting...', 'Bitrate will be available when encoding starts'),
+          isMetric: !!mr.audioBitsPerSecond
+        },
+        {
+          label: 'Encoder',
+          value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in MediaRecorder API">🌐 MediaRecorder API</span>',
+          isMetric: true
+        },
+        {
+          label: 'State',
+          value: `<span class="badge badge-code">${mr.state}</span>`,
+          isMetric: false
+        }
+      ];
+
+      // Add input source if available
+      const inputRow = buildInputRow(inputInfo);
+      if (inputRow) rows.push(inputRow);
+
+      return {
+        codec: 'Detecting...',
+        bitrateKbps: '-',
+        source: 'MediaRecorder',
+        timestamp: mr.timestamp || Date.now(),
+        rows
+      };
+    }
+  },
   {
     name: 'MediaRecorder',
     detect: (data) => !!data.mediaRecorder?.mimeType,
@@ -1815,14 +2051,9 @@ const ENCODER_DETECTORS = [
       });
       const inputInfo = getInputSourceInfo(mr.audioSource, mr.hasAudioTrack);
       console.log('[Popup] getInputSourceInfo result:', inputInfo);
-      if (inputInfo) {
-        rows.push({
-          label: 'Input',
-          value: inputInfo.tooltip
-            ? `<span class="has-tooltip" data-tooltip="${inputInfo.tooltip}">${inputInfo.icon} ${inputInfo.label}</span>`
-            : `${inputInfo.icon} ${inputInfo.label}`,
-          isMetric: false
-        });
+      const inputRow = buildInputRow(inputInfo);
+      if (inputRow) {
+        rows.push(inputRow);
       } else {
         console.log('[Popup] ⚠️ inputInfo is null - Input row NOT added');
       }
@@ -1839,18 +2070,28 @@ const ENCODER_DETECTORS = [
   {
     name: 'PendingWebAudio',
     detect: (data) => {
-      if (data.wasmEncoder) return false;
+      // ═══════════════════════════════════════════════════════════════════
+      // SINGLE SOURCE OF TRUTH: Use recordingActive from early-inject.js
+      // This is the ONLY reliable indicator - no complex heuristics needed
+      // ═══════════════════════════════════════════════════════════════════
+      if (data.detectedEncoder) return false;
       if (data.rtcStats?.peerConnections?.length > 0) return false;
       if (data.mediaRecorder?.mimeType) return false;
       if (!data.audioContext) return false;
 
+      // Check for active audio pipeline with microphone input
       const contexts = Array.isArray(data.audioContext) ? data.audioContext : [data.audioContext];
-      return contexts.some(ctx => {
+      const hasActiveAudioPipeline = contexts.some(ctx => {
         const input = ctx?.pipeline?.inputSource;
         const processors = ctx?.pipeline?.processors || [];
         const hasProcessing = processors.some(p => p.type === 'audioWorkletNode' || p.type === 'scriptProcessor');
         return (input === 'microphone' || input === 'system' || input === 'synthesized') && hasProcessing;
       });
+
+      if (!hasActiveAudioPipeline) return false;
+
+      // SIMPLE: Just check if recording is active (set by MediaRecorder.start or Blob tracking)
+      return data.recordingActive?.active === true;
     },
     extract: (data) => {
       const contexts = Array.isArray(data.audioContext) ? data.audioContext : [data.audioContext];
@@ -1867,6 +2108,9 @@ const ENCODER_DETECTORS = [
         ? 'AudioWorklet'
         : (processors.some(p => p.type === 'scriptProcessor') ? 'ScriptProcessor' : 'WebAudio');
 
+      // Derive Input from AudioContext pipeline (this CAN be detected during recording)
+      const encoderInput = detectEncoderInputTechnology(processors);
+
       return {
         codec: 'Detecting...',
         bitrateKbps: '-',
@@ -1875,22 +2119,42 @@ const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: renderStatusPulse('Detecting...', 'No encoder evidence yet. Codec will be confirmed when encoding starts or when the final audio Blob is created.'),
-            isMetric: true
-          },
-          {
-            label: 'Bitrate',
-            value: renderStatusPulse('Waiting...', 'Waiting for encoding data. This path may encode only when recording stops.'),
+            value: renderStatusPulse('Detecting...', 'Codec will be confirmed when the final audio Blob is created.'),
             isMetric: false
           },
           {
             label: 'Encoder',
-            value: renderStatusPulse('Pending...', `WebAudio pipeline detected (${pipelineType}). No explicit encoder detected yet.`),
+            value: renderStatusPulse('Detecting...', `WebAudio pipeline detected (${pipelineType}). Encoder will be confirmed when encoding starts.`),
             isMetric: false
           },
           {
+            label: 'Container',
+            value: renderStatusPulse('Detecting...', 'Container format will be determined from the output Blob mimeType.'),
+            isMetric: false
+          },
+          {
+            label: 'Library',
+            value: renderStatusPulse('Detecting...', 'Underlying library (libopus, LAME, etc.) will be detected from WASM/Worker analysis.'),
+            isMetric: false
+          },
+          {
+            label: 'Bit Depth',
+            value: renderStatusPulse('Detecting...', 'Bit depth will be extracted from WAV header or encoder config.'),
+            isMetric: false
+          },
+          {
+            label: 'Bitrate',
+            value: renderStatusPulse('Calculating...', 'Bitrate will be calculated from Blob size and duration when recording stops.'),
+            isMetric: false
+          },
+          {
+            label: 'Input',
+            value: `<span class="has-tooltip" data-tooltip="Audio processing technology detected in WebAudio pipeline">${encoderInput || pipelineType}</span>`,
+            isMetric: true
+          },
+          {
             label: 'Confidence',
-            value: renderStatusPulse('Pending...', 'This is a heuristic based on the detected WebAudio pipeline, not a confirmed codec.'),
+            value: renderStatusPulse('Pending...', 'Confidence will be determined based on detection evidence.'),
             isMetric: false
           }
         ]
@@ -1955,22 +2219,25 @@ const ENCODER_DETECTORS = [
 ];
 
 // Render Encoding section - OCP compliant with detector pattern
-function renderEncodingSection(wasmEncoder, rtcStats, mediaRecorder, audioContext) {
+function renderEncodingSection(detectedEncoder, rtcStats, mediaRecorder, audioContext, userMedia, recordingActive) {
   const container = document.getElementById('encodingContent');
   const timestamp = document.getElementById('encodingTimestamp');
   if (!container) return;
 
-  const data = { wasmEncoder, rtcStats, mediaRecorder, audioContext };
+  const data = { detectedEncoder, rtcStats, mediaRecorder, audioContext, userMedia, recordingActive };
 
   // DEBUG: Log all available data
   console.log('[Popup] renderEncodingSection data:', {
-    hasWasmEncoder: !!wasmEncoder,
-    wasmEncoderPattern: wasmEncoder?.pattern,
+    hasDetectedEncoder: !!detectedEncoder,
+    detectedEncoderPattern: detectedEncoder?.pattern,
     hasRtcStats: !!rtcStats,
     hasMediaRecorder: !!mediaRecorder,
+    mediaRecorderState: mediaRecorder?.state,
     mediaRecorderAudioSource: mediaRecorder?.audioSource,
-    mediaRecorderHasAudioTrack: mediaRecorder?.hasAudioTrack,
-    hasAudioContext: !!audioContext
+    hasAudioContext: !!audioContext,
+    hasUserMedia: !!userMedia,
+    userMediaTimestamp: userMedia?.timestamp,
+    recordingActive: recordingActive?.active
   });
 
   // Find first matching detector (priority order maintained by array order)
@@ -2008,7 +2275,7 @@ function renderEncodingSection(wasmEncoder, rtcStats, mediaRecorder, audioContex
 /**
  * Get input source display info for MediaRecorder
  * Shows where the audio stream originates from
- * @param {string} audioSource - 'microphone', 'system', 'synthesized', 'unknown', 'none'
+ * @param {string} audioSource - 'microphone', 'system', 'synthesized', 'remote', 'unknown', 'none'
  * @param {boolean} hasAudioTrack - Whether the stream has an audio track
  * @returns {{icon: string, label: string, tooltip?: string}|null}
  */
@@ -2036,6 +2303,12 @@ function getInputSourceInfo(audioSource, hasAudioTrack) {
         label: 'Web Audio',
         tooltip: 'Audio routed through Web Audio API (createMediaStreamDestination). PCM data may be processed via ScriptProcessor or AudioWorklet before encoding.'
       };
+    case 'remote':
+      return {
+        icon: '📡',
+        label: 'Remote',
+        tooltip: 'Remote audio stream routed into the page (e.g., WebRTC remote track)'
+      };
     case 'unknown':
       return {
         icon: '❓',
@@ -2046,6 +2319,23 @@ function getInputSourceInfo(audioSource, hasAudioTrack) {
       // 'none' or truly undefined - don't show
       return null;
   }
+}
+
+/**
+ * Build Input row object for ENCODER_DETECTORS
+ * Centralizes input row creation to avoid DRY violations
+ * @param {ReturnType<typeof getInputSourceInfo>} inputInfo - Result from getInputSourceInfo
+ * @returns {{label: string, value: string, isMetric: boolean}|null}
+ */
+function buildInputRow(inputInfo) {
+  if (!inputInfo) return null;
+  return {
+    label: 'Input',
+    value: inputInfo.tooltip
+      ? `<span class="has-tooltip" data-tooltip="${inputInfo.tooltip}">${inputInfo.icon} ${inputInfo.label}</span>`
+      : `${inputInfo.icon} ${inputInfo.label}`,
+    isMetric: false
+  };
 }
 
 // Determine log line color class based on message content

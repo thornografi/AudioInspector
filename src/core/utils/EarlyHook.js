@@ -236,26 +236,47 @@ function hookAudioWorkletNodePort(node, processorName) {
         return 'unknown'; // don't guess - blob can confirm post-hoc
       };
 
-      // Detect encoder from processor name
-      const detectEncoderFromName = (name, codec) => {
+      // Get generic encoder type from codec (process type, not library)
+      const getEncoderType = (codec) => {
+        const encoderTypes = {
+          mp3: 'mp3-wasm',
+          opus: 'opus-wasm',
+          aac: 'aac-wasm',
+          vorbis: 'vorbis-wasm',
+          flac: 'flac-wasm',
+          pcm: 'pcm'
+        };
+        return encoderTypes[codec] || null;
+      };
+
+      // Detect underlying library from processor name
+      const detectLibraryFromName = (name, codec) => {
         const n = (name || '').toLowerCase();
-        if (n.includes('lame')) return 'lamejs';
-        if (n.includes('fdk')) return 'fdk-aac.js';
-        if (n.includes('libopus') || n.includes('opus')) return 'opus-recorder';
-        if (n.includes('libvorbis') || n.includes('vorbis')) return 'vorbis.js';
-        if (n.includes('libflac') || n.includes('flac')) return 'libflac.js';
+        if (n.includes('lame')) return 'LAME';
+        if (n.includes('fdk')) return 'FDK AAC';
+        if (n.includes('libopus') || n.includes('opus')) return 'libopus';
+        if (n.includes('libvorbis') || n.includes('vorbis')) return 'libvorbis';
+        if (n.includes('libflac') || n.includes('flac')) return 'libFLAC';
         // Default by codec
-        const defaults = { opus: 'opus-recorder', mp3: 'lamejs', aac: 'fdk-aac.js', vorbis: 'vorbis.js', flac: 'libflac.js' };
-        return defaults[codec] || null;
+        const defaultLibraries = {
+          opus: 'libopus',
+          mp3: 'LAME',
+          aac: 'FDK AAC',
+          vorbis: 'libvorbis',
+          flac: 'libFLAC'
+        };
+        return defaultLibraries[codec] || null;
       };
 
       if (looksLikeEncoder && (message.type === 'init' || message.init === true) && (message.sampleRate || message.rate)) {
         const codec = detectCodecFromName(processorName);
-        const encoder = detectEncoderFromName(processorName, codec);
+        const encoder = getEncoderType(codec);
+        const library = detectLibraryFromName(processorName, codec);
 
         encoderInfo = {
           type: codec,
-          encoder: encoder,
+          encoder: encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           sampleRate: message.sampleRate || message.rate || 48000,
           bitRate: message.bitRate || message.bitrate || 0,
           channels: message.channels || message.channelCount || 1,
@@ -285,7 +306,8 @@ function hookAudioWorkletNodePort(node, processorName) {
         else if (config.vorbisQuality) codec = 'vorbis';
         else if (config.flacCompression) codec = 'flac';
 
-        const encoder = detectEncoderFromName(processorName, codec);
+        const encoder = getEncoderType(codec);
+        const library = detectLibraryFromName(processorName, codec);
 
         // Container format detection (audio-only: OGG, WebM - not MP4/M4A which don't support Opus)
         // streamPages/maxFramesPerPage indicates OGG container (page-based format)
@@ -304,7 +326,8 @@ function hookAudioWorkletNodePort(node, processorName) {
 
         encoderInfo = {
           type: codec,
-          encoder: encoder,
+          encoder: encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           sampleRate: config.encoderSampleRate || config.sampleRate || 48000,
           originalSampleRate: config.originalSampleRate || null,
           bitRate: config.encoderBitRate || config.bitRate || config.mp3BitRate || 0,
@@ -333,11 +356,11 @@ function hookAudioWorkletNodePort(node, processorName) {
       // Notify handler if encoder detected
       if (encoderInfo) {
         // @ts-ignore
-        if (window.__wasmEncoderHandler) {
+        if (window.__detectedEncoderHandler) {
           // @ts-ignore
-          window.__wasmEncoderDetected = encoderInfo;
+          window.__detectedEncoderData = encoderInfo;
           // @ts-ignore
-          window.__wasmEncoderHandler(encoderInfo);
+          window.__detectedEncoderHandler(encoderInfo);
 
           logger.info(
             LOG_PREFIX.INSPECTOR,
@@ -557,42 +580,51 @@ export function installEarlyHooks() {
         return 'unknown';
       };
 
-      // Helper: Detect encoder name from worker URL or message
-      const detectEncoderName = (msg, codecType) => {
+      // Helper: Get generic encoder type from codec (process type, not library)
+      const getEncoderTypeForWorker = (codec) => {
+        const encoderTypes = {
+          mp3: 'mp3-wasm',
+          opus: 'opus-wasm',
+          aac: 'aac-wasm',
+          vorbis: 'vorbis-wasm',
+          flac: 'flac-wasm',
+          pcm: 'pcm'
+        };
+        return encoderTypes[codec] || null;
+      };
+
+      // Helper: Detect underlying library from worker URL or message
+      const detectLibraryFromWorker = (msg, codecType) => {
         // Worker URL'den tespit (daha güvenilir)
         const workerUrl = msg.encoderPath || msg.wasmPath || '';
         const workerUrlLower = workerUrl.toLowerCase();
 
-        // lamejs patterns
+        // Library detection from URL
         if (workerUrlLower.includes('lame') || workerUrlLower.includes('mp3')) {
-          return 'lamejs';
+          return 'LAME';
         }
-        // opus-recorder patterns
-        if (workerUrlLower.includes('opus')) {
-          return 'opus-recorder';
+        if (workerUrlLower.includes('opus') || workerUrlLower.includes('libopus')) {
+          return 'libopus';
         }
-        // fdk-aac.js patterns
         if (workerUrlLower.includes('fdk') || workerUrlLower.includes('aac')) {
-          return 'fdk-aac.js';
+          return 'FDK AAC';
         }
-        // vorbis.js patterns
         if (workerUrlLower.includes('vorbis') || workerUrlLower.includes('ogg')) {
-          return 'vorbis.js';
+          return 'libvorbis';
         }
-        // libflac.js patterns
         if (workerUrlLower.includes('flac')) {
-          return 'libflac.js';
+          return 'libFLAC';
         }
 
-        // Codec'den varsayılan encoder
-        const defaultEncoders = {
-          opus: 'opus-recorder',
-          mp3: 'lamejs',
-          aac: 'fdk-aac.js',
-          vorbis: 'vorbis.js',
-          flac: 'libflac.js'
+        // Codec'den varsayılan library
+        const defaultLibraries = {
+          opus: 'libopus',
+          mp3: 'LAME',
+          aac: 'FDK AAC',
+          vorbis: 'libvorbis',
+          flac: 'libFLAC'
         };
-        return defaultEncoders[codecType] || null;
+        return defaultLibraries[codecType] || null;
       };
 
       // Helper: Detect container format from message properties
@@ -667,11 +699,13 @@ export function installEarlyHooks() {
       if (message.command === 'init' && (message.encoderSampleRate || message.sampleRate)) {
         const codec = detectCodecType(message);
         const container = detectContainer(message);
-        const encoder = detectEncoderName(message, codec);
+        const encoder = getEncoderTypeForWorker(codec);
+        const library = detectLibraryFromWorker(message, codec);
 
         encoderInfo = {
           type: codec,
-          encoder: encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
+          encoder: encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           sampleRate: message.encoderSampleRate || message.sampleRate,
           bitRate: message.encoderBitRate || message.bitRate || message.mp3BitRate || 0,
           channels: message.numberOfChannels || message.channels || 1,
@@ -693,11 +727,13 @@ export function installEarlyHooks() {
         const config = message.message.config;
         const codec = detectCodecType(config);
         const container = detectContainer(config);
-        const encoder = detectEncoderName(config, codec);
+        const encoder = getEncoderTypeForWorker(codec);
+        const library = detectLibraryFromWorker(config, codec);
 
         encoderInfo = {
           type: codec,
-          encoder: encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
+          encoder: encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           sampleRate: config.encoderSampleRate || config.sampleRate || 0,
           bitRate: config.bitRate || config.encoderBitRate || config.mp3BitRate || 0,
           channels: config.numberOfChannels || config.channels || 1,
@@ -721,11 +757,13 @@ export function installEarlyHooks() {
         const config = message.config || message;
         const codec = detectCodecType(config);
         const container = detectContainer(config);
-        const encoder = detectEncoderName(config, codec);
+        const encoder = getEncoderTypeForWorker(codec);
+        const library = detectLibraryFromWorker(config, codec);
 
         encoderInfo = {
           type: codec,
-          encoder: encoder,  // lamejs, opus-recorder, fdk-aac.js, vorbis.js, libflac.js
+          encoder: encoder,  // opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm
+          library: library,  // libopus, LAME, FDK AAC, libvorbis, libFLAC
           sampleRate: config.sampleRate || 44100,
           bitRate: config.bitRate || config.kbps || 128000,
           channels: config.channels || config.numChannels || 2,
@@ -769,12 +807,12 @@ export function installEarlyHooks() {
         }
 
         // @ts-ignore - Only notify if handler is registered (collector active)
-        if (window.__wasmEncoderHandler) {
+        if (window.__detectedEncoderHandler) {
           // Store globally for late-discovery ONLY when collector is active
           // @ts-ignore
-          window.__wasmEncoderDetected = encoderInfo;
+          window.__detectedEncoderData = encoderInfo;
           // @ts-ignore
-          window.__wasmEncoderHandler(encoderInfo);
+          window.__detectedEncoderHandler(encoderInfo);
 
           const workerInfo = encoderInfo.workerFilename ? ` [${encoderInfo.workerFilename}]` : '';
           const encoderNameInfo = encoderInfo.encoder ? ` (${encoderInfo.encoder})` : '';
@@ -788,20 +826,20 @@ export function installEarlyHooks() {
 
       // If encode data detected, update status to 'encoding'
       // @ts-ignore - Only process if handler is active and encoder was detected
-      if (isEncodeData && window.__wasmEncoderDetected && window.__wasmEncoderHandler) {
+      if (isEncodeData && window.__detectedEncoderData && window.__detectedEncoderHandler) {
         // @ts-ignore
-        if (window.__wasmEncoderDetected.status !== 'encoding') {
+        if (window.__detectedEncoderData.status !== 'encoding') {
           // @ts-ignore
-          window.__wasmEncoderDetected.status = 'encoding';
+          window.__detectedEncoderData.status = 'encoding';
           // @ts-ignore
-          window.__wasmEncoderDetected.firstEncodeTimestamp = Date.now();
+          window.__detectedEncoderData.firstEncodeTimestamp = Date.now();
 
           // Notify handler of status change
           // @ts-ignore
-          window.__wasmEncoderHandler(window.__wasmEncoderDetected);
+          window.__detectedEncoderHandler(window.__detectedEncoderData);
 
           // @ts-ignore
-          logger.info(LOG_PREFIX.INSPECTOR, `🔧 WASM ${window.__wasmEncoderDetected.type?.toUpperCase() || 'AUDIO'} encoder ACTIVELY ENCODING`);
+          logger.info(LOG_PREFIX.INSPECTOR, `🔧 ${window.__detectedEncoderData.type?.toUpperCase() || 'AUDIO'} encoder ACTIVELY ENCODING`);
         }
       }
     }

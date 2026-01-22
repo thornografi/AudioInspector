@@ -7,8 +7,8 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 const DATA_STORAGE_KEYS = [
   'rtc_stats', 'user_media', 'audio_contexts',
-  'audio_worklet', 'media_recorder', 'wasm_encoder',
-  'audio_connections'
+  'audio_worklet', 'media_recorder', 'detected_encoder',  // Renamed from wasm_encoder
+  'audio_connections', 'recording_active'
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════

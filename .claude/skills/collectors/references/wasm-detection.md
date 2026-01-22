@@ -1,16 +1,26 @@
 # WASM Encoder Detection
 
-WASM encoder'ları (opus-recorder, lamejs, vb.) tespit mekanizması.
+WASM encoder'ları tespit mekanizması.
+
+## Terminoloji
+
+| Field | Açıklama | Örnek Değerler |
+|-------|----------|----------------|
+| **encoder** | Process tipi (generic) | `opus-wasm`, `mp3-wasm`, `pcm` |
+| **library** | Underlying C library | `libopus`, `LAME`, `FDK AAC` |
+| **codec** | Ses formatı | `opus`, `mp3`, `aac`, `pcm` |
+| **container** | Dosya formatı | `ogg`, `webm`, `wav`, `mp3` |
 
 ## Desteklenen Codec'ler ve Kütüphaneler
 
-| Codec | Library | Container |
-|-------|---------|-----------|
-| Opus | libopus (opus-recorder) | OGG, WebM |
-| MP3 | LAME (lamejs) | MP3 |
-| AAC | FDK AAC (fdk-aac.js) | AAC, MP4 |
-| Vorbis | libvorbis (vorbis.js) | OGG |
-| FLAC | libFLAC (libflac.js) | FLAC |
+| Codec | Encoder | Library | Container |
+|-------|---------|---------|-----------|
+| Opus | opus-wasm | libopus | OGG, WebM |
+| MP3 | mp3-wasm | LAME | MP3 |
+| AAC | aac-wasm | FDK AAC | AAC, MP4 |
+| Vorbis | vorbis-wasm | libvorbis | OGG |
+| FLAC | flac-wasm | libFLAC | FLAC |
+| PCM | pcm | - | WAV |
 
 ## ENCODER_KEYWORDS
 
@@ -61,9 +71,9 @@ Worker.prototype.postMessage = function(message, ...args) {
   }
 
   // Handler'a bildir (collector aktifse)
-  if (encoderInfo && window.__wasmEncoderHandler) {
-    window.__wasmEncoderDetected = encoderInfo;
-    window.__wasmEncoderHandler(encoderInfo);
+  if (encoderInfo && window.__detectedEncoderHandler) {
+    window.__detectedEncoderData = encoderInfo;
+    window.__detectedEncoderHandler(encoderInfo);
   }
 
   return originalPostMessage.apply(this, [message, ...args]);
@@ -146,10 +156,13 @@ instance.addEventListener('start', () => {
   window.__recordingState.duration = null;
 
   // Stale encoder data önleme - yeni kayıtta reset
-  window.__wasmEncoderDetected = null;
+  window.__detectedEncoderData = null;
   if (window.__newRecordingSessionHandler) {
     window.__newRecordingSessionHandler();
   }
+
+  // Recording state'i storage'a bildir (popup için)
+  broadcastRecordingState(true);
 });
 
 instance.addEventListener('stop', () => {
@@ -205,12 +218,13 @@ Tam encoderInfo nesnesi:
 {
   type: 'opus',              // codec type
   codec: 'opus',             // alias
-  library: 'libopus',        // LAME, libopus, FDK AAC, libvorbis, libFLAC
-  encoder: 'opus-recorder',  // npm package name
-  container: 'ogg',          // ogg, webm, mp3, aac, flac
+  encoder: 'opus-wasm',      // process type: opus-wasm, mp3-wasm, pcm, etc.
+  library: 'libopus',        // underlying C library: libopus, LAME, FDK AAC, etc.
+  container: 'ogg',          // ogg, webm, mp3, aac, flac, wav
   sampleRate: 48000,
   bitRate: 128000,
   channels: 1,
+  wavBitDepth: 16,           // PCM/WAV: 16, 24, 32 bit
   frameSize: 20,             // ms (opus-specific)
   application: 2049,         // opus: 2048=VoIP, 2049=Audio, 2051=LowDelay
   applicationName: 'Audio',
@@ -225,10 +239,10 @@ Tam encoderInfo nesnesi:
 }
 ```
 
-## WASM Encoder Bağımsızlığı
+## Encoder Bağımsızlığı
 
-**ÖNEMLİ:** WASM encoder AudioContext'e **bağlanmaz** - sampleRate eşleştirme güvenilir değil.
+**ÖNEMLİ:** Encoder (WASM, PCM, native) AudioContext'e **bağlanmaz** - sampleRate eşleştirme güvenilir değil.
 
-- `wasm_encoder` ayrı storage key
+- `detected_encoder` ayrı storage key
 - UI'da bağımsız sinyal olarak gösterilir
 - AudioContext pipeline'ından ayrı

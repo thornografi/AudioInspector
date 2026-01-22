@@ -85,7 +85,7 @@ this.collectors = [..., new MyCollector()];
 | `DATA_TYPES.AUDIO_CONTEXT` | `'audioContext'` | AudioContext metadata |
 | `DATA_TYPES.AUDIO_WORKLET` | `'audioWorklet'` | AudioWorklet module |
 | `DATA_TYPES.MEDIA_RECORDER` | `'mediaRecorder'` | MediaRecorder bilgisi |
-| `DATA_TYPES.WASM_ENCODER` | `'wasmEncoder'` | WASM encoder (bağımsız) |
+| `DATA_TYPES.DETECTED_ENCODER` | `'detectedEncoder'` | Encoder tespiti (WASM, PCM, native) |
 | `DATA_TYPES.AUDIO_CONNECTION` | `'audioConnection'` | Audio graph bağlantıları |
 | `DATA_TYPES.PLATFORM_DETECTED` | `'platform_detected'` | Platform algılama |
 
