@@ -626,13 +626,13 @@ function renderRTCStats(data) {
   const connInfo = connCount > 0 ? ` (${connCount})` : '';
 
   let sendHtml = `<div class="rtc-column">
-    <div class="rtc-column-header">
+    <div class="sub-header sub-header--rtc">
       <span class="direction-icon send">TX</span>
       Outgoing${connInfo}
     </div>`;
 
   let recvHtml = `<div class="rtc-column">
-    <div class="rtc-column-header">
+    <div class="sub-header sub-header--rtc">
       <span class="direction-icon recv">RX</span>
       Incoming
     </div>`;
@@ -1083,6 +1083,496 @@ function dedupeMediaStreamSources(processors) {
 }
 
 /**
+ * Extract Processing and Effects info from processors
+ *
+ * Processing: AudioWorklet veya ScriptProcessor (ses işleme)
+ * Effects: Sadece GERÇEK ses efektleri (Filter, Reverb, Delay, vb.)
+ *
+ * NOT effect olanlar:
+ * - Volume/Gain: Ses seviyesi kontrolü, effect değil
+ * - Processor: Zaten Processing'de gösteriliyor
+ * - Analyzer: Monitoring, effect değil
+ *
+ * @param {Array} mainProcessors - Main chain processors
+ * @param {Array} monitors - Analyser nodes
+ * @returns {{ processingText: string, effectsText: string }}
+ */
+function extractProcessingInfo(mainProcessors, monitors) {
+  let processingText = '';
+  let effectsText = '';
+
+  // Processing: Worklet veya ScriptProcessor bilgisi
+  const worklet = mainProcessors.find(p => p.type === 'audioWorkletNode');
+  const scriptProc = mainProcessors.find(p => p.type === 'scriptProcessor');
+
+  if (worklet) {
+    const procName = worklet.processorName || 'processor';
+    // Kısa isim: passthrough-processor → passthrough
+    const shortName = procName.replace(/-processor$/, '');
+    processingText = `Worklet (${shortName})`;
+  } else if (scriptProc) {
+    processingText = 'ScriptProcessor';
+  }
+
+  // Effects: SADECE gerçek ses efektleri
+  // Volume/Gain = effect DEĞİL (ses seviyesi kontrolü)
+  // Processor = effect DEĞİL (zaten Processing'de)
+  // Analyzer = effect DEĞİL (monitoring)
+  const effectNodes = [];
+
+  mainProcessors.forEach(p => {
+    // Gerçek efektler
+    if (p.type === 'biquadFilter') effectNodes.push('Filter');
+    else if (p.type === 'convolver') effectNodes.push('Reverb');
+    else if (p.type === 'delay') effectNodes.push('Delay');
+    else if (p.type === 'dynamicsCompressor') effectNodes.push('Compressor');
+    else if (p.type === 'waveShaper') effectNodes.push('Distortion');
+    else if (p.type === 'stereoPanner') effectNodes.push('Panner');
+    else if (p.type === 'panner') effectNodes.push('3D Panner');
+    // NOT: gain, audioWorkletNode, scriptProcessor, analyser → effect DEĞİL
+  });
+
+  // Unique efektler - boşsa gösterme
+  const uniqueEffects = [...new Set(effectNodes)];
+  if (uniqueEffects.length > 0) {
+    effectsText = uniqueEffects.join(', ');
+  }
+
+  return { processingText, effectsText };
+}
+
+/**
+ * Render Audio Path as nested ASCII tree with tooltips
+ * Tree yapısı (Encoder son node - AudioContext'in çıkışı):
+ *   Microphone                     [tooltip: MediaStreamAudioSourceNode]
+ *   └── Processor (passthrough)    [tooltip: AudioWorkletNode]
+ *       └── Volume (pass)          [tooltip: GainNode]
+ *           ├── Encoder (output)   [tooltip: Audio output to encoding pipeline]
+ *           └── Analyzer           [tooltip: AnalyserNode - monitoring]
+ *
+ * @param {Array} mainProcessors - Main chain processors
+ * @param {Array} monitors - Analyser nodes (side-tap, monitoring)
+ * @param {string} inputSource - Input source type ('microphone', 'remote', etc.)
+ * @returns {string} HTML string for tree
+ */
+function renderAudioPathTree(mainProcessors, monitors, inputSource) {
+  if ((!mainProcessors || mainProcessors.length === 0) && !inputSource) {
+    return '<div class="no-data">No audio path</div>';
+  }
+
+  // Build nested tree structure
+  // Her node: { label, param?, tooltip?, children: [], isMonitor?, isEncoder? }
+  const buildNestedTree = () => {
+    // Root: Input source (tooltip ile birlikte)
+    const rootLabel = inputSource
+      ? inputSource.charAt(0).toUpperCase() + inputSource.slice(1)
+      : 'Source';
+    const rootTooltip = inputSource === 'microphone'
+      ? 'MediaStreamAudioSourceNode'
+      : inputSource === 'remote'
+        ? 'MediaStreamAudioSourceNode (remote)'
+        : 'AudioSourceNode';
+    const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
+
+    // Chain processors (mediaStreamSource hariç - zaten root olarak gösteriyoruz)
+    const chainProcessors = (mainProcessors || []).filter(p => p.type !== 'mediaStreamSource');
+
+    // Nested yapı: her processor bir öncekinin child'ı
+    let currentParent = root;
+    let lastProcessorNode = root;
+
+    chainProcessors.forEach((proc) => {
+      const formatted = formatProcessorForTree(proc);
+      const node = {
+        label: formatted.label,
+        param: formatted.param,
+        tooltip: formatted.tooltip,
+        children: []
+      };
+
+      currentParent.children.push(node);
+      lastProcessorNode = node;
+      currentParent = node; // Sonraki processor bu node'un child'ı olacak
+    });
+
+    // ═══ ENCODER NODE ═══
+    // Tree'nin ana hat çıkışı daima Encoder - AudioContext burada biter
+    // Encoding detayları ENCODING bölümünde gösterilir
+    const encoderNode = {
+      label: 'Encoder',
+      param: 'output',
+      tooltip: 'Audio output → Encoding pipeline (see ENCODING section)',
+      children: [],
+      isEncoder: true
+    };
+
+    // ═══ ANALYZER NODES ═══ (Monitoring - ana akıştan ayrı)
+    const analyzerNodes = monitors.map((mon) => {
+      const formatted = formatProcessorForTree(mon);
+      return {
+        label: formatted.label,
+        param: formatted.param,
+        tooltip: formatted.tooltip + ' (monitoring tap)',
+        children: [],
+        isMonitor: true
+      };
+    });
+
+    // Encoder ve Analyzer'ı son processor'un children'ı olarak ekle
+    // Encoder önce (main output), Analyzer sonra (monitoring)
+    lastProcessorNode.children.push(encoderNode);
+    analyzerNodes.forEach(an => lastProcessorNode.children.push(an));
+
+    return root;
+  };
+
+  const tree = buildNestedTree();
+
+  // Recursive render function
+  // parentVerticals: hangi depth'lerde dikey çizgi devam etmeli (array of booleans)
+  const renderNode = (node, depth, isLastChild, parentVerticals) => {
+    let html = '';
+
+    const classes = ['audio-tree-node'];
+    if (node.isRoot) classes.push('tree-root');
+    if (node.isMonitor) classes.push('tree-node-monitor');
+    if (node.isEncoder) classes.push('tree-node-encoder');
+
+    html += `<div class="${classes.join(' ')}">`;
+
+    // Branch segments (depth > 0 için)
+    if (depth > 0) {
+      html += '<div class="tree-branch">';
+
+      // Önceki depth'lerdeki dikey çizgiler
+      for (let d = 0; d < depth - 1; d++) {
+        if (parentVerticals[d]) {
+          html += '<div class="tree-segment tree-segment--vertical"></div>';
+        } else {
+          html += '<div class="tree-segment"></div>';
+        }
+      }
+
+      // Son segment: corner (└) veya fork (├)
+      const segmentClass = isLastChild ? 'tree-segment--corner' : 'tree-segment--fork';
+      html += `<div class="tree-segment ${segmentClass}"></div>`;
+
+      html += '</div>';
+    }
+
+    // Node içeriği - tooltip ile birlikte
+    // Label + param birlikte tooltip span'ı içinde
+    const displayText = node.param
+      ? `${escapeHtml(node.label)} (${escapeHtml(node.param)})`
+      : escapeHtml(node.label);
+
+    if (node.tooltip) {
+      html += `<span class="tree-node-name has-tooltip" data-tooltip="${escapeHtml(node.tooltip)}">${displayText}</span>`;
+    } else {
+      html += `<span class="tree-node-name">${displayText}</span>`;
+    }
+
+    html += '</div>';
+
+    // Children recursive render
+    const children = node.children || [];
+    children.forEach((child, index) => {
+      const childIsLast = index === children.length - 1;
+
+      // parentVerticals güncelle: bu node'un altında daha child varsa dikey çizgi devam eder
+      const newParentVerticals = [...parentVerticals];
+      if (depth > 0) {
+        newParentVerticals[depth - 1] = !isLastChild;
+      }
+
+      html += renderNode(child, depth + 1, childIsLast, newParentVerticals);
+    });
+
+    return html;
+  };
+
+  let html = '<div class="audio-tree">';
+  html += renderNode(tree, 0, true, []);
+  html += '</div>';
+
+  return html;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * AUDIO NODE USER-FRIENDLY MAPPING
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
+ * Tree'de gösterilecek: Kullanıcı dostu isimler
+ * Tooltip'te gösterilecek: Teknik node isimleri
+ *
+ * Format: {
+ *   label: string,      // Tree'de gösterilen kullanıcı dostu isim
+ *   tooltip: string,    // Hover'da gösterilen teknik isim
+ *   getParam?: (proc) => string  // Parametre hesaplama (opsiyonel)
+ * }
+ */
+const AUDIO_NODE_DISPLAY_MAP = {
+  // ═══ SOURCE NODES ═══
+  mediaStreamSource: {
+    label: 'Microphone',
+    tooltip: 'MediaStreamAudioSourceNode'
+  },
+  mediaElementSource: {
+    label: 'Media Player',
+    tooltip: 'MediaElementAudioSourceNode',
+    getParam: (proc) => proc.mediaType || null // 'audio' veya 'video'
+  },
+  bufferSource: {
+    label: 'Audio Buffer',
+    tooltip: 'AudioBufferSourceNode',
+    getParam: (proc) => proc.loop ? 'loop' : null
+  },
+  oscillator: {
+    label: 'Tone Generator',
+    tooltip: 'OscillatorNode',
+    getParam: (proc) => {
+      // sine, square, sawtooth, triangle, custom
+      const typeMap = {
+        'sine': 'sine',
+        'square': 'square',
+        'sawtooth': 'saw',
+        'triangle': 'tri',
+        'custom': 'custom'
+      };
+      return typeMap[proc.oscillatorType] || proc.oscillatorType || null;
+    }
+  },
+  constantSource: {
+    label: 'DC Offset',
+    tooltip: 'ConstantSourceNode'
+  },
+
+  // ═══ EFFECT / PROCESSING NODES ═══
+  gain: {
+    label: 'Volume',
+    tooltip: 'GainNode',
+    getParam: (proc) => {
+      const gain = proc.gainValue ?? proc.gain;
+      if (gain === undefined || gain === null) return null;
+
+      // Gain değerine göre kullanıcı dostu parametre
+      if (gain === 1 || Math.abs(gain - 1) < 0.001) {
+        return 'pass'; // Ses değişmeden geçiyor
+      }
+      if (gain === 0) {
+        return 'muted'; // Ses tamamen kapalı
+      }
+      if (gain < 1) {
+        // dB olarak göster (negative)
+        const dB = 20 * Math.log10(gain);
+        return `${dB.toFixed(0)}dB`;
+      }
+      // gain > 1, amplification
+      const dB = 20 * Math.log10(gain);
+      return `+${dB.toFixed(0)}dB`;
+    }
+  },
+  biquadFilter: {
+    label: 'Filter',
+    tooltip: 'BiquadFilterNode',
+    getParam: (proc) => {
+      // lowpass, highpass, bandpass, lowshelf, highshelf, peaking, notch, allpass
+      const typeMap = {
+        'lowpass': 'LP',
+        'highpass': 'HP',
+        'bandpass': 'BP',
+        'lowshelf': 'LS',
+        'highshelf': 'HS',
+        'peaking': 'peak',
+        'notch': 'notch',
+        'allpass': 'AP'
+      };
+      const shortType = typeMap[proc.filterType] || proc.filterType;
+      // Frekans bilgisi varsa ekle
+      if (proc.frequency) {
+        const freq = proc.frequency >= 1000
+          ? `${(proc.frequency / 1000).toFixed(1)}k`
+          : `${Math.round(proc.frequency)}`;
+        return `${shortType} ${freq}Hz`;
+      }
+      return shortType || null;
+    }
+  },
+  dynamicsCompressor: {
+    label: 'Compressor',
+    tooltip: 'DynamicsCompressorNode',
+    getParam: (proc) => {
+      // Threshold ve ratio varsa göster
+      if (proc.threshold !== undefined && proc.ratio !== undefined) {
+        return `${proc.threshold}dB ${proc.ratio}:1`;
+      }
+      if (proc.threshold !== undefined) {
+        return `${proc.threshold}dB`;
+      }
+      return null;
+    }
+  },
+  convolver: {
+    label: 'Reverb',
+    tooltip: 'ConvolverNode',
+    getParam: (proc) => proc.normalize === false ? 'raw' : null
+  },
+  delay: {
+    label: 'Delay',
+    tooltip: 'DelayNode',
+    getParam: (proc) => {
+      const time = proc.delayTime ?? proc.maxDelayTime;
+      if (time !== undefined) {
+        // ms olarak göster
+        const ms = time * 1000;
+        return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+      }
+      return null;
+    }
+  },
+  waveShaper: {
+    label: 'Distortion',
+    tooltip: 'WaveShaperNode',
+    getParam: (proc) => {
+      // oversample: none, 2x, 4x
+      if (proc.oversample && proc.oversample !== 'none') {
+        return proc.oversample;
+      }
+      return null;
+    }
+  },
+  stereoPanner: {
+    label: 'Panner',
+    tooltip: 'StereoPannerNode',
+    getParam: (proc) => {
+      const pan = proc.pan;
+      if (pan === undefined || pan === null) return null;
+      if (pan === 0 || Math.abs(pan) < 0.01) return 'center';
+      if (pan < 0) return `L${Math.abs(Math.round(pan * 100))}%`;
+      return `R${Math.round(pan * 100)}%`;
+    }
+  },
+  panner: {
+    label: '3D Panner',
+    tooltip: 'PannerNode',
+    getParam: (proc) => {
+      // panningModel: equalpower, HRTF
+      const modelMap = { 'equalpower': 'EQ', 'HRTF': 'HRTF' };
+      return modelMap[proc.panningModel] || null;
+    }
+  },
+  iirFilter: {
+    label: 'IIR Filter',
+    tooltip: 'IIRFilterNode'
+  },
+
+  // ═══ ANALYSIS NODES ═══
+  analyser: {
+    label: 'Analyzer',
+    tooltip: 'AnalyserNode',
+    getParam: (proc) => {
+      if (proc.fftSize) {
+        return `${proc.fftSize}pt`;
+      }
+      return null;
+    }
+  },
+
+  // ═══ CHANNEL NODES ═══
+  channelSplitter: {
+    label: 'Splitter',
+    tooltip: 'ChannelSplitterNode',
+    getParam: (proc) => proc.numberOfOutputs ? `${proc.numberOfOutputs}ch` : null
+  },
+  channelMerger: {
+    label: 'Merger',
+    tooltip: 'ChannelMergerNode',
+    getParam: (proc) => proc.numberOfInputs ? `${proc.numberOfInputs}ch` : null
+  },
+
+  // ═══ WORKLET / SCRIPT NODES ═══
+  audioWorkletNode: {
+    label: 'Processor',
+    tooltip: 'AudioWorkletNode',
+    getParam: (proc) => {
+      if (!proc.processorName) return null;
+      // passthrough-processor → passthrough
+      // opus-encoder-processor → opus
+      // vad-processor → vad
+      let name = proc.processorName
+        .replace(/-processor$/, '')
+        .replace(/-encoder$/, '')
+        .replace(/-worklet$/, '');
+      // Encoder isimleri için özel mapping
+      const encoderMap = {
+        'opus': 'Opus',
+        'mp3': 'MP3',
+        'ogg': 'OGG',
+        'vorbis': 'Vorbis',
+        'aac': 'AAC',
+        'flac': 'FLAC',
+        'wav': 'WAV',
+        'pcm': 'PCM'
+      };
+      return encoderMap[name.toLowerCase()] || name;
+    }
+  },
+  scriptProcessor: {
+    label: 'Processor',
+    tooltip: 'ScriptProcessorNode (deprecated)',
+    getParam: (proc) => {
+      if (proc.bufferSize) {
+        return `${proc.bufferSize}`;
+      }
+      return null;
+    }
+  },
+
+  // ═══ DESTINATION NODES ═══
+  mediaStreamDestination: {
+    label: 'Stream Output',
+    tooltip: 'MediaStreamAudioDestinationNode'
+  },
+  destination: {
+    label: 'Speakers',
+    tooltip: 'AudioDestinationNode'
+  }
+};
+
+/**
+ * Format processor for tree display
+ * Returns user-friendly label + technical tooltip
+ *
+ * @param {Object} proc - Processor object from pipeline
+ * @returns {{ label: string, param: string|null, tooltip: string }}
+ */
+function formatProcessorForTree(proc) {
+  const mapping = AUDIO_NODE_DISPLAY_MAP[proc.type];
+
+  if (mapping) {
+    const param = mapping.getParam ? mapping.getParam(proc) : null;
+    return {
+      label: mapping.label,
+      param,
+      tooltip: mapping.tooltip
+    };
+  }
+
+  // Fallback for unknown types
+  // CamelCase to readable: "myCustomNode" → "My Custom Node"
+  const readableType = proc.type
+    ? proc.type.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim()
+    : 'Unknown';
+
+  return {
+    label: readableType,
+    param: null,
+    tooltip: proc.type || 'Unknown AudioNode'
+  };
+}
+
+/**
  * Format a single processor for display (Option B - with parameters)
  * Includes count suffix if > 1
  * Returns object with { name, params, tooltip } for flexible rendering
@@ -1245,12 +1735,6 @@ function renderACStats(contexts, audioConnections = null) {
 
   // Handle both array and single object (backwards compat)
   if (!contexts || (Array.isArray(contexts) && contexts.length === 0)) {
-    // Even without contexts, show connections if available
-    if (audioConnections?.connections?.length > 0) {
-      container.innerHTML = renderConnectionGraph(audioConnections.connections);
-      timestamp.textContent = formatTime(audioConnections.lastUpdate);
-      return;
-    }
     container.innerHTML = '<div class="no-data">No context</div>';
     timestamp.textContent = '';
     return;
@@ -1313,39 +1797,7 @@ function renderACStats(contexts, audioConnections = null) {
     const latencyMs = totalLatency > 0 ? `${(totalLatency * 1000).toFixed(1)}ms` : '-';
     const stateClass = ctx.static?.state === 'running' ? 'good' : (ctx.static?.state === 'suspended' ? 'warning' : '');
 
-    // Context header with purpose (tooltip if available)
-    html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
-    if (purpose.tooltip) {
-      html += `<div class="context-purpose">${purpose.icon} ${purpose.label} <span class="has-tooltip has-tooltip--info" data-tooltip="${purpose.tooltip}">ⓘ</span></div>`;
-    } else {
-      html += `<div class="context-purpose">${purpose.icon} ${purpose.label}</div>`;
-    }
-
-    // ━━━ Context Info ━━━ (static properties - no separate timestamp, uses header)
-    // Note: channelCount = destination.maxChannelCount (output capacity)
-    const channelTooltip = 'Output channel capacity (destination.maxChannelCount)';
-    const latencyTooltip = `Total output latency (baseLatency: ${(baseLatency * 1000).toFixed(1)}ms + outputLatency: ${(outputLatency * 1000).toFixed(1)}ms). Input latency is shown in getUserMedia section.`;
-
-    html += `
-      <div class="ac-section">
-        <div class="ac-section-header">
-          <span class="ac-section-title">Context Info</span>
-        </div>
-        <table class="ac-main-table">
-          <tbody>
-            <tr><td><span class="has-tooltip" data-tooltip="${channelTooltip}">Channels</span></td><td class="metric-value">${ctx.static?.channelCount || '-'}</td></tr>
-            <tr><td>State</td><td class="${stateClass}">${ctx.static?.state || '-'}</td></tr>
-            <tr><td><span class="has-tooltip" data-tooltip="${latencyTooltip}">Latency</span></td><td>${latencyMs}</td></tr>
-          </tbody>
-        </table>
-      </div>
-    `;
-
-    // ━━━ Audio Path ━━━ (Input → Chain → Output)
-    const hasInputSource = !!ctx.pipeline?.inputSource;
-    const hasOutput = !!ctx.pipeline?.destinationType;
-
-    // Filter processors: separate main chain from monitors
+    // ━━━ Processor bilgilerini hazırla ━━━
     const ctxConnections = filterConnectionsByContext(audioConnections?.connections, [ctx]);
     console.log(`[AudioInspector] 🔍 Audio Path: ctxConnections.length=${ctxConnections.length}`);
     const mainFromGraph = ctxConnections.length > 0
@@ -1357,11 +1809,10 @@ function renderACStats(contexts, audioConnections = null) {
       : (ctx.pipeline?.processors?.filter(p => p.type !== 'analyser') || []);
     console.log(`[AudioInspector] 🔍 Audio Path: mainProcessors (before fallback)=`, mainProcessors);
 
+    const hasInputSource = !!ctx.pipeline?.inputSource;
+
     // FALLBACK: If inputSource exists, ensure MediaStreamSource is in the chain
-    // When connections are missing, ctx.pipeline.processors doesn't include mediaStreamSource
-    // because it's tracked separately via inputSource field
     if (hasInputSource && !mainProcessors.some(p => p.type === 'mediaStreamSource')) {
-      // Prepend mediaStreamSource to chain (it's always first)
       mainProcessors = [
         { type: 'mediaStreamSource', timestamp: ctx.pipeline?.timestamp },
         ...mainProcessors
@@ -1374,55 +1825,55 @@ function renderACStats(contexts, audioConnections = null) {
     console.log(`[AudioInspector] 🔍 Audio Path: FINAL mainProcessors.length=${mainProcessors.length}`);
 
     const monitors = ctx.pipeline?.processors?.filter(p => p.type === 'analyser') || [];
+
+    // Processing ve Effects bilgilerini çıkar
+    const { processingText, effectsText } = extractProcessingInfo(mainProcessors, monitors);
+
+    // Context item başlat (purpose başlığı YOK - doğrudan Context Info)
+    html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
+
+    // ━━━ Context Info ━━━ (Input dahil - tüm temel bilgiler)
+    const channelTooltip = 'Output channel capacity (destination.maxChannelCount)';
+    const latencyTooltip = `Total output latency (baseLatency: ${(baseLatency * 1000).toFixed(1)}ms + outputLatency: ${(outputLatency * 1000).toFixed(1)}ms). Input latency is shown in getUserMedia section.`;
+
+    // Input label (ikon ile)
+    const inputLabel = hasInputSource
+      ? `${purpose.icon} ${ctx.pipeline.inputSource.charAt(0).toUpperCase() + ctx.pipeline.inputSource.slice(1)}`
+      : '-';
+
+    html += `
+      <div class="ac-section ac-section--first">
+        <div class="sub-header sub-header--ac">
+          <span class="ac-section-title">Context Info</span>
+        </div>
+        <table class="ac-main-table">
+          <tbody>
+            <tr><td>Input</td><td>${inputLabel}</td></tr>
+            <tr><td><span class="has-tooltip" data-tooltip="${channelTooltip}">Channels</span></td><td class="metric-value">${ctx.static?.channelCount || '-'}</td></tr>
+            <tr><td>State</td><td class="${stateClass}">${ctx.static?.state || '-'}</td></tr>
+            <tr><td><span class="has-tooltip" data-tooltip="${latencyTooltip}">Latency</span></td><td>${latencyMs}</td></tr>
+            ${processingText ? `<tr><td>Processing</td><td>${processingText}</td></tr>` : ''}
+            ${effectsText ? `<tr><td>Effects</td><td>${effectsText}</td></tr>` : ''}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    // ━━━ Audio Path ━━━ (Tree yapısında)
     const hasMainProcessors = mainProcessors.length > 0;
 
-    if (hasInputSource || hasMainProcessors || hasOutput) {
+    if (hasInputSource || hasMainProcessors) {
       const pipelineTs = formatTime(ctx.pipeline?.timestamp);
 
       html += `
         <div class="ac-section">
-          <div class="ac-section-header">
+          <div class="sub-header sub-header--ac">
             <span class="ac-section-title">Audio Path</span>
             <span class="ac-detected-time-subtle">(${pipelineTs})</span>
           </div>
-          <table class="ac-main-table">
-            <tbody>
+          ${renderAudioPathTree(mainProcessors, monitors, ctx.pipeline?.inputSource)}
+        </div>
       `;
-
-      // Input
-      if (hasInputSource) {
-        html += `<tr><td>Input</td><td>${ctx.pipeline.inputSource}</td></tr>`;
-      }
-
-      // Chain (main processors - not monitors)
-      if (hasMainProcessors) {
-        const groupedProcessors = groupConsecutiveProcessors(mainProcessors);
-        html += `<tr><td>Chain</td><td>${renderChain(groupedProcessors)}</td></tr>`;
-
-        // Buffer Size - sadece ScriptProcessor varsa göster
-        const scriptProc = mainProcessors.find(p => p.type === 'scriptProcessor');
-        if (scriptProc?.bufferSize) {
-          html += `<tr><td>Buffer Size</td><td>${scriptProc.bufferSize}</td></tr>`;
-        }
-      }
-
-      // Output
-      html += `<tr><td>Output</td><td>${ctx.pipeline?.destinationType || 'Speakers'}</td></tr>`;
-
-      html += `</tbody></table></div>`;
-
-      // Monitor (VU Analyser) - side-tap, not part of main audio path chain
-      if (monitors.length > 0) {
-        const monitorCount = monitors.length;
-        const monitorLabel = monitorCount > 1 ? `VU Analyser ×${monitorCount}` : 'VU Analyser';
-        html += `
-          <div class="ac-section monitor-section">
-            <div class="processing-item">
-              <span class="detail-label">Monitor</span>
-              <span class="detail-value detail-value-muted has-tooltip" data-tooltip="AnalyserNode is a monitoring tap (VU/visualizer). It does not change the main Input → Chain → Output path.">${escapeHtml(monitorLabel)}</span>
-            </div>
-          </div>`;
-      }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1443,167 +1894,10 @@ function renderACStats(contexts, audioConnections = null) {
     html += `</div>`;
   });
 
-  // ━━━ Audio Connection Graph ━━━ (if connections available)
-  console.log(`[AudioInspector] 🔍 renderACStats: audioConnections=`, audioConnections);
-  console.log(`[AudioInspector] 🔍 renderACStats: audioConnections?.connections?.length=`, audioConnections?.connections?.length);
-  const filteredConnections = filterConnectionsByContext(audioConnections?.connections, contextArray);
-  console.log(`[AudioInspector] 🔍 renderACStats: filteredConnections.length=`, filteredConnections.length);
-  if (filteredConnections.length > 0) {
-    html += renderConnectionGraph(filteredConnections, contextArray);
-  }
-
   console.log(`[AudioInspector] 🔍 renderACStats: HTML length=${html.length}, container=`, container);
   console.log(`[AudioInspector] 🔍 renderACStats: HTML preview (first 500 chars):`, html.substring(0, 500));
   container.innerHTML = html;
   console.log(`[AudioInspector] 🔍 renderACStats: DOM updated, container.children.length=`, container.children.length);
-}
-
-/**
- * Render audio connection graph as a visual chain
- * Shows how AudioNodes are connected to each other
- * @param {Array} connections - Array of { sourceType, sourceId, destType, destId, ... }
- * @param {Array} [contexts] - Optional array of AudioContext data for enhanced AudioWorklet detection
- * @returns {string} HTML string
- */
-function renderConnectionGraph(connections, contexts = []) {
-  if (!connections || connections.length === 0) {
-    return '';
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // USER-FRIENDLY SUMMARY: Show source, effects, and output in simple format
-  // Instead of technical node connections, show what the user cares about
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // Helper: Check if an AudioWorkletNode processor name looks like VU meter
-  const isVUMeterProcessor = (name) => {
-    if (!name) return false;
-    const lower = name.toLowerCase();
-    return lower.includes('peak') || lower.includes('level') || lower.includes('meter') || lower.includes('vu');
-  };
-
-  // Get AudioWorkletNode processor names from contexts for VU meter detection
-  const audioWorkletProcessorNames = [];
-  for (const ctx of contexts) {
-    const processors = ctx.pipeline?.processors || [];
-    for (const p of processors) {
-      if (p.type === 'audioWorkletNode' && p.processorName) {
-        audioWorkletProcessorNames.push(p.processorName);
-      }
-    }
-  }
-
-  // Check if any AudioWorkletNode is a VU meter
-  const hasVUMeter = audioWorkletProcessorNames.some(name => isVUMeterProcessor(name));
-
-  // Collect unique node types
-  const nodeTypes = new Set();
-  for (const conn of connections) {
-    nodeTypes.add(conn.sourceType);
-    nodeTypes.add(conn.destType);
-  }
-
-  // Categorize nodes
-  const sources = [];
-  const effects = [];
-  const outputs = [];
-
-  // Node type mappings for user-friendly names
-  const nodeLabels = {
-    // Sources
-    'MediaStreamAudioSource': { label: 'Microphone', category: 'source', icon: '🎤' },
-    'MediaStreamSource': { label: 'Microphone', category: 'source', icon: '🎤' },
-    'OscillatorNode': { label: 'Oscillator', category: 'source', icon: '〰️' },
-    'Oscillator': { label: 'Oscillator', category: 'source', icon: '〰️' },
-    'BufferSource': { label: 'Audio Buffer', category: 'source', icon: '📁' },
-    // Effects
-    'Gain': { label: 'Volume', category: 'effect', icon: '🔊' },
-    'BiquadFilter': { label: 'EQ', category: 'effect', icon: '🎚️' },
-    'Convolver': { label: 'Reverb', category: 'effect', icon: '🏛️' },
-    'Delay': { label: 'Delay', category: 'effect', icon: '⏱️' },
-    'DynamicsCompressor': { label: 'Compressor', category: 'effect', icon: '📊' },
-    'WaveShaper': { label: 'Distortion', category: 'effect', icon: '⚡' },
-    'Analyser': { label: 'Analyser', category: 'effect', icon: '📈' },
-    'StereoPanner': { label: 'Panner', category: 'effect', icon: '↔️' },
-    // Processors
-    'AudioWorklet': { label: 'Processor', category: 'effect', icon: '⚙️' },
-    'ScriptProcessor': { label: 'Processor', category: 'effect', icon: '⚙️' },
-    // Outputs
-    'AudioDestination': { label: 'Speaker', category: 'output', icon: '🔈' },
-    'MediaStreamAudioDestination': { label: 'Stream', category: 'output', icon: '⏺️' },
-    'MediaStreamDestination': { label: 'Stream', category: 'output', icon: '⏺️' }
-  };
-
-  // Categorize each unique node type
-  for (const type of nodeTypes) {
-    // Special handling: If AudioWorklet and we detected VU meter processor, use VU Meter label
-    let info;
-    if (type === 'AudioWorklet' && hasVUMeter) {
-      info = { label: 'VU Meter', category: 'effect', icon: '📊' };
-    } else {
-      info = nodeLabels[type] || { label: type, category: 'effect', icon: '🔧' };
-    }
-    const item = { type, label: info.label, icon: info.icon };
-
-    if (info.category === 'source' && !sources.some(s => s.label === info.label)) {
-      sources.push(item);
-    } else if (info.category === 'output' && !outputs.some(o => o.label === info.label)) {
-      outputs.push(item);
-    } else if (info.category === 'effect' && !effects.some(e => e.label === info.label)) {
-      effects.push(item);
-    }
-  }
-
-  // Detect feedback loops (Delay → Gain → Delay pattern)
-  let hasFeedback = false;
-  for (const conn of connections) {
-    if (conn.sourceType === 'Delay' && conn.destType === 'Gain') {
-      // Check if any Gain connects back to Delay
-      const gainToDelay = connections.some(c =>
-        c.sourceType === 'Gain' && c.destType === 'Delay'
-      );
-      if (gainToDelay) hasFeedback = true;
-    }
-  }
-
-  // Build HTML - use same table structure as Audio Path for consistency
-  let html = `
-    <div class="ac-section">
-      <div class="ac-section-header">
-        <span class="ac-section-title">Audio Graph</span>
-        <span class="ac-detected-time-subtle">(${connections.length})</span>
-      </div>
-      <table class="ac-main-table">
-  `;
-
-  // Source row
-  if (sources.length > 0) {
-    const sourceText = sources.map(s => s.label).join(', ');
-    html += `<tr><td>Source</td><td>${sourceText}</td></tr>`;
-  }
-
-  // Effects row (only show meaningful effects, skip Gain if only used for routing)
-  const meaningfulEffects = effects.filter(e =>
-    e.label !== 'Volume' && e.label !== 'Processor' && e.label !== 'Analyser'
-  );
-  if (meaningfulEffects.length > 0) {
-    const effectText = meaningfulEffects.map(e => e.label).join(', ');
-    html += `<tr><td>Effects</td><td>${effectText}</td></tr>`;
-  }
-
-  // Feedback indicator - shows cyclic connections (e.g., Delay → Gain → Delay)
-  if (hasFeedback) {
-    html += `<tr><td><span class="has-tooltip" data-tooltip="Audio signal loops back (e.g., echo/reverb effect)">Loop</span></td><td class="graph-feedback">Feedback</td></tr>`;
-  }
-
-  // Output row
-  if (outputs.length > 0) {
-    const outputText = outputs.map(o => o.label).join(', ');
-    html += `<tr><td>Output</td><td>${outputText}</td></tr>`;
-  }
-
-  html += `</table></div>`;
-  return html;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1762,23 +2056,22 @@ const ENCODER_DETECTORS = [
       ];
 
       // Encoder info (opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm)
-      // Always show Encoder row - use "-" if not available
+      // Detection info shown only in tooltip
       if (enc.encoder) {
-        // Display encoder type (e.g., "opus-wasm" → "Opus (WASM)", "pcm" → "Linear PCM")
         const encoderDisplay = formatEncoderDisplay(enc.encoder);
+        const detection = DETECTION_LABELS[enc.pattern] || DETECTION_LABELS['unknown'];
 
-        // Build tooltip with library info (if available)
-        const tooltipParts = [];
+        // Build tooltip: detection first, then library/worker/path details
+        const tooltipParts = [`detection: ${detection.text}`];
         if (enc.library) tooltipParts.push(`Library: ${enc.library}`);
         if (enc.workerFilename) tooltipParts.push(`Worker: ${enc.workerFilename}`);
         if (enc.encoderPath) tooltipParts.push(`Path: ${String(enc.encoderPath).split('/').pop()}`);
-        const encoderTooltip = tooltipParts.length > 0 ? tooltipParts.join(' | ') : '';
+        if (enc.processorName) tooltipParts.push(`Worklet: ${enc.processorName}`);
+        const encoderTooltip = tooltipParts.join(' | ');
 
         rows.push({
           label: 'Encoder',
-          value: encoderTooltip
-            ? `<span class="has-tooltip" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`
-            : encoderDisplay,
+          value: `<span class="has-tooltip" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`,
           isMetric: true
         });
       } else {
@@ -1851,22 +2144,6 @@ const ENCODER_DETECTORS = [
         label: 'Input',
         value: encoderInput || '-',
         isMetric: !!encoderInput
-      });
-
-      // Confidence indicator with source info on separate line
-      // Note: Blob URL UUIDs are filtered at source (early-inject.js)
-      const confidence = DETECTION_LABELS[enc.pattern] || DETECTION_LABELS['unknown'];
-      const evidenceParts = [];
-      if (enc.workerFilename) evidenceParts.push(`Worker: ${enc.workerFilename}`);
-      if (enc.processorName) evidenceParts.push(`Worklet: ${enc.processorName}`);
-      if (enc.encoderPath) evidenceParts.push(`Path: ${String(enc.encoderPath).split('/').pop()}`);
-      const evidenceText = evidenceParts.length > 0 ? ` | ${evidenceParts.join(', ')}` : '';
-      const confidenceText = `${confidence.icon} ${confidence.text}`;
-      const confidenceTooltip = `${confidence.tooltip}${evidenceText}`;
-      rows.push({
-        label: 'Confidence',
-        value: `<span class="has-tooltip" data-tooltip="${escapeHtml(confidenceTooltip)}">${confidenceText}</span>`,
-        isMetric: false
       });
 
       return {

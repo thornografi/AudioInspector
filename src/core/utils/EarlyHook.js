@@ -878,7 +878,10 @@ const METHOD_HOOK_CONFIGS = [
   {
     methodName: 'createAnalyser',
     registryKey: 'analyser',
-    extractMetadata: () => ({ timestamp: Date.now() }),
+    extractMetadata: (args, result) => ({
+      fftSize: result?.fftSize ?? 2048, // Default FFT size
+      timestamp: Date.now()
+    }),
     getLogMessage: () => '📡 Early hook: createAnalyser() captured'
   },
   {
@@ -902,7 +905,10 @@ const METHOD_HOOK_CONFIGS = [
   {
     methodName: 'createGain',
     registryKey: 'gain',
-    extractMetadata: () => ({ timestamp: Date.now() }),
+    extractMetadata: (args, result) => ({
+      gainValue: result?.gain?.value ?? 1, // GainNode.gain.value (default 1.0)
+      timestamp: Date.now()
+    }),
     getLogMessage: () => '📡 Early hook: createGain() captured'
   },
   {
@@ -910,6 +916,7 @@ const METHOD_HOOK_CONFIGS = [
     registryKey: 'biquadFilter',
     extractMetadata: (args, result) => ({
       filterType: result?.type || 'lowpass', // lowpass, highpass, bandpass, etc.
+      frequency: result?.frequency?.value ?? 350, // Cutoff frequency in Hz
       timestamp: Date.now()
     }),
     getLogMessage: () => '📡 Early hook: createBiquadFilter() captured'

@@ -14,6 +14,7 @@
       --border-primary: #30363d;
       --border-subtle: #21262d;
       --text-primary: #e6edf3;
+      --text-subheader: #b1bac4;  /* Alt başlıklar için (primary ve secondary arası) */
       --text-secondary: #8b949e;
       --text-muted: #6e7681;
       --accent-blue: #58a6ff;
@@ -24,8 +25,29 @@
       --inspecting-glow: rgba(248, 81, 73, 0.4);
       /* Typography */
       --font-mono: 'SF Mono', 'Consolas', 'Monaco', monospace;
+      --font-size-body: 12px;
+      --font-size-label: 11px;
+      --font-size-small: 10px;
+      --font-size-micro: 9px;
       /* Layout */
       --drawer-handle-height: 36px;
+      --card-padding-x: 16px;
+      /* Spacing - tutarlı dikey mesafeler */
+      --spacing-after-header: 12px;  /* Ana başlık sonrası */
+      --spacing-after-subheader: 12px; /* Alt başlık sonrası (aynı) */
+      --spacing-between-sections: 12px; /* Section'lar arası */
+      --spacing-row: 5px;  /* Tablo satır padding */
+      /* Gap */
+      --gap-tight: 6px;
+      --gap-normal: 8px;
+      /* Heights */
+      --btn-height-lg: 32px;
+      --btn-height-md: 28px;
+      --btn-height-sm: 24px;
+      /* Border Radius */
+      --radius-lg: 6px;
+      --radius-md: 4px;
+      --radius-sm: 3px;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -74,9 +96,9 @@
       background: var(--bg-tertiary);
       color: var(--text-secondary);
       border: 1px solid var(--border-primary);
-      border-radius: 6px;
+      border-radius: var(--radius-lg);
       cursor: pointer;
-      font-size: 12px;
+      font-size: var(--font-size-body);
       font-weight: 500;
       transition: all 0.2s ease;
       white-space: nowrap;
@@ -189,32 +211,33 @@
       background: var(--border-primary);
       overflow: hidden;
       min-height: 0;
+      padding-bottom: var(--drawer-handle-height); /* Drawer handle için alan */
     }
 
 
     /* Card/Section Styles */
     .card {
       background: var(--bg-primary);
-      padding: 12px 16px;
-      overflow: hidden;
+      padding: 12px var(--card-padding-x);
+      overflow: visible; /* Tooltip'lerin görünmesi için */
       display: flex;
       flex-direction: column;
-      min-height: 0; /* Grid içinde scroll çalışması için gerekli */
+      min-height: 0;
     }
 
     .card-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 10px;
+      margin-bottom: var(--spacing-after-header);
       flex-shrink: 0;
     }
 
     .card-title {
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-size: 12px;
+      gap: var(--gap-normal);
+      font-size: var(--font-size-body);
       font-weight: 600;
       color: var(--text-primary);
       text-transform: uppercase;
@@ -222,7 +245,7 @@
     }
 
     .timestamp {
-      font-size: 11px;
+      font-size: var(--font-size-label);
       color: var(--text-muted);
       font-family: var(--font-mono);
       font-style: italic;
@@ -230,56 +253,49 @@
 
     .card-content {
       flex: 1;
-      overflow-y: auto;
-      min-height: 0; /* Grid/flex içinde scroll çalışması için gerekli */
+      min-height: 0;
     }
 
     /* ========== Global Scrollbar System ========== */
-    /*
-     * Overlay scrollbar approach:
-     * - Scrollbar appears ON TOP of content (doesn't push content)
-     * - Invisible by default, visible on hover
-     * - Very thin (3px) to minimize visual impact
-     */
-
-    /* Base scrollable styles */
     .card-content,
-    .rtc-column,
     #debugContent,
     .drawer-content {
-      overflow-y: overlay;  /* Chrome: overlay scrollbar */
+      overflow-y: auto;
       overflow-x: hidden;
     }
 
-    /* Fallback for browsers without overlay support */
-    @supports not (overflow-y: overlay) {
-      .card-content,
-      .rtc-column,
-      #debugContent,
-      .drawer-content {
-        overflow-y: auto;
-        /* Add right padding to compensate for scrollbar width */
-        padding-right: 4px;
-      }
+    /* Sağ kenardaki card'lar: scrollbar overlay, border'a yaslanır */
+    .left-stack .card,
+    #acSection {
+      position: relative;
     }
 
-    /* Ultra-thin scrollbar (3px) */
+    .left-stack .card-content,
+    #acSection .card-content {
+      overflow-y: overlay; /* Scrollbar içerik alanını daraltmaz */
+      margin-right: calc(-1 * var(--card-padding-x)); /* Card padding'i aş, border'a dayan */
+      padding-right: var(--card-padding-x); /* İçerik hizalamasını koru */
+    }
+
+    /* RTC columns - scroll yok, parent (card-content) yönetiyor */
+    .rtc-column {
+      overflow-y: visible;
+    }
+
+    /* Scrollbar width */
     .card-content::-webkit-scrollbar,
-    .rtc-column::-webkit-scrollbar,
     #debugContent::-webkit-scrollbar,
     .drawer-content::-webkit-scrollbar {
-      width: 3px;
+      width: 6px;
     }
 
     .card-content::-webkit-scrollbar-track,
-    .rtc-column::-webkit-scrollbar-track,
     #debugContent::-webkit-scrollbar-track,
     .drawer-content::-webkit-scrollbar-track {
       background: transparent;
     }
 
     .card-content::-webkit-scrollbar-thumb,
-    .rtc-column::-webkit-scrollbar-thumb,
     #debugContent::-webkit-scrollbar-thumb,
     .drawer-content::-webkit-scrollbar-thumb {
       background: rgba(139, 148, 158, 0.3);
@@ -287,7 +303,6 @@
     }
 
     .card-content::-webkit-scrollbar-thumb:hover,
-    .rtc-column::-webkit-scrollbar-thumb:hover,
     #debugContent::-webkit-scrollbar-thumb:hover,
     .drawer-content::-webkit-scrollbar-thumb:hover {
       background: rgba(139, 148, 158, 0.6);
@@ -304,84 +319,99 @@
       background: rgba(139, 148, 158, 0.6);
     }
 
-    /* Two Column Layout */
+    /* Two Column Layout (C çizgisi: dikey ayırıcı) */
     .row-2col {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 1.5px;
-      background: var(--border-subtle);
+      gap: 2px;
+      background: var(--border-primary);
       min-height: 0; /* Grid içinde içerik taşmasını önle */
     }
 
-    /* Left stack: GUM + Encoding vertically stacked */
+    /* Left stack: GUM + Encoding vertically stacked (B çizgisi: C'den miras) */
     .left-stack {
-      display: flex;
-      flex-direction: column;
-      gap: 1.5px;
-      background: var(--border-subtle);
+      display: grid;
+      grid-template-rows: 1fr 1fr; /* Tam ortadan ikiye böl */
+      gap: inherit;        /* C'den miras: 2px */
+      background: inherit; /* C'den miras: --border-primary */
       min-height: 0;
     }
 
     .left-stack .card {
-      flex: 1;
       min-height: 0;
-    }
-
-    /* getUserMedia card - daha fazla alan ver (scrollbar oluşmasın) */
-    #gumSection {
-      flex: 1.3; /* Encoding'den biraz daha büyük */
-    }
-
-    #encodingSection {
-      flex: 1;
     }
 
     /* RTC Two Column Content */
     #rtcContent {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 1.5px;
+      gap: 2px;
       height: 100%;
-      background: var(--border-subtle);
+      background: var(--border-primary);
     }
 
     .rtc-column {
       display: flex;
       flex-direction: column;
-      overflow-y: auto;
       min-height: 0;
       background: var(--bg-primary);
       padding: 0 12px;
+      /* Scroll yok - parent (#rtcContent = card-content) yönetiyor */
     }
 
     .rtc-column:first-child {
       padding-left: 0;
     }
 
-    .rtc-column:last-child {
-      padding-right: 0;
-    }
-
-    .rtc-column-header {
+    /* ========== Ortak Sub-Header Stili ========== */
+    .sub-header {
       display: flex;
       align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-secondary);
-      margin-bottom: 8px;
-      padding-bottom: 6px;
+      padding-top: var(--spacing-row); /* td padding ile hizalama (tablo satırlarıyla aynı başlangıç) */
+      padding-bottom: 4px;
+      margin-bottom: calc(var(--spacing-after-subheader) - 4px); /* padding dahil toplam = 12px */
       border-bottom: 1px solid var(--border-subtle);
+      /* Ortak yazı stili - tüm alt başlıklar için */
+      font-size: var(--font-size-label);
+      font-weight: 600;
+      color: var(--text-subheader);
+    }
+
+    /* WebRTC: gap (metin doğrudan içinde) */
+    .sub-header--rtc {
+      gap: var(--gap-tight);
+    }
+
+    /* AudioContext: space-between (sağda timestamp için) */
+    .sub-header--ac {
+      justify-content: space-between;
+    }
+
+    /* Sub-header sonrası içerik indent - hiyerarşiyi gösterir (AudioContext için) */
+    .ac-section .sub-header + table,
+    .ac-section .sub-header ~ table {
+      margin-left: 12px;
+      width: calc(100% - 12px);
+    }
+    .ac-section .sub-header + .audio-tree,
+    .ac-section .sub-header ~ .audio-tree {
+      margin-left: 12px;
+    }
+    /* RTC columns: indent yok - column padding zaten var */
+    .rtc-column .sub-header + table,
+    .rtc-column .sub-header ~ table {
+      margin-left: 0;
+      width: 100%;
     }
 
     .direction-icon {
       width: 16px;
       height: 16px;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 9px;
+      font-size: var(--font-size-micro);
     }
 
     .direction-icon.send { background: rgba(63, 185, 80, 0.2); }
@@ -391,7 +421,7 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 12px;
+      font-size: var(--font-size-body);
     }
 
     tr {
@@ -403,13 +433,13 @@
     }
 
     td {
-      padding: 5px 0;
+      padding: var(--spacing-row) 0;
       vertical-align: middle;
     }
 
     td:first-child {
       color: var(--text-muted);
-      font-size: 11px;
+      font-size: var(--font-size-label);
       width: 50%;
     }
 
@@ -418,7 +448,8 @@
       font-weight: 500;
       text-align: right;
       font-family: var(--font-mono);
-      font-size: 12px;
+      font-size: var(--font-size-body);
+      white-space: nowrap; /* Değerlerin tek satırda kalması için */
     }
 
     .metric-value {
@@ -432,8 +463,8 @@
     .badge {
       display: inline-block;
       padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 10px;
+      border-radius: var(--radius-md);
+      font-size: var(--font-size-small);
       font-weight: 600;
       font-family: var(--font-mono);
       vertical-align: baseline;
@@ -448,14 +479,6 @@
     /* Badge içeren td hücreleri için vertical hizalama düzeltmesi */
     td:last-child .badge {
       vertical-align: middle;
-    }
-
-    /* Confidence source info (alt satır) */
-    .confidence-source {
-      display: block;
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-top: 2px;
     }
 
     .no-data {
@@ -474,17 +497,15 @@
 
     #debugContent {
       flex: 1;
-      overflow-y: auto;
       font-family: var(--font-mono);
-      font-size: 11px;
+      font-size: var(--font-size-label);
       line-height: 1.6;
-      padding-right: 4px;
     }
 
     .log-line {
       padding: 3px 0;
       display: flex;
-      gap: 8px;
+      gap: var(--gap-normal);
       border-bottom: 1px solid var(--border-subtle);
     }
 
@@ -523,10 +544,10 @@
     .log-line.info .log-message { color: var(--accent-blue); }
 
     .btn-sm {
-      height: 24px;
+      height: var(--btn-height-sm);
       padding: 0 10px;
-      font-size: 11px;
-      border-radius: 4px;
+      font-size: var(--font-size-label);
+      border-radius: var(--radius-md);
     }
 
     /* Multiple AudioContext support */
@@ -546,7 +567,7 @@
       flex-wrap: wrap;
       align-items: center;
       gap: 6px 12px;
-      padding: 8px 12px;
+      padding: 8px 0; /* Sol/sağ padding card'dan miras, sadece dikey padding */
       color: var(--text-secondary);
       font-size: 12px;
     }
@@ -574,8 +595,8 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 5px 0;
-      font-size: 12px;
+      padding: var(--spacing-row) 0;
+      font-size: var(--font-size-body);
       border-bottom: 1px solid var(--border-subtle);
     }
 
@@ -583,16 +604,9 @@
       border-bottom: none;
     }
 
-    .processing-item.none {
-      color: var(--text-muted);
-      font-style: italic;
-      justify-content: center;
-      padding: 6px 0;
-    }
-
     .detail-label {
       color: var(--text-muted);
-      font-size: 11px;
+      font-size: var(--font-size-label);
       width: 50%;
       flex-shrink: 0;
     }
@@ -622,7 +636,7 @@
       content: attr(data-tooltip);
       position: absolute;
       bottom: calc(100% + 4px);
-      right: 0;
+      left: 0;
       background: var(--bg-tertiary);
       color: var(--text-primary);
       padding: 4px 8px;
@@ -633,7 +647,7 @@
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.15s;
-      z-index: 10;
+      z-index: 1000;
       border: 1px solid var(--border-primary);
     }
 
@@ -646,66 +660,47 @@
       margin-left: 0;
     }
 
+    /* Left-stack içindeki tooltip'ler - sağa taşmasın (C çizgisine yaklaşmasın) */
+    .left-stack .has-tooltip::after {
+      left: auto;
+      right: 0;
+      max-width: 200px;
+      white-space: normal;
+      text-align: right;
+    }
+
     /* Pulsing status text (Detecting / Waiting / Pending / Loading) */
     .status-pulse {
       color: var(--accent-orange);
-      animation: pulse-detecting 1.5s ease-in-out infinite;
+      font-style: italic;
+      font-weight: 300;  /* %30 azaltılmış (normal 400 → 300) */
+      transform: skewX(-4deg);  /* Ekstra italik eğim (toplam ~16deg) */
+      display: inline-block;  /* transform için gerekli */
+      animation: pulse-detecting 2.25s ease-in-out infinite;
     }
     @keyframes pulse-detecting {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.5; }
     }
 
-    /* AudioContext main table - parent section */
-    .ac-main-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 0;
-    }
-
-    .ac-main-table tbody tr:last-child td {
-      padding-bottom: 4px;
-    }
-
-    /* ========== AudioContext Section B Design ========== */
+    /* ========== AudioContext Section Design ========== */
     .ac-section {
-      margin-top: 10px;
+      margin-top: var(--spacing-between-sections);
     }
 
-    .ac-section:first-of-type {
-      margin-top: 6px;
+    .ac-section:first-of-type,
+    .ac-section--first {
+      margin-top: 0;
     }
 
-    .ac-section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 6px;
-      padding-bottom: 4px;
-      border-bottom: 1px solid var(--border-primary);
-    }
-
+    /* .ac-section-title: sub-header içindeki başlık metni (font özellikleri parent'tan miras) */
     .ac-section-title {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-secondary);
-      letter-spacing: 0.3px;
-    }
-
-    /* Alt başlık altındaki içerik - sağa kaydırılmış (indent) */
-    .ac-section .ac-main-table td:first-child {
-      padding-left: 12px;
-    }
-
-    .ac-detected-time {
-      font-size: 10px;
-      color: var(--text-muted);
-      font-family: var(--font-mono);
+      letter-spacing: 0.3px;  /* Sadece ek spacing */
     }
 
     /* Audio Path timestamp - extends .timestamp with smaller font */
     .ac-detected-time-subtle {
-      font-size: 10px;
+      font-size: var(--font-size-small);
       color: var(--text-muted);
       font-family: var(--font-mono);
       font-style: italic;
@@ -756,6 +751,136 @@
     .graph-feedback {
       color: var(--accent-orange);
       font-style: italic;
+    }
+
+    /* ========== Audio Path Tree (CSS-based branches) ========== */
+    /*
+     * Tree yapısı:
+     * - Dikey ve yatay dal uzunlukları EŞİT (--tree-unit)
+     * - Root gövdesi: yazının ORTASINDAN aşağı iner
+     * - Child dalları: segment ortasından çıkar
+     */
+    .audio-tree {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 4px 0;
+      --tree-color: var(--text-muted);
+      --tree-unit: 18px;     /* Dikey = Yatay dal uzunluğu */
+      --tree-line: 1px;      /* Çizgi kalınlığı */
+    }
+
+    .audio-tree-node {
+      display: flex;
+      align-items: center;
+      height: var(--tree-unit);
+      position: relative;
+    }
+
+    /* Branch container - tüm segmentleri tutar */
+    .tree-branch {
+      display: flex;
+      height: 100%;
+      flex-shrink: 0;
+    }
+
+    /* Tek segment kutusu */
+    .tree-segment {
+      position: relative;
+      width: var(--tree-unit);
+      height: 100%;
+      flex-shrink: 0;
+    }
+
+    /* ─── SEGMENT TİPLERİ ─── */
+
+    /* Vertical │ : tam dikey çizgi (sol kenardan) */
+    .tree-segment--vertical::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: var(--tree-line);
+      height: 100%;
+      background: var(--tree-color);
+    }
+
+    /* Fork ├ : tam dikey + yatay sağa (tam genişlik) */
+    .tree-segment--fork::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: var(--tree-line);
+      height: 100%;
+      background: var(--tree-color);
+    }
+    .tree-segment--fork::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: calc(50% - var(--tree-line) / 2);
+      width: 100%;
+      height: var(--tree-line);
+      background: var(--tree-color);
+    }
+
+    /* Corner └ : yarım dikey (üstten ortaya) + yatay sağa (tam genişlik) */
+    .tree-segment--corner::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: var(--tree-line);
+      height: calc(50% + var(--tree-line) / 2);
+      background: var(--tree-color);
+    }
+    .tree-segment--corner::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: calc(50% - var(--tree-line) / 2);
+      width: 100%;
+      height: var(--tree-line);
+      background: var(--tree-color);
+    }
+
+    /* ─── NODE İÇERİĞİ ─── */
+
+    .tree-node-name {
+      color: var(--text-primary);
+      position: relative;
+    }
+
+    /* Root node: yazının ortasından aşağı inen gövde çizgisi */
+    .audio-tree-node.tree-root .tree-node-name::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 100%;
+      width: var(--tree-line);
+      height: calc(var(--tree-unit) / 2);
+      background: var(--tree-color);
+      transform: translateX(-50%);
+    }
+
+    .tree-node-param {
+      color: var(--text-muted);
+      margin-left: 4px;
+    }
+
+    /* Monitor nodes (VU Meter, Analyser) - soluk stil */
+    .audio-tree-node.tree-node-monitor .tree-node-name,
+    .audio-tree-node.tree-node-monitor .tree-node-param {
+      color: var(--text-muted);
+    }
+
+    /* Encoder node - output vurgusu */
+    .audio-tree-node.tree-node-encoder .tree-node-name {
+      color: var(--accent-blue);
+    }
+    .audio-tree-node.tree-node-encoder .tree-node-param {
+      color: var(--accent-blue);
+      opacity: 0.7;
     }
 
     /* ========== Console Drawer ========== */
@@ -868,11 +993,6 @@
 
     .drawer-overlay.open ~ .drawer-handle .handle-chevron {
       transform: rotate(180deg);
-    }
-
-    /* Main content needs bottom padding for handle */
-    .main-content {
-      padding-bottom: var(--drawer-handle-height);
     }
 
     /* Locked Tab Info Banner */
