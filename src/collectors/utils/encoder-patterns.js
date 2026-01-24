@@ -30,33 +30,12 @@ export const PATTERN_PRIORITY = {
 };
 
 /**
- * Get pattern priority value
- * @param {string} pattern - Pattern name
- * @returns {number} Priority value (1-5)
- */
-export const getPatternPriority = (pattern) => {
-  return PATTERN_PRIORITY[pattern] || 1;
-};
-
-/**
- * Check if new pattern should override existing pattern
- * @param {string} existingPattern - Current pattern
- * @param {string} newPattern - New pattern to compare
- * @returns {boolean} True if new pattern should override
- */
-export const shouldOverridePattern = (existingPattern, newPattern) => {
-  return getPatternPriority(newPattern) > getPatternPriority(existingPattern);
-};
-
-/**
- * Opus application names mapping
+ * Opus application names mapping (internal)
  * 2048 = OPUS_APPLICATION_VOIP
  * 2049 = OPUS_APPLICATION_AUDIO
  * 2051 = OPUS_APPLICATION_LOWDELAY
- *
- * @type {Object<number, string>}
  */
-export const OPUS_APPLICATION_NAMES = {
+const OPUS_APPLICATION_NAMES = {
   2048: 'VoIP',
   2049: 'Audio',
   2051: 'LowDelay'

@@ -6,10 +6,16 @@
  * CSS: audio-tree.css
  *
  * Contains:
- * - AUDIO_NODE_DISPLAY_MAP: Node type to display mapping
+ * - AUDIO_NODE_DISPLAY_MAP: Merkezi node config (connectionType, category, label, tooltip)
+ * - mapNodeTypeToProcessorType(): ConnectionType → ProcessorType dönüşümü
+ * - isDestinationNodeType(): Destination node kontrolü
+ * - getNodeTypesByCategory(): Kategori bazlı node listesi
+ * - EFFECT_NODE_TYPES: Effect kategorisindeki node'lar
  * - formatProcessorForTree(): Format processor for tree display
  * - renderAudioPathTree(): Render audio path as nested ASCII tree
  * - measureTreeLabels(): Measure label widths for vertical line positioning
+ *
+ * CSS Selectors (TREE_SELECTORS, TREE_CLASSES): Regresyon koruması için sabitler
  */
 
 import {
@@ -19,26 +25,86 @@ import {
 } from './helpers.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AUDIO NODE DISPLAY MAPPING
+// CSS SELECTOR SABİTLERİ (Regresyon Koruması)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Bu sabitler CSS (audio-tree.css) ile senkron tutulmalıdır.
+// Class ismi değişikliği hem CSS hem JS tarafında yapılmalıdır.
+
+const TREE_SELECTORS = {
+  TREE_CONTAINER: '.audio-tree',
+  NODE_WITH_CHILDREN: '.tree-node.has-children',
+  LABEL: '.tree-label',
+  LABEL_TEXT: '.tree-label-text',
+  CHILDREN: '.tree-children',
+  DIRECT_CHILD_NODES: ':scope > .tree-node'
+};
+
+// CSS Class isimleri (renderNode'da kullanılır)
+const TREE_CLASSES = {
+  TREE_CONTAINER: 'audio-tree',
+  NODE: 'tree-node',
+  ROOT: 'tree-root',
+  HAS_CHILDREN: 'has-children',
+  MONITOR: 'tree-monitor',
+  LABEL: 'tree-label',
+  LABEL_TEXT: 'tree-label-text',
+  PARAM: 'tree-param',
+  CHILDREN: 'tree-children'
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUDIO NODE DISPLAY MAPPING (Merkezi Config)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Bu map tüm Audio Node bilgilerini içerir:
+// - connectionType: early-inject.js'den gelen PascalCase isim (getNodeTypeName sonucu)
+// - category: Node kategorisi (aşağıdaki typedef'e bakın)
+// - label: UI'da gösterilecek isim
+// - tooltip: Hover bilgisi
+// - getParam/getLabel: Dinamik değerler için fonksiyonlar (opsiyonel)
+//
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * @typedef {'source' | 'effect' | 'analysis' | 'channel' | 'processor' | 'destination'} NodeCategory
+ */
+
+/**
+ * @typedef {Object} NodeDisplayConfig
+ * @property {string} connectionType - early-inject.js'den gelen PascalCase isim
+ * @property {NodeCategory} category - Node kategorisi
+ * @property {string} label - UI'da gösterilecek varsayılan isim
+ * @property {string} tooltip - Hover bilgisi
+ * @property {function(Object): string|null} [getParam] - Dinamik parametre değeri
+ * @property {function(Object): string} [getLabel] - Dinamik label değeri
+ */
+
+/** @type {Object.<string, NodeDisplayConfig>} */
 export const AUDIO_NODE_DISPLAY_MAP = {
   // SOURCE NODES
   mediaStreamSource: {
+    connectionType: 'MediaStreamAudioSource',
+    category: 'source',
     label: 'Microphone',
     tooltip: 'MediaStreamAudioSourceNode'
   },
   mediaElementSource: {
+    connectionType: 'MediaElementAudioSource',
+    category: 'source',
     label: 'Media Player',
     tooltip: 'MediaElementAudioSourceNode',
     getParam: (proc) => proc.mediaType || null
   },
   bufferSource: {
+    connectionType: 'AudioBufferSource',
+    category: 'source',
     label: 'Audio Buffer',
     tooltip: 'AudioBufferSourceNode',
     getParam: (proc) => proc.loop ? 'loop' : null
   },
   oscillator: {
+    connectionType: 'Oscillator',
+    category: 'source',
     label: 'Tone Generator',
     tooltip: 'OscillatorNode',
     getParam: (proc) => {
@@ -53,12 +119,16 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   constantSource: {
+    connectionType: 'ConstantSource',
+    category: 'source',
     label: 'DC Offset',
     tooltip: 'ConstantSourceNode'
   },
 
   // EFFECT / PROCESSING NODES
   gain: {
+    connectionType: 'Gain',
+    category: 'effect',
     label: 'Volume',
     tooltip: 'GainNode',
     getParam: (proc) => {
@@ -80,6 +150,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   biquadFilter: {
+    connectionType: 'BiquadFilter',
+    category: 'effect',
     label: 'Filter',
     tooltip: 'BiquadFilterNode',
     getParam: (proc) => {
@@ -104,6 +176,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   dynamicsCompressor: {
+    connectionType: 'DynamicsCompressor',
+    category: 'effect',
     label: 'Compressor',
     tooltip: 'DynamicsCompressorNode',
     getParam: (proc) => {
@@ -117,11 +191,15 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   convolver: {
+    connectionType: 'Convolver',
+    category: 'effect',
     label: 'Reverb',
     tooltip: 'ConvolverNode',
     getParam: (proc) => proc.normalize === false ? 'raw' : null
   },
   delay: {
+    connectionType: 'Delay',
+    category: 'effect',
     label: 'Delay',
     tooltip: 'DelayNode',
     getParam: (proc) => {
@@ -134,6 +212,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   waveShaper: {
+    connectionType: 'WaveShaper',
+    category: 'effect',
     label: 'Distortion',
     tooltip: 'WaveShaperNode',
     getParam: (proc) => {
@@ -144,6 +224,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   stereoPanner: {
+    connectionType: 'StereoPanner',
+    category: 'effect',
     label: 'Panner',
     tooltip: 'StereoPannerNode',
     getParam: (proc) => {
@@ -155,6 +237,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   panner: {
+    connectionType: 'Panner',
+    category: 'effect',
     label: '3D Panner',
     tooltip: 'PannerNode',
     getParam: (proc) => {
@@ -163,12 +247,16 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   iirFilter: {
+    connectionType: 'IIRFilter',
+    category: 'effect',
     label: 'IIR Filter',
     tooltip: 'IIRFilterNode'
   },
 
   // ANALYSIS NODES
   analyser: {
+    connectionType: 'Analyser',
+    category: 'analysis',
     // Dynamic label based on usageType
     getLabel: (proc) => {
       // usageType: 'spectrum' | 'waveform' | null
@@ -192,11 +280,15 @@ export const AUDIO_NODE_DISPLAY_MAP = {
 
   // CHANNEL NODES
   channelSplitter: {
+    connectionType: 'ChannelSplitter',
+    category: 'channel',
     label: 'Splitter',
     tooltip: 'ChannelSplitterNode',
     getParam: (proc) => proc.numberOfOutputs ? `${proc.numberOfOutputs}ch` : null
   },
   channelMerger: {
+    connectionType: 'ChannelMerger',
+    category: 'channel',
     label: 'Merger',
     tooltip: 'ChannelMergerNode',
     getParam: (proc) => proc.numberOfInputs ? `${proc.numberOfInputs}ch` : null
@@ -204,6 +296,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
 
   // WORKLET / SCRIPT NODES
   audioWorkletNode: {
+    connectionType: 'AudioWorklet',
+    category: 'processor',
     label: 'Processor',
     tooltip: 'AudioWorkletNode',
     getParam: (proc) => {
@@ -223,6 +317,8 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     }
   },
   scriptProcessor: {
+    connectionType: 'ScriptProcessor',
+    category: 'processor',
     label: 'Processor',
     tooltip: 'ScriptProcessorNode (deprecated)',
     getParam: (proc) => {
@@ -235,14 +331,106 @@ export const AUDIO_NODE_DISPLAY_MAP = {
 
   // DESTINATION NODES
   mediaStreamDestination: {
+    connectionType: 'MediaStreamAudioDestination',
+    category: 'destination',
     label: 'Stream Output',
     tooltip: 'MediaStreamAudioDestinationNode'
   },
   destination: {
+    connectionType: 'AudioDestination',
+    category: 'destination',
     label: 'Speakers',
     tooltip: 'AudioDestinationNode'
   }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER FONKSIYONLAR (Merkezi Config'den Türetilmiş)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// connectionType → processorType lookup cache (lazy init)
+let _connectionTypeMap = null;
+
+function getConnectionTypeMap() {
+  if (!_connectionTypeMap) {
+    _connectionTypeMap = new Map();
+    for (const [processorType, config] of Object.entries(AUDIO_NODE_DISPLAY_MAP)) {
+      if (config.connectionType) {
+        _connectionTypeMap.set(config.connectionType, processorType);
+      }
+    }
+  }
+  return _connectionTypeMap;
+}
+
+/**
+ * Connection type (PascalCase) → Processor type (camelCase) dönüşümü
+ * Örnek: 'AudioWorklet' → 'audioWorkletNode'
+ */
+export function mapNodeTypeToProcessorType(nodeType) {
+  if (!nodeType || typeof nodeType !== 'string') return null;
+
+  const map = getConnectionTypeMap();
+  const mapped = map.get(nodeType);
+  if (mapped) return mapped;
+
+  // Fallback: PascalCase → camelCase dönüşümü
+  return nodeType.charAt(0).toLowerCase() + nodeType.slice(1);
+}
+
+/**
+ * Node type'ın destination olup olmadığını kontrol eder
+ * Hem connectionType hem processorType destekler
+ */
+export function isDestinationNodeType(nodeType) {
+  if (!nodeType || typeof nodeType !== 'string') return false;
+
+  // processorType olarak kontrol
+  const config = AUDIO_NODE_DISPLAY_MAP[nodeType];
+  if (config?.category === 'destination') return true;
+
+  // connectionType olarak kontrol
+  const processorType = mapNodeTypeToProcessorType(nodeType);
+  const mappedConfig = AUDIO_NODE_DISPLAY_MAP[processorType];
+  return mappedConfig?.category === 'destination';
+}
+
+/**
+ * Belirli kategorideki node type'larını döndürür
+ * Örnek: getNodeTypesByCategory('effect') → ['gain', 'biquadFilter', ...]
+ */
+export function getNodeTypesByCategory(category) {
+  return Object.entries(AUDIO_NODE_DISPLAY_MAP)
+    .filter(([, config]) => config.category === category)
+    .map(([type]) => type);
+}
+
+/**
+ * Effect kategorisindeki node type'ları (extractProcessingInfo için)
+ */
+export const EFFECT_NODE_TYPES = getNodeTypesByCategory('effect');
+
+/**
+ * Input source → Root tooltip mapping (OCP: yeni source türleri buraya eklenir)
+ * @type {Object.<string, string>}
+ */
+const INPUT_SOURCE_TOOLTIPS = {
+  microphone: 'MediaStreamAudioSourceNode',
+  remote: 'MediaStreamAudioSourceNode (remote)',
+  element: 'MediaElementAudioSourceNode',
+  buffer: 'AudioBufferSourceNode',
+  oscillator: 'OscillatorNode'
+};
+
+/**
+ * Input source için tooltip döndürür
+ * @param {string|null|undefined} inputSource
+ * @returns {string}
+ */
+function getInputSourceTooltip(inputSource) {
+  if (!inputSource) return 'AudioSourceNode';
+  return INPUT_SOURCE_TOOLTIPS[inputSource] || 'AudioSourceNode';
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TREE FORMATTING
@@ -289,14 +477,8 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
   }
 
   const buildNestedTree = () => {
-    const rootLabel = inputSource
-      ? capitalizeFirst(inputSource)
-      : 'Source';
-    const rootTooltip = inputSource === 'microphone'
-      ? 'MediaStreamAudioSourceNode'
-      : inputSource === 'remote'
-        ? 'MediaStreamAudioSourceNode (remote)'
-        : 'AudioSourceNode';
+    const rootLabel = inputSource ? capitalizeFirst(inputSource) : 'Source';
+    const rootTooltip = getInputSourceTooltip(inputSource);
     const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
 
     const chainProcessors = (mainProcessors || []).filter(p => p.type !== 'mediaStreamSource');
@@ -352,26 +534,27 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
     const hasChildren = node.children && node.children.length > 0;
     const charCount = getCharCount(node);
 
-    const classes = ['tree-node'];
-    if (isRoot) classes.push('tree-root');
-    if (hasChildren) classes.push('has-children');
-    if (node.isMonitor) classes.push('tree-monitor');
+    // CSS class'ları sabitlerden al (regresyon koruması)
+    const classes = [TREE_CLASSES.NODE];
+    if (isRoot) classes.push(TREE_CLASSES.ROOT);
+    if (hasChildren) classes.push(TREE_CLASSES.HAS_CHILDREN);
+    if (node.isMonitor) classes.push(TREE_CLASSES.MONITOR);
 
     // Label ve param ayri elementler - JS olcumu icin gerekli
-    const labelHtml = `<span class="tree-label-text">${escapeHtml(node.label)}</span>`;
+    const labelHtml = `<span class="${TREE_CLASSES.LABEL_TEXT}">${escapeHtml(node.label)}</span>`;
     const paramHtml = node.param
-      ? `<span class="tree-param">(${escapeHtml(node.param)})</span>`
+      ? `<span class="${TREE_CLASSES.PARAM}">(${escapeHtml(node.param)})</span>`
       : '';
 
     const hasValidTooltip = node.tooltip && String(node.tooltip).trim().length > 0;
-    const labelClass = hasValidTooltip ? 'tree-label has-tooltip' : 'tree-label';
+    const labelClass = hasValidTooltip ? `${TREE_CLASSES.LABEL} has-tooltip` : TREE_CLASSES.LABEL;
     const tooltipAttr = hasValidTooltip ? ` data-tooltip="${escapeHtml(node.tooltip)}"` : '';
 
     let html = `<div class="${classes.join(' ')}">`;
     html += `<span class="${labelClass}"${tooltipAttr}>${labelHtml}${paramHtml}</span>`;
 
     if (hasChildren) {
-      html += `<div class="tree-children" style="--parent-chars: ${charCount}">`;
+      html += `<div class="${TREE_CLASSES.CHILDREN}" style="--parent-chars: ${charCount}">`;
       node.children.forEach(child => {
         html += renderNode(child, false);
       });
@@ -382,7 +565,7 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
     return html;
   };
 
-  return `<div class="audio-tree">${renderNode(tree, true)}</div>`;
+  return `<div class="${TREE_CLASSES.TREE_CONTAINER}">${renderNode(tree, true)}</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -396,31 +579,37 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
  * Called after DOM render via requestAnimationFrame in popup.js
  */
 export function measureTreeLabels() {
-  const treeNodes = document.querySelectorAll('.tree-node.has-children');
+  // --tree-unit degerini CSS'den oku (DRY: audio-tree.css ile senkron)
+  const audioTree = document.querySelector(TREE_SELECTORS.TREE_CONTAINER);
+  const treeUnit = audioTree
+    ? parseFloat(getComputedStyle(audioTree).getPropertyValue('--tree-unit')) || 16
+    : 16;
+
+  // Selector sabitleri kullan (regresyon koruması)
+  const treeNodes = document.querySelectorAll(TREE_SELECTORS.NODE_WITH_CHILDREN);
 
   treeNodes.forEach(node => {
-    const label = node.querySelector('.tree-label');
-    const labelText = node.querySelector('.tree-label-text');
-    const children = node.querySelector('.tree-children');
+    const label = node.querySelector(TREE_SELECTORS.LABEL);
+    const labelText = node.querySelector(TREE_SELECTORS.LABEL_TEXT);
+    const children = node.querySelector(TREE_SELECTORS.CHILDREN);
 
     if (labelText && children && label) {
       // 1. Label-text genisligini olc
       const labelTextWidth = labelText.getBoundingClientRect().width;
       const labelTextLeft = labelText.offsetLeft; // Label icindeki pozisyon
 
-      // 2. Govde cizgisi pozisyonu = label-text merkezi
+      // 2. Govde cizgisi pozisyonu = label-text merkezi (Math.round: subpixel önleme)
       const stemLeft = labelTextLeft + (labelTextWidth / 2);
-      label.style.setProperty('--stem-left', `${stemLeft}px`);
+      label.style.setProperty('--stem-left', `${Math.round(stemLeft)}px`);
 
-      // 3. Children margin = label-text merkezi
+      // 3. Children margin = label-text merkezi (Math.round: subpixel önleme)
       const center = labelTextWidth / 2;
-      children.style.setProperty('--parent-center', `${center}px`);
+      children.style.setProperty('--parent-center', `${Math.round(center)}px`);
 
       // 4. Dikey cizgi height hesapla (son child'in yatay dal seviyesine kadar)
-      const childNodes = children.querySelectorAll(':scope > .tree-node');
+      const childNodes = children.querySelectorAll(TREE_SELECTORS.DIRECT_CHILD_NODES);
       if (childNodes.length > 0) {
         const lastChild = childNodes[childNodes.length - 1];
-        const treeUnit = 16; // --tree-unit CSS degeri
         // Son child'in offsetTop + yatay dal seviyesi (tree-unit / 2)
         const lineHeight = lastChild.offsetTop + (treeUnit / 2);
         children.style.setProperty('--vertical-line-height', `${lineHeight}px`);

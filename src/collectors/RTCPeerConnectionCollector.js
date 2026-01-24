@@ -54,9 +54,8 @@ class RTCPeerConnectionCollector extends PollingCollector {
     logger.info(this.logPrefix, `New RTCPeerConnection created`);
     this.emit(EVENTS.CONNECTION_CREATED, { pc });
 
-    // Track remote audio streams for source detection
-    // AudioContextCollector will query streamRegistry to distinguish microphone vs remote
-    pc.addEventListener('track', (event) => {
+    // Named handler references for cleanup (prevents memory leak)
+    const trackHandler = (event) => {
       if (event.track.kind === 'audio') {
         for (const stream of event.streams) {
           streamRegistry.remote.add(stream.id);
@@ -71,16 +70,25 @@ class RTCPeerConnectionCollector extends PollingCollector {
           }
         });
       }
-    });
+    };
 
-    // Clean up when closed or failed
-    pc.addEventListener('connectionstatechange', () => {
+    const stateHandler = () => {
       if (pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        // Cleanup: Remove event listeners to prevent memory leak
+        pc.removeEventListener('track', trackHandler);
+        pc.removeEventListener('connectionstatechange', stateHandler);
         this.peerConnections.delete(pc);
         logger.info(this.logPrefix, `PeerConnection removed (${pc.connectionState})`);
         this.emit(EVENTS.CONNECTION_CLOSED, { pc, state: pc.connectionState });
       }
-    });
+    };
+
+    // Track remote audio streams for source detection
+    // AudioContextCollector will query streamRegistry to distinguish microphone vs remote
+    pc.addEventListener('track', trackHandler);
+
+    // Clean up when closed or failed
+    pc.addEventListener('connectionstatechange', stateHandler);
   }
 
   /**

@@ -1130,27 +1130,22 @@ function installAnalyserUsageHooks() {
   // Waveform/VU meter methods (time domain)
   const waveformMethods = ['getByteTimeDomainData', 'getFloatTimeDomainData'];
 
-  // Hook spectrum methods
-  for (const methodName of spectrumMethods) {
-    if (typeof proto[methodName] === 'function') {
-      const original = proto[methodName];
-      proto[methodName] = function(array) {
-        markAnalyserUsage(this, 'spectrum');
-        return original.call(this, array);
-      };
+  // Helper to hook analyser methods with usage type
+  // ⚠️ SYNC: Same pattern in early-inject.js - keep both in sync
+  const hookAnalyserMethods = (methods, usageType) => {
+    for (const methodName of methods) {
+      if (typeof proto[methodName] === 'function') {
+        const original = proto[methodName];
+        proto[methodName] = function(array) {
+          markAnalyserUsage(this, usageType);
+          return original.call(this, array);
+        };
+      }
     }
-  }
+  };
 
-  // Hook waveform methods
-  for (const methodName of waveformMethods) {
-    if (typeof proto[methodName] === 'function') {
-      const original = proto[methodName];
-      proto[methodName] = function(array) {
-        markAnalyserUsage(this, 'waveform');
-        return original.call(this, array);
-      };
-    }
-  }
+  hookAnalyserMethods(spectrumMethods, 'spectrum');
+  hookAnalyserMethods(waveformMethods, 'waveform');
 
   logger.info(LOG_PREFIX.INSPECTOR, '✅ Hooked AnalyserNode prototype methods for usage detection');
 }

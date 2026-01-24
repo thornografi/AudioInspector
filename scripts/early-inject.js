@@ -507,27 +507,21 @@
       // Waveform/VU meter methods (time domain)
       const waveformMethods = ['getByteTimeDomainData', 'getFloatTimeDomainData'];
 
-      // Hook spectrum methods
-      for (const methodName of spectrumMethods) {
-        if (typeof analyserProto[methodName] === 'function') {
-          const original = analyserProto[methodName];
-          analyserProto[methodName] = function(array) {
-            markAnalyserUsage(this, 'spectrum');
-            return original.call(this, array);
-          };
+      // Helper to hook analyser methods with usage type
+      const hookAnalyserMethods = (methods, usageType) => {
+        for (const methodName of methods) {
+          if (typeof analyserProto[methodName] === 'function') {
+            const original = analyserProto[methodName];
+            analyserProto[methodName] = function(array) {
+              markAnalyserUsage(this, usageType);
+              return original.call(this, array);
+            };
+          }
         }
-      }
+      };
 
-      // Hook waveform methods
-      for (const methodName of waveformMethods) {
-        if (typeof analyserProto[methodName] === 'function') {
-          const original = analyserProto[methodName];
-          analyserProto[methodName] = function(array) {
-            markAnalyserUsage(this, 'waveform');
-            return original.call(this, array);
-          };
-        }
-      }
+      hookAnalyserMethods(spectrumMethods, 'spectrum');
+      hookAnalyserMethods(waveformMethods, 'waveform');
 
       console.log('[AudioInspector] Early: Hooked AnalyserNode prototype methods for usage detection');
     }
@@ -630,8 +624,9 @@
         window.__audioConnectionHandler(connection);
       }
 
-      // Log important connections (destination node or MediaStreamDestination)
-      if (destType === 'AudioDestination' || destType === 'MediaStreamDestination') {
+      // Log important connections (destination nodes)
+      // Note: getNodeTypeName() returns 'MediaStreamAudioDestination' (from constructor.name.replace('Node', ''))
+      if (destType === 'AudioDestination' || destType === 'MediaStreamAudioDestination') {
         console.log(`[AudioInspector] Early: ${sourceType} → ${destType}`);
       }
 

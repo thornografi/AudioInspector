@@ -7,6 +7,7 @@
 .audio-tree {
   font-family: var(--font-mono);
   font-size: 11px;
+  line-height: 14px;  /* Tam piksel - subpixel label yuksekligi onleme */
   padding: 4px 0;
   --tree-color: var(--text-muted);
   --tree-unit: 16px;
@@ -92,7 +93,7 @@
   display: flex;
   align-items: flex-start;
   flex-direction: column;
-  padding-top: calc(var(--tree-unit) / 2 - 0.5em);
+  padding-top: 3px;  /* Sabit tam piksel - subpixel (2.5px) yerine, cizgi kalinlik tutarliligi icin */
 }
 
 /* Varyantlar */

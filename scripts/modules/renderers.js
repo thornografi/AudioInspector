@@ -23,7 +23,13 @@ import {
   debugLog
 } from './helpers.js';
 
-import { renderAudioPathTree } from './audio-tree.js';
+import {
+  renderAudioPathTree,
+  mapNodeTypeToProcessorType,
+  isDestinationNodeType,
+  EFFECT_NODE_TYPES,
+  AUDIO_NODE_DISPLAY_MAP
+} from './audio-tree.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -318,32 +324,8 @@ export function filterConnectionsByContext(connections, contexts) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUDIO PATH GRAPH HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
-
-export function mapNodeTypeToProcessorType(nodeType) {
-  if (!nodeType || typeof nodeType !== 'string') return null;
-  switch (nodeType) {
-    case 'AudioWorklet': return 'audioWorkletNode';
-    case 'ScriptProcessor': return 'scriptProcessor';
-    case 'Analyser': return 'analyser';
-    case 'Gain': return 'gain';
-    case 'BiquadFilter': return 'biquadFilter';
-    case 'DynamicsCompressor': return 'dynamicsCompressor';
-    case 'Oscillator': return 'oscillator';
-    case 'Delay': return 'delay';
-    case 'Convolver': return 'convolver';
-    case 'WaveShaper': return 'waveShaper';
-    case 'Panner': return 'panner';
-    default:
-      return nodeType.charAt(0).toLowerCase() + nodeType.slice(1);
-  }
-}
-
-export function isDestinationNodeType(nodeType) {
-  if (!nodeType || typeof nodeType !== 'string') return false;
-  return nodeType === 'AudioDestination' ||
-    nodeType === 'MediaStreamAudioDestination' ||
-    nodeType === 'MediaStreamDestination';
-}
+// mapNodeTypeToProcessorType ve isDestinationNodeType artık audio-tree.js'den
+// import ediliyor (merkezi AUDIO_NODE_DISPLAY_MAP'ten türetilmiş)
 
 /**
  * Derive the main Audio Path chain from the connection graph
@@ -467,6 +449,7 @@ export function dedupeMediaStreamSources(processors) {
 
 /**
  * Extract Processing and Effects info from processors
+ * OCP: AUDIO_NODE_DISPLAY_MAP ve EFFECT_NODE_TYPES kullanır
  */
 export function extractProcessingInfo(mainProcessors, monitors) {
   let processingText = '';
@@ -483,17 +466,11 @@ export function extractProcessingInfo(mainProcessors, monitors) {
     processingText = 'ScriptProcessor';
   }
 
-  const effectNodes = [];
-
-  mainProcessors.forEach(p => {
-    if (p.type === 'biquadFilter') effectNodes.push('Filter');
-    else if (p.type === 'convolver') effectNodes.push('Reverb');
-    else if (p.type === 'delay') effectNodes.push('Delay');
-    else if (p.type === 'dynamicsCompressor') effectNodes.push('Compressor');
-    else if (p.type === 'waveShaper') effectNodes.push('Distortion');
-    else if (p.type === 'stereoPanner') effectNodes.push('Panner');
-    else if (p.type === 'panner') effectNodes.push('3D Panner');
-  });
+  // OCP: Merkezi config'den effect label'larını al
+  const effectNodes = mainProcessors
+    .filter(p => EFFECT_NODE_TYPES.includes(p.type))
+    .map(p => AUDIO_NODE_DISPLAY_MAP[p.type]?.label)
+    .filter(Boolean);
 
   const uniqueEffects = [...new Set(effectNodes)];
   if (uniqueEffects.length > 0) {
