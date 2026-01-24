@@ -84,6 +84,22 @@ audio-inspector/
   - JS: `ApiHook.js`, `constants.js` → API hooking, veri sabitleri
 - Tekrar eden değerler → `constants.js` veya CSS değişkeni
 
+#### ⚠️ Duplicate Kod Uyarısı (Known Trade-off)
+`early-inject.js` ve `EarlyHook.js` bazı fonksiyonları **kasıtlı olarak** duplicate içerir:
+
+| Fonksiyon | early-inject.js | EarlyHook.js |
+|-----------|-----------------|--------------|
+| `getAnalyserUsageMap()` | ✓ | ✓ |
+| `markAnalyserUsage()` | ✓ | ✓ |
+| `getNodeIdMap()` | ✓ | ✓ |
+| `getNextNodeId()` | ✓ | ✓ |
+
+**Neden Kaçınılmaz:**
+- `early-inject.js` = IIFE, MAIN world, `document_start` timing → ES module import YAPAMAZ
+- `EarlyHook.js` = ES module, page.js tarafından import edilir → `document_start`'tan SONRA yüklenir
+
+**Değişiklik yaparken HER İKİ DOSYAYI güncelle!** Dosyalardaki `// ⚠️ SYNC:` comment'lerini takip et.
+
 ### OCP (Open-Closed Principle)
 - `data-attribute` > sabit içerik
 - Config nesnesi > çoklu if-else

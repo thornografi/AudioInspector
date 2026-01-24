@@ -184,3 +184,23 @@ window.__myHandler = (instance) => { ... };
   - AudioNode.connect hook
   - Connection tracking
   - Graph topology
+
+## AnalyserNode usageType
+
+AnalyserNode'ların gerçek kullanım amacı (spectrum vs VU meter) hook'lanarak tespit edilir:
+
+| Kullanım | Tetikleyen Metodlar | usageType |
+|----------|---------------------|-----------|
+| Spectrum Analyzer | `getByteFrequencyData()`, `getFloatFrequencyData()` | `'spectrum'` |
+| VU Meter / Waveform | `getByteTimeDomainData()`, `getFloatTimeDomainData()` | `'waveform'` |
+
+**Global Map:** `window.__audioInspectorAnalyserUsageMap` (WeakMap)
+
+**Handler:** `window.__analyserUsageHandler` → Real-time UI güncellemesi
+
+**UI Etkisi:**
+- Spectrum → "Spectrum (2048pt)" ← fftSize parametresi gösterilir
+- VU Meter → "VU Meter" ← parametresiz (fftSize time domain için anlamsız)
+- Bilinmeyen → "Analyzer" ← fallback
+
+**Detay:** [references/early-hooks.md](references/early-hooks.md) → `installAnalyserUsageHooks()`

@@ -84,6 +84,30 @@ export function normalizeMimeType(mimeType) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AUDIO SPEC FORMATTING (DRY: Industry-standard formats)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Format bit depth for display (industry standard: hyphenated)
+ * @param {number|string} value - Bit depth value (e.g., 16, 24, 32)
+ * @returns {string} Formatted bit depth (e.g., "16-bit") or "-" if invalid
+ */
+export function formatBitDepth(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  return `${value}-bit`;
+}
+
+/**
+ * Format channel count for display (industry standard: compact)
+ * @param {number|string} value - Channel count (e.g., 1, 2, 6)
+ * @returns {string} Formatted channels (e.g., "2ch") or "-" if invalid
+ */
+export function formatChannels(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  return `${value}ch`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // QUALITY METRICS
 // ═══════════════════════════════════════════════════════════════════════════════
 

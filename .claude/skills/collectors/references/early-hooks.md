@@ -182,3 +182,79 @@ async stop() {
 | `getInstanceRegistry()` | Yakalanan instance'ları döndür |
 | `cleanupClosedAudioContexts()` | Registry'den closed olanları temizle |
 | `clearRegistryKey(key)` | Belirli registry key'ini temizle |
+| `getAnalyserUsageType(node)` | AnalyserNode'un usageType'ını döndür |
+| `installAnalyserUsageHooks()` | AnalyserNode method hook'larını kur |
+
+## AnalyserNode Usage Detection
+
+AnalyserNode'ların gerçek kullanım amacını tespit eder (spectrum analyzer vs VU meter).
+
+### Hook Mekanizması
+
+```javascript
+// EarlyHook.js - installAnalyserUsageHooks()
+// ⚠️ SYNC: Duplicate in early-inject.js - keep both in sync
+
+// Spectrum analysis methods (frequency domain)
+const spectrumMethods = ['getByteFrequencyData', 'getFloatFrequencyData'];
+// Waveform/VU meter methods (time domain)
+const waveformMethods = ['getByteTimeDomainData', 'getFloatTimeDomainData'];
+
+// Hook spectrum methods → markAnalyserUsage(this, 'spectrum')
+// Hook waveform methods → markAnalyserUsage(this, 'waveform')
+```
+
+### Global State
+
+| Global | Tip | Amaç |
+|--------|-----|------|
+| `window.__audioInspectorAnalyserUsageMap` | WeakMap | AnalyserNode → usageType mapping |
+| `window.__analyserUsageHandler` | Function | Real-time UI güncellemesi |
+
+### Handler Lifecycle
+
+```javascript
+// AudioContextCollector.js
+start() {
+  window.__analyserUsageHandler = (node, usageType) => {
+    this._handleAnalyserUsageDetected(node, usageType);
+  };
+}
+
+stop() {
+  window.__analyserUsageHandler = null;  // Cleanup
+}
+```
+
+### UI'da usageType Kullanımı
+
+```javascript
+// audio-tree.js → AUDIO_NODE_DISPLAY_MAP.analyser
+analyser: {
+  getLabel: (proc) => {
+    const usageLabels = {
+      'spectrum': 'Spectrum',
+      'waveform': 'VU Meter'
+    };
+    return usageLabels[proc.usageType] || 'Analyzer';
+  },
+  getParam: (proc) => {
+    // fftSize sadece spectrum için anlamlı
+    if (proc.usageType === 'spectrum' && proc.fftSize) {
+      return `${proc.fftSize}pt`;
+    }
+    return null;  // VU Meter için parametre gösterme
+  }
+}
+```
+
+### Duplicate Fonksiyonlar (Known Trade-off)
+
+Aşağıdaki fonksiyonlar hem `early-inject.js` hem `EarlyHook.js`'de var:
+
+| Fonksiyon | Neden Duplicate |
+|-----------|-----------------|
+| `getAnalyserUsageMap()` | IIFE vs ES module timing |
+| `markAnalyserUsage()` | Both need access to same WeakMap |
+
+**Değişiklik yaparken HER İKİ DOSYAYI güncelle!**

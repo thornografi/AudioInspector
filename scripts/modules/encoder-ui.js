@@ -14,6 +14,7 @@ import {
   formatWorkletName,
   extractCodecName,
   normalizeMimeType,
+  formatBitDepth,
   debugLog
 } from './helpers.js';
 
@@ -30,7 +31,7 @@ const OPUS_FRAME_SIZES_MS = [2.5, 5, 10, 20, 40, 60];
 export function renderStatusPulse(text, tooltip) {
   const safeText = escapeHtml(text);
   if (tooltip) {
-    return `<span class="has-tooltip status-pulse" data-tooltip="${escapeHtml(tooltip)}">${safeText}</span>`;
+    return `<span class="has-tooltip tooltip-right status-pulse" data-tooltip="${escapeHtml(tooltip)}">${safeText}</span>`;
   }
   return `<span class="status-pulse">${safeText}</span>`;
 }
@@ -254,7 +255,7 @@ export function buildInputRow(inputInfo) {
   return {
     label: 'Input',
     value: inputInfo.tooltip
-      ? `<span class="has-tooltip" data-tooltip="${inputInfo.tooltip}">${inputInfo.icon} ${inputInfo.label}</span>`
+      ? `<span class="has-tooltip tooltip-right" data-tooltip="${inputInfo.tooltip}">${inputInfo.icon} ${inputInfo.label}</span>`
       : `${inputInfo.icon} ${inputInfo.label}`,
     isMetric: false
   };
@@ -355,7 +356,7 @@ export const ENCODER_DETECTORS = [
         if (encoderTooltip) {
           rows.push({
             label: 'Encoder',
-            value: `<span class="has-tooltip" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`,
+            value: `<span class="has-tooltip tooltip-right" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`,
             isMetric: true
           });
         } else {
@@ -382,11 +383,11 @@ export const ENCODER_DETECTORS = [
       }
 
       // Bit Depth (important for PCM/WAV - shows sample format: 16-bit int, 32-bit float, etc.)
-      if (enc.wavBitDepth) {
-        rows.push({ label: 'Bit Depth', value: `${enc.wavBitDepth}bit`, isMetric: true });
-      } else {
-        rows.push({ label: 'Bit Depth', value: '-', isMetric: false });
-      }
+      rows.push({
+        label: 'Bit Depth',
+        value: formatBitDepth(enc.wavBitDepth),
+        isMetric: !!enc.wavBitDepth
+      });
 
       // Bitrate - always show, dynamically calculated from blob size / duration
       if (enc.bitRate && enc.bitRate > 0) {
@@ -394,7 +395,7 @@ export const ENCODER_DETECTORS = [
       } else if (enc.isLiveEstimate === true) {
         rows.push({
           label: 'Bitrate',
-          value: '<span class="has-tooltip" data-tooltip="Calculated when recording stops">Calculating...</span>',
+          value: '<span class="has-tooltip tooltip-right" data-tooltip="Calculated when recording stops">Calculating...</span>',
           isMetric: false
         });
       } else {
@@ -459,7 +460,7 @@ export const ENCODER_DETECTORS = [
         // Encoder type - Browser's built-in WebRTC encoder
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="Browser WebRTC encoder">🌐 WebRTC Native</span>',
+          value: '<span class="has-tooltip tooltip-right" data-tooltip="Browser WebRTC encoder">🌐 WebRTC Native</span>',
           isMetric: false
         }
       ];
@@ -516,19 +517,19 @@ export const ENCODER_DETECTORS = [
         },
         {
           label: 'Container',
-          value: renderStatusPulse('Detecting...', 'From mimeType'),
+          value: renderStatusPulse('Detecting...'),
           isMetric: false
         },
         {
           label: 'Bitrate',
           value: mr.audioBitsPerSecond
             ? `${Math.round(mr.audioBitsPerSecond / 1000)} kbps`
-            : renderStatusPulse('Detecting...', 'When encoding starts'),
+            : renderStatusPulse('Detecting...'),
           isMetric: !!mr.audioBitsPerSecond
         },
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="Browser MediaRecorder">🌐 MediaRecorder API</span>',
+          value: '<span class="has-tooltip tooltip-right" data-tooltip="Browser MediaRecorder">🌐 MediaRecorder API</span>',
           isMetric: true
         },
         {
@@ -591,7 +592,7 @@ export const ENCODER_DETECTORS = [
       // This distinguishes from WASM encoders like opus-recorder, lamejs, etc.
       rows.push({
         label: 'Encoder',
-        value: '<span class="has-tooltip" data-tooltip="Browser MediaRecorder (native)">🌐 MediaRecorder API</span>',
+        value: '<span class="has-tooltip tooltip-right" data-tooltip="Browser MediaRecorder (native)">🌐 MediaRecorder API</span>',
         isMetric: false
       });
 
@@ -683,37 +684,37 @@ export const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: renderStatusPulse('Detecting...', 'Confirmed when Blob created'),
+            value: renderStatusPulse('Detecting...'),
             isMetric: false
           },
           {
             label: 'Encoder',
-            value: renderStatusPulse('Detecting...', `Pending - ${pipelineType} detected`),
+            value: renderStatusPulse('Detecting...'),
             isMetric: false
           },
           {
             label: 'Container',
-            value: renderStatusPulse('Detecting...', 'From output Blob mimeType'),
+            value: renderStatusPulse('Detecting...'),
             isMetric: false
           },
           {
             label: 'Library',
-            value: renderStatusPulse('Detecting...', 'From WASM/Worker analysis'),
+            value: renderStatusPulse('Detecting...'),
             isMetric: false
           },
           {
             label: 'Bit Depth',
-            value: renderStatusPulse('Detecting...', 'From WAV header or config'),
+            value: renderStatusPulse('Detecting...'),
             isMetric: false
           },
           {
             label: 'Bitrate',
-            value: renderStatusPulse('Calculating...', 'From Blob size/duration'),
+            value: renderStatusPulse('Calculating...'),
             isMetric: false
           },
           {
             label: 'Input',
-            value: `<span class="has-tooltip" data-tooltip="WebAudio processing tech">${encoderInput || pipelineType}</span>`,
+            value: encoderInput || pipelineType,
             isMetric: true
           }
         ]
@@ -763,12 +764,12 @@ export const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: '<span class="has-tooltip" data-tooltip="Raw PCM (Float32Array)">Raw PCM</span>',
+            value: '<span class="has-tooltip tooltip-right" data-tooltip="Raw PCM (Float32Array)">Raw PCM</span>',
             isMetric: true
           },
           {
             label: 'Encoder',
-            value: '<span class="has-tooltip" data-tooltip="Heuristic - encoding unconfirmed">ScriptProcessor</span>',
+            value: '<span class="has-tooltip tooltip-right" data-tooltip="Heuristic - encoding unconfirmed">ScriptProcessor</span>',
             isMetric: false
           }
         ]

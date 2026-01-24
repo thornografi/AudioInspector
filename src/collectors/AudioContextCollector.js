@@ -4,7 +4,7 @@ import BaseCollector from './BaseCollector.js';
 import { EVENTS, DATA_TYPES, DESTINATION_TYPES, streamRegistry, ENCODER_KEYWORDS } from '../core/constants.js';
 import { logger } from '../core/Logger.js';
 import { hookAsyncMethod, hookMethod } from '../core/utils/ApiHook.js';
-import { getInstanceRegistry, cleanupClosedAudioContexts } from '../core/utils/EarlyHook.js';
+import { getInstanceRegistry, cleanupClosedAudioContexts, getAnalyserUsageType } from '../core/utils/EarlyHook.js';
 import { METHOD_CALL_SYNC_HANDLERS } from './utils/processor-handlers.js';
 import { PATTERN_PRIORITY, getOpusApplicationName } from './utils/encoder-patterns.js';
 
@@ -240,6 +240,12 @@ class AudioContextCollector extends BaseCollector {
     // This captures the audio graph topology: who connects to whom
     this.registerGlobalHandler('__audioConnectionHandler', (connection) => {
       this._handleAudioConnection(connection);
+    });
+
+    // 12. Register AnalyserNode usage handler (from prototype hooks)
+    // Updates analyser processor with usageType when methods are called
+    this.registerGlobalHandler('__analyserUsageHandler', (node, usageType) => {
+      this._handleAnalyserUsage(node, usageType);
     });
 
   }
@@ -704,6 +710,9 @@ class AudioContextCollector extends BaseCollector {
 
   /**
    * Handle createAnalyser calls - indicates VU meter / audio visualization
+   * Usage type is determined by which method is called first:
+   * - getByteFrequencyData/getFloatFrequencyData → 'spectrum'
+   * - getByteTimeDomainData/getFloatTimeDomainData → 'waveform'
    * @private
    * @param {AnalyserNode} node
    */
@@ -712,19 +721,71 @@ class AudioContextCollector extends BaseCollector {
       const ctxData = this._getContextData(node.context);
 
       if (ctxData) {
-          // Analyser'ı processor olarak ekle (duplicate check)
-          if (!ctxData.pipeline.processors.some(p => p.type === 'analyser')) {
-            ctxData.pipeline.processors.push({
-              type: 'analyser',
-              timestamp: Date.now()
-            });
-            ctxData.pipeline.timestamp = Date.now();
+          const nodeId = this._getOrAssignNodeId(node);
+          const usageType = getAnalyserUsageType(node); // 'spectrum' | 'waveform' | null
+
+          // Analyser'ı processor olarak ekle (duplicate check by nodeId)
+          const existingIdx = nodeId
+            ? ctxData.pipeline.processors.findIndex(p => p.type === 'analyser' && p.nodeId === nodeId)
+            : ctxData.pipeline.processors.findIndex(p => p.type === 'analyser');
+
+          const processorEntry = {
+            type: 'analyser',
+            nodeId,
+            fftSize: node.fftSize || 2048,
+            usageType: usageType, // 'spectrum' | 'waveform' | null
+            timestamp: Date.now()
+          };
+
+          if (existingIdx >= 0) {
+            // Update existing entry (usageType may have been detected after initial add)
+            ctxData.pipeline.processors[existingIdx] = processorEntry;
+          } else {
+            ctxData.pipeline.processors.push(processorEntry);
           }
+          ctxData.pipeline.timestamp = Date.now();
+
           // Re-emit updated context data
           this.emit(EVENTS.DATA, ctxData);
-          logger.info(this.logPrefix, `AnalyserNode created - VU meter/visualizer detected (context: ${ctxData.contextId})`);
+
+          const usageInfo = usageType ? ` (${usageType})` : '';
+          logger.info(this.logPrefix, `AnalyserNode created${usageInfo} (context: ${ctxData.contextId})`);
       } else {
           logger.warn(this.logPrefix, `AnalyserNode created but context is ${node.context === null ? 'null' : 'undefined'}`);
+      }
+  }
+
+  /**
+   * Handle AnalyserNode usage type detection (from prototype hooks)
+   * Updates existing analyser processor entry with usageType
+   * @private
+   * @param {AnalyserNode} node
+   * @param {'spectrum' | 'waveform'} usageType
+   */
+  _handleAnalyserUsage(node, usageType) {
+      if (!this.active) return;
+
+      const ctxData = this._getContextData(node.context);
+      if (!ctxData) return;
+
+      const nodeId = this._getOrAssignNodeId(node);
+
+      // Find existing analyser processor and update usageType
+      const analyserIdx = nodeId
+        ? ctxData.pipeline.processors.findIndex(p => p.type === 'analyser' && p.nodeId === nodeId)
+        : ctxData.pipeline.processors.findIndex(p => p.type === 'analyser');
+
+      if (analyserIdx >= 0) {
+        const existing = ctxData.pipeline.processors[analyserIdx];
+        if (!existing.usageType) {
+          existing.usageType = usageType;
+          existing.timestamp = Date.now();
+          ctxData.pipeline.timestamp = Date.now();
+
+          // Re-emit updated context data
+          this.emit(EVENTS.DATA, ctxData);
+          logger.info(this.logPrefix, `AnalyserNode usage updated: ${usageType} (context: ${ctxData.contextId})`);
+        }
       }
   }
 
@@ -1703,6 +1764,8 @@ class AudioContextCollector extends BaseCollector {
     window.__newRecordingSessionHandler = null;
     // @ts-ignore - Connection handler: null so new connections go to earlyCaptures only
     window.__audioConnectionHandler = null;
+    // @ts-ignore - AnalyserNode usage handler
+    window.__analyserUsageHandler = null;
     logger.info(this.logPrefix, 'Cleared all handlers on stop');
 
     // Clear stale WASM encoder detection

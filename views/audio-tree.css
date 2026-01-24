@@ -99,17 +99,5 @@
 .tree-node.tree-monitor .tree-label { color: var(--text-muted); }
 .tree-label.has-tooltip { cursor: default; }
 
-/* Audio Tree tooltip'leri - saga konumlandir (overflow kesme sorunu icin) */
-.audio-tree .has-tooltip::after {
-  /* Reset left-stack overrides */
-  bottom: auto;
-  right: auto;
-  text-align: left;
-  white-space: nowrap;
-  max-width: none;
-  /* Saga konumlandir */
-  top: 50%;
-  left: 100%;
-  transform: translateY(-50%);
-  margin-left: 8px;
-}
+/* Audio Tree tooltip'leri: tooltip-left class'i ile yonetilir (popup.css) */
+/* Ek stil gerekirse burada override edilebilir */

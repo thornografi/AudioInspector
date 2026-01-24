@@ -169,10 +169,21 @@ export const AUDIO_NODE_DISPLAY_MAP = {
 
   // ANALYSIS NODES
   analyser: {
-    label: 'Analyzer',
+    // Dynamic label based on usageType
+    getLabel: (proc) => {
+      // usageType: 'spectrum' | 'waveform' | null
+      const usageLabels = {
+        'spectrum': 'Spectrum',
+        'waveform': 'VU Meter'
+      };
+      return usageLabels[proc.usageType] || 'Analyzer';
+    },
+    label: 'Analyzer', // Default fallback
     tooltip: 'AnalyserNode',
     getParam: (proc) => {
-      if (proc.fftSize) {
+      // fftSize only meaningful for spectrum analysis
+      // VU Meter and Waveform use time domain data, fftSize is irrelevant
+      if (proc.usageType === 'spectrum' && proc.fftSize) {
         return `${proc.fftSize}pt`;
       }
       return null;
@@ -244,9 +255,11 @@ export function formatProcessorForTree(proc) {
   const mapping = AUDIO_NODE_DISPLAY_MAP[proc.type];
 
   if (mapping) {
+    // Use dynamic getLabel if available, otherwise fallback to static label
+    const label = mapping.getLabel ? mapping.getLabel(proc) : mapping.label;
     const param = mapping.getParam ? mapping.getParam(proc) : null;
     return {
-      label: mapping.label,
+      label,
       param,
       tooltip: mapping.tooltip
     };

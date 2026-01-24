@@ -18,6 +18,8 @@ import {
   formatJitter,
   getQualityClass,
   getLogColorClass,
+  formatBitDepth,
+  formatChannels,
   debugLog
 } from './helpers.js';
 
@@ -185,8 +187,8 @@ export function renderGUMStats(data) {
   const s = data.settings;
 
   html += `<tr><td>Rate</td><td class="metric-value">${s.sampleRate || '-'} Hz</td></tr>`;
-  html += `<tr><td>Channels</td><td>${s.channelCount || '?'}ch</td></tr>`;
-  html += `<tr><td>Bit Depth</td><td>${s.sampleSize || '?'}bit</td></tr>`;
+  html += `<tr><td>Channels</td><td>${formatChannels(s.channelCount)}</td></tr>`;
+  html += `<tr><td>Bit Depth</td><td>${formatBitDepth(s.sampleSize)}</td></tr>`;
 
   const inLatency = s.latency ? `${(s.latency * 1000).toFixed(1)} ms` : '-';
   html += `<tr><td>In Latency</td><td>${inLatency}</td></tr>`;
@@ -552,7 +554,7 @@ export function renderACStats(contexts, audioConnections = null) {
     if (purpose.label === 'Page Audio') {
       html += `<div class="context-item context-minimal${index > 0 ? ' context-separator' : ''}">
         <span class="context-purpose">${purpose.icon} ${purpose.label}</span>
-        <span class="has-tooltip has-tooltip--info" data-tooltip="${purpose.tooltip}">ⓘ</span>
+        <span class="has-tooltip has-tooltip--info tooltip-left" data-tooltip="${purpose.tooltip}">ⓘ</span>
         <span class="context-subtext">Site audio processing (VU meter, effects, etc.)</span>
       </div>`;
       return;
@@ -607,9 +609,9 @@ export function renderACStats(contexts, audioConnections = null) {
         <table class="ac-main-table">
           <tbody>
             <tr><td>Input</td><td>${inputLabel}</td></tr>
-            <tr><td>Channels</td><td class="metric-value">${ctx.static?.channelCount || '-'}</td></tr>
+            <tr><td>Channels</td><td class="metric-value">${formatChannels(ctx.static?.channelCount)}</td></tr>
             <tr><td>State</td><td class="${stateClass}">${ctx.static?.state || '-'}</td></tr>
-            <tr><td><span class="has-tooltip" data-tooltip="${latencyTooltip}">Latency</span></td><td>${latencyMs}</td></tr>
+            <tr><td><span class="has-tooltip tooltip-left" data-tooltip="${latencyTooltip}">Latency</span></td><td>${latencyMs}</td></tr>
             <tr><td>Processing</td><td>${processingText || 'None'}</td></tr>
             <tr><td>Effects</td><td>${effectsText || 'None'}</td></tr>
           </tbody>

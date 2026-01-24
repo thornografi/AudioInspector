@@ -465,6 +465,72 @@
     }
 
     console.log('[AudioInspector] Early: Hooked AudioContext prototype methods');
+
+    // ═══════════════════════════════════════════════════════════════════
+    // AnalyserNode Usage Detection Hooks
+    // Determines if analyser is used for spectrum visualization or waveform/VU meter
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ⚠️ SYNC: Duplicate in EarlyHook.js - keep both in sync
+    const getAnalyserUsageMap = () => {
+      const existing = window.__audioInspectorAnalyserUsageMap;
+      if (existing && typeof existing.get === 'function' && typeof existing.set === 'function') {
+        return existing;
+      }
+      const map = new WeakMap();
+      window.__audioInspectorAnalyserUsageMap = map;
+      return map;
+    };
+
+    // ⚠️ SYNC: Duplicate in EarlyHook.js - keep both in sync
+    const markAnalyserUsage = (node, usageType) => {
+      if (!node) return;
+      const map = getAnalyserUsageMap();
+      // First call wins - don't overwrite existing usage type
+      if (!map.has(node)) {
+        map.set(node, usageType);
+        console.log(`[AudioInspector] Early: AnalyserNode usage detected: ${usageType}`);
+
+        // Notify handler if registered (for real-time UI updates)
+        if (window.__analyserUsageHandler) {
+          window.__analyserUsageHandler(node, usageType);
+        }
+      }
+    };
+
+    // Hook AnalyserNode prototype methods
+    if (typeof AnalyserNode !== 'undefined' && AnalyserNode.prototype) {
+      const analyserProto = AnalyserNode.prototype;
+
+      // Spectrum analysis methods (frequency domain)
+      const spectrumMethods = ['getByteFrequencyData', 'getFloatFrequencyData'];
+      // Waveform/VU meter methods (time domain)
+      const waveformMethods = ['getByteTimeDomainData', 'getFloatTimeDomainData'];
+
+      // Hook spectrum methods
+      for (const methodName of spectrumMethods) {
+        if (typeof analyserProto[methodName] === 'function') {
+          const original = analyserProto[methodName];
+          analyserProto[methodName] = function(array) {
+            markAnalyserUsage(this, 'spectrum');
+            return original.call(this, array);
+          };
+        }
+      }
+
+      // Hook waveform methods
+      for (const methodName of waveformMethods) {
+        if (typeof analyserProto[methodName] === 'function') {
+          const original = analyserProto[methodName];
+          analyserProto[methodName] = function(array) {
+            markAnalyserUsage(this, 'waveform');
+            return original.call(this, array);
+          };
+        }
+      }
+
+      console.log('[AudioInspector] Early: Hooked AnalyserNode prototype methods for usage detection');
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -492,6 +558,7 @@
    * @param {any} node
    * @returns {string}
    */
+  // ⚠️ SYNC: Duplicate in EarlyHook.js - keep both in sync
   const getNodeIdMap = () => {
     const win = /** @type {any} */ (window);
     const existing = win.__audioInspectorNodeIdMap;
@@ -503,6 +570,7 @@
     return map;
   };
 
+  // ⚠️ SYNC: Duplicate in EarlyHook.js - keep both in sync
   const getNextNodeId = () => {
     const win = /** @type {any} */ (window);
     const current = Number.isInteger(win.__audioInspectorNodeIdCounter)

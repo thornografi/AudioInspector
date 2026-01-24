@@ -68,7 +68,7 @@ export const METHOD_CALL_SYNC_HANDLERS = {
 
   // Processor handlers - OCP: Add new DSP node with single line
   scriptProcessor: createProcessorHandler('scriptProcessor', { bufferSize: 4096, inputChannels: 2, outputChannels: 2 }),
-  analyser: createProcessorHandler('analyser', { fftSize: 2048 }),
+  analyser: createProcessorHandler('analyser', { fftSize: 2048, usageType: null }),
   gain: createProcessorHandler('gain', { gainValue: 1 }),
   biquadFilter: createProcessorHandler('biquadFilter', { filterType: 'lowpass', frequency: null }),
   dynamicsCompressor: createProcessorHandler('dynamicsCompressor'),

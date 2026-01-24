@@ -24,7 +24,62 @@ const instanceRegistry = {
   audioWorkletNodes: []
 };
 
+// ═══════════════════════════════════════════════════════════════════
+// AnalyserNode Usage Detection Map
+// Tracks which AnalyserNode methods are called to determine usage type:
+// - 'spectrum' = frequency data (getByteFrequencyData, getFloatFrequencyData)
+// - 'waveform' = time domain data (getByteTimeDomainData, getFloatTimeDomainData)
+// ═══════════════════════════════════════════════════════════════════
+
+// ⚠️ SYNC: Duplicate in early-inject.js - keep both in sync
+function getAnalyserUsageMap() {
+  // @ts-ignore
+  const existing = window.__audioInspectorAnalyserUsageMap;
+  if (existing && typeof existing.get === 'function' && typeof existing.set === 'function') {
+    return existing;
+  }
+  const map = new WeakMap();
+  // @ts-ignore
+  window.__audioInspectorAnalyserUsageMap = map;
+  return map;
+}
+
+/**
+ * Get the usage type for an AnalyserNode
+ * @param {AnalyserNode} node
+ * @returns {'spectrum' | 'waveform' | null}
+ */
+export function getAnalyserUsageType(node) {
+  if (!node) return null;
+  const map = getAnalyserUsageMap();
+  return map.get(node) || null;
+}
+
+/**
+ * Mark an AnalyserNode with its usage type (first call wins)
+ * @param {AnalyserNode} node
+ * @param {'spectrum' | 'waveform'} usageType
+ */
+// ⚠️ SYNC: Duplicate in early-inject.js - keep both in sync
+function markAnalyserUsage(node, usageType) {
+  if (!node) return;
+  const map = getAnalyserUsageMap();
+  // First call wins - don't overwrite existing usage type
+  if (!map.has(node)) {
+    map.set(node, usageType);
+    logger.info(LOG_PREFIX.INSPECTOR, `📊 AnalyserNode usage detected: ${usageType}`);
+
+    // Notify handler if registered (for real-time UI updates)
+    // @ts-ignore
+    if (window.__analyserUsageHandler) {
+      // @ts-ignore
+      window.__analyserUsageHandler(node, usageType);
+    }
+  }
+}
+
 // Shared AudioNode ID map - single source of truth across early-inject.js + collectors
+// ⚠️ SYNC: Duplicate in early-inject.js - keep both in sync
 function getNodeIdMap() {
   // @ts-ignore
   const existing = window.__audioInspectorNodeIdMap;
@@ -37,6 +92,7 @@ function getNodeIdMap() {
   return map;
 }
 
+// ⚠️ SYNC: Duplicate in early-inject.js - keep both in sync
 function getNextNodeId() {
   // @ts-ignore
   const current = Number.isInteger(window.__audioInspectorNodeIdCounter)
@@ -850,6 +906,9 @@ export function installEarlyHooks() {
   // Install method hooks for AudioContext pipeline capture
   installMethodHooks();
 
+  // Install AnalyserNode usage detection hooks
+  installAnalyserUsageHooks();
+
   logger.info(LOG_PREFIX.INSPECTOR, '✅ Early hooks installed successfully');
 }
 
@@ -1048,6 +1107,52 @@ function installMethodHooks() {
   }
 
   logger.info(LOG_PREFIX.INSPECTOR, `✅ Method hooks installed on ${prototypes.length} prototype(s)`);
+}
+
+/**
+ * Install AnalyserNode method hooks for usage detection
+ * Determines if analyser is used for spectrum visualization or waveform/VU meter
+ *
+ * Methods hooked:
+ * - getByteFrequencyData, getFloatFrequencyData → 'spectrum'
+ * - getByteTimeDomainData, getFloatTimeDomainData → 'waveform'
+ */
+function installAnalyserUsageHooks() {
+  if (typeof AnalyserNode === 'undefined' || !AnalyserNode.prototype) {
+    logger.warn(LOG_PREFIX.INSPECTOR, 'AnalyserNode not available, skipping usage hooks');
+    return;
+  }
+
+  const proto = AnalyserNode.prototype;
+
+  // Spectrum analysis methods (frequency domain)
+  const spectrumMethods = ['getByteFrequencyData', 'getFloatFrequencyData'];
+  // Waveform/VU meter methods (time domain)
+  const waveformMethods = ['getByteTimeDomainData', 'getFloatTimeDomainData'];
+
+  // Hook spectrum methods
+  for (const methodName of spectrumMethods) {
+    if (typeof proto[methodName] === 'function') {
+      const original = proto[methodName];
+      proto[methodName] = function(array) {
+        markAnalyserUsage(this, 'spectrum');
+        return original.call(this, array);
+      };
+    }
+  }
+
+  // Hook waveform methods
+  for (const methodName of waveformMethods) {
+    if (typeof proto[methodName] === 'function') {
+      const original = proto[methodName];
+      proto[methodName] = function(array) {
+        markAnalyserUsage(this, 'waveform');
+        return original.call(this, array);
+      };
+    }
+  }
+
+  logger.info(LOG_PREFIX.INSPECTOR, '✅ Hooked AnalyserNode prototype methods for usage detection');
 }
 
 /**

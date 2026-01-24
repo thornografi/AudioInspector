@@ -175,8 +175,11 @@ src/
 ## Debug
 
 ```javascript
-window.__pageInspector         // Inspector instance
-window.__earlyCaptures         // Early hook registry
-window.__detectedEncoderData   // Encoder tespiti (WASM, PCM, native)
-window.__recordingState        // Recording durumu (active, sessionCount, etc.)
+window.__pageInspector                   // Inspector instance
+window.__earlyCaptures                   // Early hook registry
+window.__detectedEncoderData             // Encoder tespiti (WASM, PCM, native)
+window.__recordingState                  // Recording durumu (active, sessionCount, etc.)
+window.__audioInspectorAnalyserUsageMap  // AnalyserNode usageType tespiti (WeakMap)
+window.__audioInspectorNodeIdMap         // AudioNode ID mapping (WeakMap)
+window.__audioInspectorContextIdMap      // AudioContext ID mapping (WeakMap)
 ```
