@@ -468,7 +468,19 @@ export function extractProcessingInfo(mainProcessors, monitors) {
 
   // OCP: Merkezi config'den effect label'larını al
   const effectNodes = mainProcessors
-    .filter(p => EFFECT_NODE_TYPES.includes(p.type))
+    .filter(p => {
+      if (!EFFECT_NODE_TYPES.includes(p.type)) return false;
+
+      // GainNode: 1.0 (pass) ise effect olarak sayma
+      if (p.type === 'gain') {
+        const gain = p.gainValue ?? p.gain;
+        if (gain === 1 || (gain !== undefined && Math.abs(gain - 1) < 0.001)) {
+          return false; // bypass - effect değil
+        }
+      }
+
+      return true;
+    })
     .map(p => AUDIO_NODE_DISPLAY_MAP[p.type]?.label)
     .filter(Boolean);
 

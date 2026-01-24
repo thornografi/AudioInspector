@@ -603,16 +603,32 @@ export function measureTreeLabels() {
       label.style.setProperty('--stem-left', `${Math.round(stemLeft)}px`);
 
       // 3. Children margin = label-text merkezi (Math.round: subpixel önleme)
-      const center = labelTextWidth / 2;
+      const center = labelTextLeft + (labelTextWidth / 2);
       children.style.setProperty('--parent-center', `${Math.round(center)}px`);
 
-      // 4. Dikey cizgi height hesapla (son child'in yatay dal seviyesine kadar)
+      // 4. Dikey cizgi height ve yatay cizgi pozisyonlari hesapla
       const childNodes = children.querySelectorAll(TREE_SELECTORS.DIRECT_CHILD_NODES);
       if (childNodes.length > 0) {
         const lastChild = childNodes[childNodes.length - 1];
-        // Son child'in offsetTop + yatay dal seviyesi (tree-unit / 2)
-        const lineHeight = lastChild.offsetTop + (treeUnit / 2);
+        const lastLabel = lastChild.querySelector(TREE_SELECTORS.LABEL);
+
+        // Son child'in label ortasi = dikey cizginin bitis noktasi
+        // Tum cizgiler ayni formul = tutarli kesisim noktasi
+        const lastLabelHeight = lastLabel ? lastLabel.offsetHeight : treeUnit;
+        const lineHeight = lastChild.offsetTop + Math.round(lastLabelHeight / 2);
         children.style.setProperty('--vertical-line-height', `${lineHeight}px`);
+
+        // 5. Her child icin yatay cizgi pozisyonu hesapla
+        // Label'in gercek dikey ortasi = tutarli cizgi kalinligi
+        childNodes.forEach((child) => {
+          const childLabel = child.querySelector(TREE_SELECTORS.LABEL);
+          if (childLabel) {
+            // Label'in dikey ortasi (offsetHeight / 2)
+            const labelHeight = childLabel.offsetHeight;
+            const horizontalTop = Math.round(labelHeight / 2);
+            child.style.setProperty('--horizontal-line-top', `${horizontalTop}px`);
+          }
+        });
       }
     }
   });
