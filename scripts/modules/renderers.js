@@ -27,7 +27,7 @@ import {
   renderAudioPathTree,
   mapNodeTypeToProcessorType,
   isDestinationNodeType,
-  EFFECT_NODE_TYPES,
+  getEffectNodeTypes,
   AUDIO_NODE_DISPLAY_MAP
 } from './audio-tree.js';
 
@@ -449,7 +449,7 @@ export function dedupeMediaStreamSources(processors) {
 
 /**
  * Extract Processing and Effects info from processors
- * OCP: AUDIO_NODE_DISPLAY_MAP ve EFFECT_NODE_TYPES kullanır
+ * OCP: AUDIO_NODE_DISPLAY_MAP ve getEffectNodeTypes() kullanır
  */
 export function extractProcessingInfo(mainProcessors, monitors) {
   let processingText = '';
@@ -466,10 +466,11 @@ export function extractProcessingInfo(mainProcessors, monitors) {
     processingText = 'ScriptProcessor';
   }
 
-  // OCP: Merkezi config'den effect label'larını al
+  // OCP: Merkezi config'den effect label'larını al (lazy evaluation)
+  const effectNodeTypes = getEffectNodeTypes();
   const effectNodes = mainProcessors
     .filter(p => {
-      if (!EFFECT_NODE_TYPES.includes(p.type)) return false;
+      if (!effectNodeTypes.includes(p.type)) return false;
 
       // GainNode: 1.0 (pass) ise effect olarak sayma
       if (p.type === 'gain') {

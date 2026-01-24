@@ -10,7 +10,8 @@
  * - mapNodeTypeToProcessorType(): ConnectionType → ProcessorType dönüşümü
  * - isDestinationNodeType(): Destination node kontrolü
  * - getNodeTypesByCategory(): Kategori bazlı node listesi
- * - EFFECT_NODE_TYPES: Effect kategorisindeki node'lar
+ * - getEffectNodeTypes(): Effect kategorisindeki node'lar (lazy)
+ * - invalidateConnectionTypeCache(): Cache temizleme (yeni node türü eklenirse)
  * - formatProcessorForTree(): Format processor for tree display
  * - renderAudioPathTree(): Render audio path as nested ASCII tree
  * - measureTreeLabels(): Measure label widths for vertical line positioning
@@ -364,6 +365,13 @@ function getConnectionTypeMap() {
 }
 
 /**
+ * Cache'i invalidate et (runtime'da yeni node türü eklenirse)
+ */
+export function invalidateConnectionTypeCache() {
+  _connectionTypeMap = null;
+}
+
+/**
  * Connection type (PascalCase) → Processor type (camelCase) dönüşümü
  * Örnek: 'AudioWorklet' → 'audioWorkletNode'
  */
@@ -406,9 +414,12 @@ export function getNodeTypesByCategory(category) {
 }
 
 /**
- * Effect kategorisindeki node type'ları (extractProcessingInfo için)
+ * Effect kategorisindeki node type'larını döndürür (lazy evaluation)
+ * OCP: Runtime'da yeni node eklenirse güncel liste döner
  */
-export const EFFECT_NODE_TYPES = getNodeTypesByCategory('effect');
+export function getEffectNodeTypes() {
+  return getNodeTypesByCategory('effect');
+}
 
 /**
  * Input source → Root tooltip mapping (OCP: yeni source türleri buraya eklenir)
@@ -526,13 +537,8 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
 
   const tree = buildNestedTree();
 
-  const getCharCount = (node) => {
-    return node.label?.length || 0;
-  };
-
   const renderNode = (node, isRoot = false) => {
     const hasChildren = node.children && node.children.length > 0;
-    const charCount = getCharCount(node);
 
     // CSS class'ları sabitlerden al (regresyon koruması)
     const classes = [TREE_CLASSES.NODE];
@@ -554,7 +560,7 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
     html += `<span class="${labelClass}"${tooltipAttr}>${labelHtml}${paramHtml}</span>`;
 
     if (hasChildren) {
-      html += `<div class="${TREE_CLASSES.CHILDREN}" style="--parent-chars: ${charCount}">`;
+      html += `<div class="${TREE_CLASSES.CHILDREN}">`;
       node.children.forEach(child => {
         html += renderNode(child, false);
       });

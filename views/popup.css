@@ -353,7 +353,7 @@ body.inspecting .status-text {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
-  min-height: 100%;
+  min-height: 0; /* Diğer section'larla tutarlı */
   background: var(--border-primary);
 }
 
@@ -435,6 +435,7 @@ table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--font-size-body);
+  table-layout: fixed;  /* Hücre genişliklerini sabitle - truncation için gerekli */
 }
 
 tr {
@@ -463,6 +464,9 @@ td:last-child {
   font-family: var(--font-mono);
   font-size: var(--font-size-body);
   white-space: nowrap; /* Değerlerin tek satırda kalması için */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;  /* table-layout: fixed ile birlikte shrink için */
 }
 
 .metric-value {
@@ -630,6 +634,10 @@ td:last-child .badge {
   font-weight: 500;
   text-align: right;
   flex: 1;
+  min-width: 0;  /* Flex shrink için gerekli */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ========== Generic Tooltip System (OCP-DRY) ========== */
@@ -1061,4 +1069,39 @@ button:disabled,
 .btn-modal-confirm:hover {
   background: #c08920;
   border-color: #c08920;
+}
+
+/* ========== Responsive Layout (Dar Genişlik) ========== */
+@media (max-width: 400px) {
+  /* Main grid: sabit oranlar yerine auto height */
+  .main-content {
+    grid-template-rows: auto 1fr;
+  }
+
+  /* WebRTC: 2 sütun → 1 sütun */
+  .rtc-columns {
+    grid-template-columns: 1fr;
+  }
+
+  /* RTC column padding tutarlılığı (tek sütun modunda) */
+  .rtc-column:first-child,
+  .rtc-column:last-child {
+    padding-left: var(--card-padding-x);
+    padding-right: var(--card-padding-x);
+  }
+
+  /* GUM+AC satırı: 2 sütun → 1 sütun (stacked) */
+  .row-2col {
+    grid-template-columns: 1fr;
+  }
+
+  /* Left stack: eşit bölünme korunsun */
+  .left-stack {
+    grid-template-rows: 1fr 1fr;
+  }
+
+  /* Audio tree label - daha agresif truncation */
+  .tree-label {
+    max-width: 120px;
+  }
 }

@@ -11,9 +11,7 @@
   padding: 4px 0;
   --tree-color: var(--text-muted);
   --tree-unit: 16px;
-  --tree-unit-half: 8px;  /* GPU transform icin tam piksel - subpixel pozisyon onleme */
   --tree-line: 1px;
-  --char-width: 6.6px;
 }
 
 .tree-node {
@@ -35,6 +33,11 @@
   /* Label'i biraz yukselterek cizgilerden ayir */
   padding-left: 2px;
   height: 14px;  /* line-height ile ayni - flexbox subpixel onleme */
+  /* Truncation - dar panelde taşma önleme */
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Label text - JS olcumu icin ayri element */
@@ -79,8 +82,8 @@
   position: absolute;
   left: 0;
   top: 0;
-  /* JavaScript'ten hesaplanan deger, fallback olarak tam piksel */
-  height: var(--vertical-line-height, calc(100% - 8px));
+  /* JavaScript'ten hesaplanan deger, fallback: label height (14px) / 2 = 7px */
+  height: var(--vertical-line-height, calc(100% - 7px));
   width: var(--tree-line);
   background: var(--tree-color);
   transform: translateZ(0);
@@ -92,7 +95,7 @@
   content: '';
   position: absolute;
   left: calc(-1 * var(--tree-unit));
-  top: var(--horizontal-line-top, 8px);  /* JS ile senkronize - dikey cizgi ile ayni hesaplama */
+  top: var(--horizontal-line-top, 7px);  /* JS ile senkronize - label height (14px) / 2 = 7px */
   transform: translateZ(0);    /* Sadece GPU layer icin */
   backface-visibility: hidden;
   /* Yatay dal - dikey ile ayni uzunluk */

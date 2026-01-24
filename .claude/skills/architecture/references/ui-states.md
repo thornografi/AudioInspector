@@ -200,6 +200,33 @@ function measureTreeLabels() {
 }
 ```
 
+### Çizgi Kalınlık Tutarlılığı (Subpixel Fix)
+
+**Problem:** Yatay ve dikey çizgiler farklı kalınlıklarda görünüyordu.
+
+**Kök Neden:** Matematiksel senkronizasyon eksikliği:
+- Dikey çizgi: `lastChild.offsetTop + 8px` (JS hesaplamalı)
+- Yatay çizgi: CSS'te sabit `8px`
+- Label yüksekliği: `14px`, gerçek orta: `7px`
+- 1px fark → GPU anti-aliasing tutarsızlığı
+
+**Çözüm:** Her iki çizgi de aynı formülle hesaplanmalı:
+
+```javascript
+// measureTreeLabels() içinde - audio-tree.js
+const labelHeight = label.offsetHeight;  // 14px
+const horizontalTop = Math.round(labelHeight / 2);  // 7px
+child.style.setProperty('--horizontal-line-top', `${horizontalTop}px`);
+```
+
+**CSS Variable:**
+```css
+/* audio-tree.css - .tree-children > .tree-node::before */
+top: var(--horizontal-line-top, 8px);  /* JS'ten gelir */
+```
+
+**Kural:** Kesişen çizgiler için AYNI formül kullan = aynı anti-aliasing kararı.
+
 ### formatProcessorForTree() Return
 
 ```javascript
@@ -222,3 +249,69 @@ Node türlerini kullanıcı dostu isimlere çevirir:
 | `analyser` | Analyzer | 2048pt |
 | `audioWorkletNode` | Processor | Opus, MP3 |
 | `mediaStreamDestination` | Stream Output | - |
+
+## Responsive Layout
+
+### Media Query (400px)
+
+Dar genişlikte (< 400px) UI davranışı:
+
+| Element | Normal | Dar (<400px) |
+|---------|--------|--------------|
+| `.rtc-columns` | 2 sütun | 1 sütun |
+| `.row-2col` | 2 sütun | 1 sütun (stacked) |
+| `.tree-label` | max-width: 200px | max-width: 120px |
+| `.main-content` | grid-template-rows: 30% 70% | auto 1fr |
+
+### Table Truncation Pattern
+
+Uzun değerlerin taşmasını önlemek için:
+
+```css
+/* popup.css */
+table {
+  table-layout: fixed;  /* Hücre genişliklerini sabitle */
+}
+
+td:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;  /* table-layout: fixed ile birlikte shrink için */
+  white-space: nowrap;
+}
+```
+
+### Flex Truncation Pattern
+
+Flex container içinde truncation için `min-width: 0` gerekli:
+
+```css
+/* popup.css - .detail-value */
+.detail-value {
+  flex: 1;
+  min-width: 0;  /* Flex shrink için gerekli */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+```
+
+### Tree Label Truncation
+
+Audio tree label'ları için genişlik sınırı:
+
+```css
+/* audio-tree.css */
+.tree-label {
+  max-width: 200px;  /* Normal genişlik */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 400px) {
+  .tree-label {
+    max-width: 120px;  /* Dar panel */
+  }
+}
+```
