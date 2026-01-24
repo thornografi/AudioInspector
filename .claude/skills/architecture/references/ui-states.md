@@ -120,11 +120,15 @@ Microphone
     │                └── Analyzer (2048pt)
 ```
 
+**Dosyalar:**
+- `scripts/modules/audio-tree.js` - Tree rendering ve ölçüm fonksiyonları
+- `views/audio-tree.css` - Tree stilleri (CSS variables kullanır)
+
 **Rendering Flow:**
-1. `renderAudioPathTree()` - Ana fonksiyon (renderers.js)
+1. `renderAudioPathTree()` - Ana fonksiyon (audio-tree.js)
 2. `buildNestedTree()` - Pipeline'dan nested yapı oluşturur
 3. `renderNode()` - Recursive HTML render
-4. `measureTreeLabels()` - JS ile label genişliklerini ölçer (popup.js)
+4. `measureTreeLabels()` - JS ile label genişliklerini ölçer (audio-tree.js, popup.js'den import edilir)
 
 ### HTML Yapısı
 

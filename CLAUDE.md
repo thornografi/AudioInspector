@@ -41,11 +41,13 @@ audio-inspector/
 │   └── modules/              # UI modülleri (popup.js için)
 │       ├── helpers.js        # DRY helper fonksiyonlar
 │       ├── renderers.js      # UI render fonksiyonları
-│       └── encoder-ui.js     # ENCODING section logic
+│       ├── encoder-ui.js     # ENCODING section logic
+│       └── audio-tree.js     # Audio path tree rendering
 │
 ├── views/                    # UI dosyaları
 │   ├── popup.html            # Popup HTML
-│   └── popup.css             # Popup stil
+│   ├── popup.css             # Popup stil
+│   └── audio-tree.css        # Audio tree stilleri
 ├── images/                   # İkonlar
 └── manifest.json             # Manifest V3
 ```
@@ -75,8 +77,10 @@ audio-inspector/
 
 ### DRY (Don't Repeat Yourself)
 - **Yeni kod yazmadan önce mevcut yardımcıları kontrol et**
-  - CSS: `popup.css` → `.has-tooltip`, `.audio-tree`, CSS değişkenleri
+  - CSS: `popup.css` → `.has-tooltip`, CSS değişkenleri
+  - CSS: `audio-tree.css` → `.audio-tree`, tree stilleri
   - JS: `scripts/modules/helpers.js` → `formatWorkletName()`, `capitalizeFirst()`, `extractCodecName()`
+  - JS: `scripts/modules/audio-tree.js` → `renderAudioPathTree()`, `measureTreeLabels()`
   - JS: `ApiHook.js`, `constants.js` → API hooking, veri sabitleri
 - Tekrar eden değerler → `constants.js` veya CSS değişkeni
 

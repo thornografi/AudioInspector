@@ -200,7 +200,7 @@ body.inspecting .status-text {
   flex: 1;
   display: grid;
   grid-template-rows: 30% 70%;
-  gap: 2px;
+  gap: 3px;
   background: var(--border-primary);
   overflow: hidden;
   min-height: 0;
@@ -270,10 +270,23 @@ body.inspecting .status-text {
   padding-right: var(--card-padding-x); /* İçerik hizalamasını koru */
 }
 
-/* RTC columns - scroll yok, parent (card-content) yönetiyor */
-.rtc-column {
-  overflow-y: visible;
+/* WebRTC: Card padding kaldır, header'a ve column'lara taşı */
+#rtcSection {
+  padding-left: 0;
+  padding-right: 0;
 }
+
+#rtcSection .card-header {
+  padding-left: var(--card-padding-x);
+  padding-right: var(--card-padding-x);
+}
+
+#rtcSection .card-content {
+  overflow-y: overlay;
+}
+
+/* RTC columns - scroll yok, parent (card-content) yönetiyor */
+/* .rtc-column overflow artık gerekmez - parent yönetir */
 
 /* Scrollbar width */
 .card-content::-webkit-scrollbar,
@@ -321,12 +334,12 @@ body.inspecting .status-text {
   min-height: 0; /* Grid içinde içerik taşmasını önle */
 }
 
-/* Left stack: GUM + Encoding vertically stacked (B çizgisi: C'den miras) */
+/* Left stack: GUM + Encoding vertically stacked */
 .left-stack {
   display: grid;
   grid-template-rows: 1fr 1fr; /* Tam ortadan ikiye böl */
-  gap: inherit;        /* C'den miras: 2px */
-  background: inherit; /* C'den miras: --border-primary */
+  gap: 2px;
+  background: var(--border-primary);
   min-height: 0;
 }
 
@@ -334,12 +347,13 @@ body.inspecting .status-text {
   min-height: 0;
 }
 
-/* RTC Two Column Content */
-#rtcContent {
+/* RTC Two Column Content - grid wrapper */
+/* Card padding kaldırıldı, grid full-width - dikey çizgi kenarlara dayanır */
+.rtc-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
-  height: 100%;
+  min-height: 100%;
   background: var(--border-primary);
 }
 
@@ -348,12 +362,18 @@ body.inspecting .status-text {
   flex-direction: column;
   min-height: 0;
   background: var(--bg-primary);
-  padding: 0 12px;
-  /* Scroll yok - parent (#rtcContent = card-content) yönetiyor */
 }
 
+/* İlk kolon: sol padding = card padding (içerik hizası) */
 .rtc-column:first-child {
-  padding-left: 0;
+  padding-left: var(--card-padding-x);
+  padding-right: var(--card-padding-x);
+}
+
+/* Son kolon: sağ padding = card padding (scrollbar alanı hariç) */
+.rtc-column:last-child {
+  padding-left: var(--card-padding-x);
+  padding-right: var(--card-padding-x);
 }
 
 /* ========== Ortak Sub-Header Stili ========== */
@@ -642,10 +662,20 @@ td:last-child .badge {
   transition: opacity 0.15s;
   z-index: 1000;
   border: 1px solid var(--border-primary);
+  /* UI dışına taşmayı engelle */
+  max-width: calc(100vw - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .has-tooltip:hover::after {
   opacity: 1;
+}
+
+/* Boş tooltip gösterme */
+.has-tooltip:not([data-tooltip])::after,
+.has-tooltip[data-tooltip=""]::after {
+  display: none;
 }
 
 /* Chain içindeki tooltip'ler için margin sıfırla (→ ile ayrılan işlemciler) */
@@ -653,14 +683,12 @@ td:last-child .badge {
   margin-left: 0;
 }
 
-/* Left-stack içindeki tooltip'ler - sağa hizalı ama taşabilir */
+/* Left-stack içindeki tooltip'ler - sağa hizalı, tek satır */
 .left-stack .has-tooltip::after {
   left: auto;
   right: 0;
-  max-width: 320px;  /* Daha geniş - tooltip kesmesin */
-  white-space: normal;
+  white-space: nowrap;
   text-align: right;
-  overflow: visible;  /* Taşma serbert - mouse çekince kaybolacak */
 }
 
 /* Pulsing status text (Detecting / Waiting / Pending / Loading) */
@@ -705,118 +733,6 @@ td:last-child .badge {
 .detail-value-muted {
   color: var(--text-muted);
   font-weight: 400;
-}
-
-/* ========== Audio Tree v3 (Düzeltilmiş) ========== */
-.audio-tree {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 4px 0;
-  --tree-color: var(--text-muted);
-  --tree-unit: 16px;
-  --tree-line: 1px;
-  --char-width: 6.6px;
-}
-
-.tree-node {
-  position: relative;
-}
-
-.tree-label {
-  display: inline-block;
-  position: relative;
-  color: var(--text-primary);
-  font-weight: 500;
-  /* Label'ı biraz yükselterek çizgilerden ayır */
-  padding-left: 2px;
-}
-
-/* Label text - JS ölçümü için ayrı element */
-.tree-label-text {
-  /* display: inline - varsayılan */
-}
-
-/* Param (parantez içi) - farklı stil */
-.tree-param {
-  color: var(--text-muted);
-  font-weight: 400;
-  margin-left: 4px;
-}
-
-/* Parent gövdesi: label ortasından aşağı */
-.tree-node.has-children > .tree-label::after {
-  content: '';
-  position: absolute;
-  /* Label sol kenarından yarı genişlik (sadece label için) */
-  left: calc(50%);
-  top: 100%;
-  width: var(--tree-line);
-  /* Gövde yüksekliği: children container'a bağlanacak kadar */
-  height: var(--tree-unit);
-  background: var(--tree-color);
-  transform: translateX(-50%);
-}
-
-/* Children container */
-.tree-children {
-  position: relative;
-  padding-left: var(--tree-unit);
-  padding-top: calc(var(--tree-unit) / 2);  /* Üstten boşluk - gövde bağlantısı için */
-  /* JavaScript'ten gelen gerçek label genişliği (measureTreeLabels) */
-  margin-left: var(--parent-center, 40px);
-}
-
-/* Dikey çizgi: JavaScript'ten gelen dinamik height */
-.tree-children::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  /* JavaScript'ten hesaplanan değer, fallback olarak eski formül */
-  height: var(--vertical-line-height, calc(100% - var(--tree-unit) / 2));
-  width: var(--tree-line);
-  background: var(--tree-color);
-}
-
-/* Yatay dal: dikey çizgiden child'a (label'ın içine girmez) */
-.tree-children > .tree-node::before {
-  content: '';
-  position: absolute;
-  left: calc(-1 * var(--tree-unit));
-  top: calc(var(--tree-unit) / 2);
-  /* Yatay dal label'ın solunda biter, içine girmez */
-  width: calc(var(--tree-unit) - 2px);
-  height: var(--tree-line);
-  background: var(--tree-color);
-}
-
-/* Child node layout */
-.tree-children > .tree-node {
-  min-height: var(--tree-unit);
-  display: flex;
-  align-items: flex-start;
-  flex-direction: column;
-  /* Label'ın çizgilerle çakışmaması için padding */
-  padding-top: calc(var(--tree-unit) / 2 - 0.5em);
-}
-
-/* Varyantlar */
-.tree-node.tree-monitor .tree-label { color: var(--text-muted); }
-.tree-label.has-tooltip { cursor: default; }
-
-/* Audio Tree tooltip'leri - sağa konumlandır (overflow kesme sorunu için) */
-.audio-tree .has-tooltip::after {
-  /* Reset left-stack overrides */
-  bottom: auto;
-  right: auto;
-  text-align: left;
-  white-space: nowrap;
-  max-width: none;
-  /* Sağa konumlandır */
-  top: 50%;
-  left: 100%;
-  transform: translateY(-50%);
-  margin-left: 8px;
 }
 
 /* ========== Console Drawer ========== */

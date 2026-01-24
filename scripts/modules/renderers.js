@@ -6,7 +6,6 @@
  * - renderGUMStats(): getUserMedia stats rendering
  * - renderACStats(): AudioContext stats rendering
  * - renderDebugLogs(): Debug log rendering
- * - Audio path tree rendering
  * - Helper functions and mappings
  */
 
@@ -21,6 +20,8 @@ import {
   getLogColorClass,
   debugLog
 } from './helpers.js';
+
+import { renderAudioPathTree } from './audio-tree.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -99,7 +100,7 @@ export function renderRTCStats(data) {
       <tr><td>Loss</td><td>-</td></tr>
     </tbody></table></div>`;
 
-    container.innerHTML = sendHtml + recvHtml;
+    container.innerHTML = `<div class="rtc-columns">${sendHtml}${recvHtml}</div>`;
     timestamp.textContent = '';
     return;
   }
@@ -150,7 +151,7 @@ export function renderRTCStats(data) {
   }
   recvHtml += `</tbody></table></div>`;
 
-  container.innerHTML = sendHtml + recvHtml;
+  container.innerHTML = `<div class="rtc-columns">${sendHtml}${recvHtml}</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -192,8 +193,8 @@ export function renderGUMStats(data) {
 
   DSP_FIELDS.forEach(field => {
     const value = s[field.key];
-    const display = value ? '✓' : '-';
-    const cls = value ? 'good' : '';
+    const display = value === true ? 'Yes' : value === false ? 'No' : '-';
+    const cls = value === true ? 'good' : '';
     html += `<tr><td>${field.label}</td><td class="${cls}">${display}</td></tr>`;
   });
 
@@ -214,7 +215,7 @@ export function getContextPurpose(ctx) {
     return {
       icon: '🎤',
       label: 'Mic Input',
-      tooltip: 'Microphone stream detected - outgoing audio'
+      tooltip: 'Microphone input stream'
     };
   }
 
@@ -223,7 +224,7 @@ export function getContextPurpose(ctx) {
     return {
       icon: '📥',
       label: 'Remote Input',
-      tooltip: 'Remote stream detected - incoming audio from peer'
+      tooltip: 'Remote peer audio stream'
     };
   }
 
@@ -232,7 +233,7 @@ export function getContextPurpose(ctx) {
     return {
       icon: '📤',
       label: 'Stream Output',
-      tooltip: 'MediaStreamDestination created - audio routed to stream'
+      tooltip: 'Audio routed to MediaStream'
     };
   }
 
@@ -241,12 +242,12 @@ export function getContextPurpose(ctx) {
     return {
       icon: '📊',
       label: 'VU Meter',
-      tooltip: 'AnalyserNode detected - audio visualization'
+      tooltip: 'AnalyserNode - audio visualization'
     };
   }
 
   // 5. Default → Page Audio
-  return { icon: '🎵', label: 'Page Audio', tooltip: 'VU meter, audio effects, playback analysis etc.' };
+  return { icon: '🎵', label: 'Page Audio', tooltip: 'Site audio processing' };
 }
 
 /**
@@ -501,355 +502,6 @@ export function extractProcessingInfo(mainProcessors, monitors) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AUDIO NODE DISPLAY MAPPING
-// ═══════════════════════════════════════════════════════════════════════════════
-
-export const AUDIO_NODE_DISPLAY_MAP = {
-  // SOURCE NODES
-  mediaStreamSource: {
-    label: 'Microphone',
-    tooltip: 'MediaStreamAudioSourceNode'
-  },
-  mediaElementSource: {
-    label: 'Media Player',
-    tooltip: 'MediaElementAudioSourceNode',
-    getParam: (proc) => proc.mediaType || null
-  },
-  bufferSource: {
-    label: 'Audio Buffer',
-    tooltip: 'AudioBufferSourceNode',
-    getParam: (proc) => proc.loop ? 'loop' : null
-  },
-  oscillator: {
-    label: 'Tone Generator',
-    tooltip: 'OscillatorNode',
-    getParam: (proc) => {
-      const typeMap = {
-        'sine': 'sine',
-        'square': 'square',
-        'sawtooth': 'saw',
-        'triangle': 'tri',
-        'custom': 'custom'
-      };
-      return typeMap[proc.oscillatorType] || proc.oscillatorType || null;
-    }
-  },
-  constantSource: {
-    label: 'DC Offset',
-    tooltip: 'ConstantSourceNode'
-  },
-
-  // EFFECT / PROCESSING NODES
-  gain: {
-    label: 'Volume',
-    tooltip: 'GainNode',
-    getParam: (proc) => {
-      const gain = proc.gainValue ?? proc.gain;
-      if (gain === undefined || gain === null) return null;
-
-      if (gain === 1 || Math.abs(gain - 1) < 0.001) {
-        return 'pass';
-      }
-      if (gain === 0) {
-        return 'muted';
-      }
-      if (gain < 1) {
-        const dB = 20 * Math.log10(gain);
-        return `${dB.toFixed(0)}dB`;
-      }
-      const dB = 20 * Math.log10(gain);
-      return `+${dB.toFixed(0)}dB`;
-    }
-  },
-  biquadFilter: {
-    label: 'Filter',
-    tooltip: 'BiquadFilterNode',
-    getParam: (proc) => {
-      const typeMap = {
-        'lowpass': 'LP',
-        'highpass': 'HP',
-        'bandpass': 'BP',
-        'lowshelf': 'LS',
-        'highshelf': 'HS',
-        'peaking': 'peak',
-        'notch': 'notch',
-        'allpass': 'AP'
-      };
-      const shortType = typeMap[proc.filterType] || proc.filterType;
-      if (proc.frequency) {
-        const freq = proc.frequency >= 1000
-          ? `${(proc.frequency / 1000).toFixed(1)}k`
-          : `${Math.round(proc.frequency)}`;
-        return `${shortType} ${freq}Hz`;
-      }
-      return shortType || null;
-    }
-  },
-  dynamicsCompressor: {
-    label: 'Compressor',
-    tooltip: 'DynamicsCompressorNode',
-    getParam: (proc) => {
-      if (proc.threshold !== undefined && proc.ratio !== undefined) {
-        return `${proc.threshold}dB ${proc.ratio}:1`;
-      }
-      if (proc.threshold !== undefined) {
-        return `${proc.threshold}dB`;
-      }
-      return null;
-    }
-  },
-  convolver: {
-    label: 'Reverb',
-    tooltip: 'ConvolverNode',
-    getParam: (proc) => proc.normalize === false ? 'raw' : null
-  },
-  delay: {
-    label: 'Delay',
-    tooltip: 'DelayNode',
-    getParam: (proc) => {
-      const time = proc.delayTime ?? proc.maxDelayTime;
-      if (time !== undefined) {
-        const ms = time * 1000;
-        return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-      }
-      return null;
-    }
-  },
-  waveShaper: {
-    label: 'Distortion',
-    tooltip: 'WaveShaperNode',
-    getParam: (proc) => {
-      if (proc.oversample && proc.oversample !== 'none') {
-        return proc.oversample;
-      }
-      return null;
-    }
-  },
-  stereoPanner: {
-    label: 'Panner',
-    tooltip: 'StereoPannerNode',
-    getParam: (proc) => {
-      const pan = proc.pan;
-      if (pan === undefined || pan === null) return null;
-      if (pan === 0 || Math.abs(pan) < 0.01) return 'center';
-      if (pan < 0) return `L${Math.abs(Math.round(pan * 100))}%`;
-      return `R${Math.round(pan * 100)}%`;
-    }
-  },
-  panner: {
-    label: '3D Panner',
-    tooltip: 'PannerNode',
-    getParam: (proc) => {
-      const modelMap = { 'equalpower': 'EQ', 'HRTF': 'HRTF' };
-      return modelMap[proc.panningModel] || null;
-    }
-  },
-  iirFilter: {
-    label: 'IIR Filter',
-    tooltip: 'IIRFilterNode'
-  },
-
-  // ANALYSIS NODES
-  analyser: {
-    label: 'Analyzer',
-    tooltip: 'AnalyserNode',
-    getParam: (proc) => {
-      if (proc.fftSize) {
-        return `${proc.fftSize}pt`;
-      }
-      return null;
-    }
-  },
-
-  // CHANNEL NODES
-  channelSplitter: {
-    label: 'Splitter',
-    tooltip: 'ChannelSplitterNode',
-    getParam: (proc) => proc.numberOfOutputs ? `${proc.numberOfOutputs}ch` : null
-  },
-  channelMerger: {
-    label: 'Merger',
-    tooltip: 'ChannelMergerNode',
-    getParam: (proc) => proc.numberOfInputs ? `${proc.numberOfInputs}ch` : null
-  },
-
-  // WORKLET / SCRIPT NODES
-  audioWorkletNode: {
-    label: 'Processor',
-    tooltip: 'AudioWorkletNode',
-    getParam: (proc) => {
-      if (!proc.processorName) return null;
-      const name = formatWorkletName(proc.processorName);
-      const encoderMap = {
-        'opus': 'Opus',
-        'mp3': 'MP3',
-        'ogg': 'OGG',
-        'vorbis': 'Vorbis',
-        'aac': 'AAC',
-        'flac': 'FLAC',
-        'wav': 'WAV',
-        'pcm': 'PCM'
-      };
-      return encoderMap[name.toLowerCase()] || name;
-    }
-  },
-  scriptProcessor: {
-    label: 'Processor',
-    tooltip: 'ScriptProcessorNode (deprecated)',
-    getParam: (proc) => {
-      if (proc.bufferSize) {
-        return `${proc.bufferSize}`;
-      }
-      return null;
-    }
-  },
-
-  // DESTINATION NODES
-  mediaStreamDestination: {
-    label: 'Stream Output',
-    tooltip: 'MediaStreamAudioDestinationNode'
-  },
-  destination: {
-    label: 'Speakers',
-    tooltip: 'AudioDestinationNode'
-  }
-};
-
-/**
- * Format processor for tree display
- */
-export function formatProcessorForTree(proc) {
-  const mapping = AUDIO_NODE_DISPLAY_MAP[proc.type];
-
-  if (mapping) {
-    const param = mapping.getParam ? mapping.getParam(proc) : null;
-    return {
-      label: mapping.label,
-      param,
-      tooltip: mapping.tooltip
-    };
-  }
-
-  const readableType = proc.type
-    ? proc.type.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim()
-    : 'Unknown';
-
-  return {
-    label: readableType,
-    param: null,
-    tooltip: proc.type || 'Unknown AudioNode'
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// AUDIO PATH TREE RENDERING
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Render Audio Path as nested ASCII tree with tooltips
- */
-export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
-  if ((!mainProcessors || mainProcessors.length === 0) && !inputSource) {
-    return '<div class="no-data">No audio path</div>';
-  }
-
-  const buildNestedTree = () => {
-    const rootLabel = inputSource
-      ? capitalizeFirst(inputSource)
-      : 'Source';
-    const rootTooltip = inputSource === 'microphone'
-      ? 'MediaStreamAudioSourceNode'
-      : inputSource === 'remote'
-        ? 'MediaStreamAudioSourceNode (remote)'
-        : 'AudioSourceNode';
-    const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
-
-    const chainProcessors = (mainProcessors || []).filter(p => p.type !== 'mediaStreamSource');
-
-    let currentParent = root;
-    let lastProcessorNode = root;
-
-    chainProcessors.forEach((proc) => {
-      const formatted = formatProcessorForTree(proc);
-      const node = {
-        label: formatted.label,
-        param: formatted.param,
-        tooltip: formatted.tooltip,
-        children: []
-      };
-
-      currentParent.children.push(node);
-      lastProcessorNode = node;
-      currentParent = node;
-    });
-
-    const encoderNode = {
-      label: 'Encoder',
-      param: 'output',
-      tooltip: 'Audio output → Encoding pipeline (see ENCODING section)',
-      children: []
-    };
-
-    const analyzerNodes = monitors.map((mon) => {
-      const formatted = formatProcessorForTree(mon);
-      return {
-        label: formatted.label,
-        param: formatted.param,
-        tooltip: formatted.tooltip + ' (monitoring tap)',
-        children: [],
-        isMonitor: true
-      };
-    });
-
-    lastProcessorNode.children.push(encoderNode);
-    analyzerNodes.forEach(an => lastProcessorNode.children.push(an));
-
-    return root;
-  };
-
-  const tree = buildNestedTree();
-
-  const getCharCount = (node) => {
-    return node.label?.length || 0;
-  };
-
-  const renderNode = (node, isRoot = false) => {
-    const hasChildren = node.children && node.children.length > 0;
-    const charCount = getCharCount(node);
-
-    const classes = ['tree-node'];
-    if (isRoot) classes.push('tree-root');
-    if (hasChildren) classes.push('has-children');
-    if (node.isMonitor) classes.push('tree-monitor');
-
-    // Label ve param ayrı elementler - JS ölçümü için gerekli
-    const labelHtml = `<span class="tree-label-text">${escapeHtml(node.label)}</span>`;
-    const paramHtml = node.param
-      ? `<span class="tree-param">(${escapeHtml(node.param)})</span>`
-      : '';
-
-    const labelClass = node.tooltip ? 'tree-label has-tooltip' : 'tree-label';
-    const tooltipAttr = node.tooltip ? ` data-tooltip="${escapeHtml(node.tooltip)}"` : '';
-
-    let html = `<div class="${classes.join(' ')}">`;
-    html += `<span class="${labelClass}"${tooltipAttr}>${labelHtml}${paramHtml}</span>`;
-
-    if (hasChildren) {
-      html += `<div class="tree-children" style="--parent-chars: ${charCount}">`;
-      node.children.forEach(child => {
-        html += renderNode(child, false);
-      });
-      html += '</div>';
-    }
-
-    html += '</div>';
-    return html;
-  };
-
-  return `<div class="audio-tree">${renderNode(tree, true)}</div>`;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // AUDIOCONTEXT STATS RENDERING
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -941,8 +593,7 @@ export function renderACStats(contexts, audioConnections = null) {
 
     html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
 
-    const channelTooltip = 'Output channel capacity (destination.maxChannelCount)';
-    const latencyTooltip = `Total output latency (baseLatency: ${(baseLatency * 1000).toFixed(1)}ms + outputLatency: ${(outputLatency * 1000).toFixed(1)}ms). Input latency is shown in getUserMedia section.`;
+    const latencyTooltip = `Base ${(baseLatency * 1000).toFixed(1)}ms + output ${(outputLatency * 1000).toFixed(1)}ms`;
 
     const inputLabel = hasInputSource
       ? `${purpose.icon} ${capitalizeFirst(ctx.pipeline.inputSource)}`
@@ -956,11 +607,11 @@ export function renderACStats(contexts, audioConnections = null) {
         <table class="ac-main-table">
           <tbody>
             <tr><td>Input</td><td>${inputLabel}</td></tr>
-            <tr><td><span class="has-tooltip" data-tooltip="${channelTooltip}">Channels</span></td><td class="metric-value">${ctx.static?.channelCount || '-'}</td></tr>
+            <tr><td>Channels</td><td class="metric-value">${ctx.static?.channelCount || '-'}</td></tr>
             <tr><td>State</td><td class="${stateClass}">${ctx.static?.state || '-'}</td></tr>
             <tr><td><span class="has-tooltip" data-tooltip="${latencyTooltip}">Latency</span></td><td>${latencyMs}</td></tr>
-            ${processingText ? `<tr><td>Processing</td><td>${processingText}</td></tr>` : ''}
-            ${effectsText ? `<tr><td>Effects</td><td>${effectsText}</td></tr>` : ''}
+            <tr><td>Processing</td><td>${processingText || 'None'}</td></tr>
+            <tr><td>Effects</td><td>${effectsText || 'None'}</td></tr>
           </tbody>
         </table>
       </div>

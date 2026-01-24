@@ -166,7 +166,7 @@ function formatWebAudioNodeType(type) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // DETECTION LABELS
 // ═══════════════════════════════════════════════════════════════════════════════
-// Pattern to user-friendly confidence label mapping
+// Pattern to user-friendly detection label mapping (shown in Encoder tooltip)
 // Shows detection method (Worker/AudioWorklet) and data quality (full/basic)
 //
 // Source: src/core/utils/EarlyHook.js → encoderInfo.pattern assignments
@@ -176,18 +176,18 @@ function formatWebAudioNodeType(type) {
 //    When adding new patterns: Update both PATTERN_PRIORITY and DETECTION_LABELS
 export const DETECTION_LABELS = {
   // AudioWorklet patterns (AudioWorklet.port.postMessage hook)
-  'audioworklet-config': { text: 'AudioWorklet (full)', icon: '✓', tooltip: 'AudioWorklet.port.postMessage hook - all encoder parameters captured' },
-  'audioworklet-init': { text: 'AudioWorklet (basic)', icon: '○', tooltip: 'AudioWorklet.port.postMessage hook - only basic parameters' },
-  'audioworklet-deferred': { text: 'AudioWorklet (late)', icon: '◐', tooltip: 'AudioWorklet detected after context registration' },
+  'audioworklet-config': { text: 'AudioWorklet (full)', icon: '✓', tooltip: 'Full config via Worklet hook' },
+  'audioworklet-init': { text: 'AudioWorklet (basic)', icon: '○', tooltip: 'Basic config via Worklet hook' },
+  'audioworklet-deferred': { text: 'AudioWorklet (late)', icon: '◐', tooltip: 'Late Worklet detection' },
   // Worker patterns (Worker.postMessage hook)
-  'direct': { text: 'Worker Hook (full)', icon: '✓', tooltip: 'Worker.postMessage hook - full encoder configuration' },
-  'nested': { text: 'Worker Hook (full)', icon: '✓', tooltip: 'Worker.postMessage hook - config in nested message' },
-  'worker-init': { text: 'Worker Hook (basic)', icon: '○', tooltip: 'Worker.postMessage hook - basic initialization' },
-  'worker-audio-init': { text: 'Worker (real-time)', icon: '◐', tooltip: 'Audio worker init detected - codec confirmed, bitrate may be default' },
+  'direct': { text: 'Worker Hook (full)', icon: '✓', tooltip: 'Full config via Worker hook' },
+  'nested': { text: 'Worker Hook (full)', icon: '✓', tooltip: 'Nested config via Worker hook' },
+  'worker-init': { text: 'Worker Hook (basic)', icon: '○', tooltip: 'Basic config via Worker hook' },
+  'worker-audio-init': { text: 'Worker (real-time)', icon: '◐', tooltip: 'Worker init - bitrate may vary' },
   // Blob creation patterns (audio file created - post-hoc detection)
-  'audio-blob': { text: 'Blob (post-hoc)', icon: '◑', tooltip: 'Audio file detected via Blob creation - encoding format confirmed after recording stopped' },
+  'audio-blob': { text: 'Blob (post-hoc)', icon: '◑', tooltip: 'Detected from audio Blob' },
   // Default
-  'unknown': { text: 'Detected', icon: '?', tooltip: 'Encoder detected but method unknown' }
+  'unknown': { text: 'Detected', icon: '?', tooltip: 'Method unknown' }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -210,32 +210,32 @@ export function getInputSourceInfo(audioSource, hasAudioTrack) {
     case 'microphone':
       return {
         icon: '🎤',
-        label: 'Microphone',
-        tooltip: 'Direct microphone input (getUserMedia)'
+        label: 'Microphone'
+        // No tooltip - label is self-explanatory
       };
     case 'system':
       return {
         icon: '🔊',
-        label: 'System Audio',
-        tooltip: 'System audio capture (loopback/stereo mix)'
+        label: 'System Audio'
+        // No tooltip - label is self-explanatory
       };
     case 'synthesized':
       return {
         icon: '🔄',
         label: 'Web Audio',
-        tooltip: 'Audio routed through Web Audio API (createMediaStreamDestination). PCM data may be processed via ScriptProcessor or AudioWorklet before encoding.'
+        tooltip: 'Processed via WebAudio API'  // Useful - explains routing
       };
     case 'remote':
       return {
         icon: '📡',
         label: 'Remote',
-        tooltip: 'Remote audio stream routed into the page (e.g., WebRTC remote track)'
+        tooltip: 'WebRTC remote track'  // Useful - clarifies source
       };
     case 'unknown':
       return {
         icon: '❓',
-        label: 'Unknown',
-        tooltip: 'Audio source could not be determined from track label'
+        label: 'Unknown'
+        // No tooltip - nothing useful to add
       };
     default:
       // 'none' or truly undefined - don't show
@@ -330,7 +330,7 @@ export const ENCODER_DETECTORS = [
       // Show "Detecting..." for unknown codec (will be confirmed when Blob is created)
       // Codec = format (PCM, OPUS, MP3), Encoder = process (Linear PCM, Opus WASM)
       const codecBase = isUnknownCodec
-        ? renderStatusPulse('Detecting...', 'Codec will be confirmed when recording stops and audio file is created')
+        ? renderStatusPulse('Detecting...', 'Confirmed when recording stops')
         : (isLinearPcmWav ? 'PCM' : String(rawCodec).toUpperCase());
       const codecDisplay = enc.applicationName
         ? `${codecBase} (${enc.applicationName})`
@@ -342,24 +342,25 @@ export const ENCODER_DETECTORS = [
       ];
 
       // Encoder info (opus-wasm, mp3-wasm, aac-wasm, vorbis-wasm, flac-wasm, pcm)
-      // Detection info shown only in tooltip
+      // Tooltip: sadece worker/worklet filename varsa göster (detection yöntemi kullanıcı için anlamsız)
       if (enc.encoder) {
         const encoderDisplay = formatEncoderDisplay(enc.encoder);
-        const detection = DETECTION_LABELS[enc.pattern] || DETECTION_LABELS['unknown'];
 
-        // Build tooltip: detection first, then library/worker/path details
-        const tooltipParts = [`detection: ${detection.text}`];
-        if (enc.library) tooltipParts.push(`Library: ${enc.library}`);
-        if (enc.workerFilename) tooltipParts.push(`Worker: ${enc.workerFilename}`);
-        if (enc.encoderPath) tooltipParts.push(`Path: ${String(enc.encoderPath).split('/').pop()}`);
-        if (enc.processorName) tooltipParts.push(`Worklet: ${formatWorkletName(enc.processorName)}`);
-        const encoderTooltip = tooltipParts.join(' | ');
+        // Tooltip sadece filename varsa
+        const encoderTooltip = enc.workerFilename
+          || (enc.processorName ? formatWorkletName(enc.processorName) : null)
+          || enc.encoderPath?.split('/').pop()
+          || null;
 
-        rows.push({
-          label: 'Encoder',
-          value: `<span class="has-tooltip" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`,
-          isMetric: true
-        });
+        if (encoderTooltip) {
+          rows.push({
+            label: 'Encoder',
+            value: `<span class="has-tooltip" data-tooltip="${escapeHtml(encoderTooltip)}">${encoderDisplay}</span>`,
+            isMetric: true
+          });
+        } else {
+          rows.push({ label: 'Encoder', value: encoderDisplay, isMetric: true });
+        }
       } else {
         rows.push({ label: 'Encoder', value: '-', isMetric: false });
       }
@@ -393,7 +394,7 @@ export const ENCODER_DETECTORS = [
       } else if (enc.isLiveEstimate === true) {
         rows.push({
           label: 'Bitrate',
-          value: '<span class="has-tooltip" data-tooltip="Recording in progress - bitrate will be calculated when recording stops">Calculating...</span>',
+          value: '<span class="has-tooltip" data-tooltip="Calculated when recording stops">Calculating...</span>',
           isMetric: false
         });
       } else {
@@ -458,7 +459,7 @@ export const ENCODER_DETECTORS = [
         // Encoder type - Browser's built-in WebRTC encoder
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in WebRTC audio encoder">🌐 WebRTC Native</span>',
+          value: '<span class="has-tooltip" data-tooltip="Browser WebRTC encoder">🌐 WebRTC Native</span>',
           isMetric: false
         }
       ];
@@ -510,24 +511,24 @@ export const ENCODER_DETECTORS = [
       const rows = [
         {
           label: 'Codec',
-          value: renderStatusPulse('Detecting...', 'Codec will be determined when first audio data is available'),
+          value: renderStatusPulse('Detecting...', 'Waiting for first audio data'),
           isMetric: false
         },
         {
           label: 'Container',
-          value: renderStatusPulse('Detecting...', 'Container format will be determined from mimeType'),
+          value: renderStatusPulse('Detecting...', 'From mimeType'),
           isMetric: false
         },
         {
           label: 'Bitrate',
           value: mr.audioBitsPerSecond
             ? `${Math.round(mr.audioBitsPerSecond / 1000)} kbps`
-            : renderStatusPulse('Detecting...', 'Bitrate will be available when encoding starts'),
+            : renderStatusPulse('Detecting...', 'When encoding starts'),
           isMetric: !!mr.audioBitsPerSecond
         },
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in MediaRecorder API">🌐 MediaRecorder API</span>',
+          value: '<span class="has-tooltip" data-tooltip="Browser MediaRecorder">🌐 MediaRecorder API</span>',
           isMetric: true
         },
         {
@@ -590,7 +591,7 @@ export const ENCODER_DETECTORS = [
       // This distinguishes from WASM encoders like opus-recorder, lamejs, etc.
       rows.push({
         label: 'Encoder',
-        value: '<span class="has-tooltip" data-tooltip="Browser\'s built-in MediaRecorder API - not a JavaScript/WASM library">🌐 MediaRecorder API</span>',
+        value: '<span class="has-tooltip" data-tooltip="Browser MediaRecorder (native)">🌐 MediaRecorder API</span>',
         isMetric: false
       });
 
@@ -682,37 +683,37 @@ export const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: renderStatusPulse('Detecting...', 'Codec will be confirmed when the final audio Blob is created.'),
+            value: renderStatusPulse('Detecting...', 'Confirmed when Blob created'),
             isMetric: false
           },
           {
             label: 'Encoder',
-            value: renderStatusPulse('Detecting...', `detection: Pending | WebAudio pipeline detected (${pipelineType}). Encoder will be confirmed when encoding starts.`),
+            value: renderStatusPulse('Detecting...', `Pending - ${pipelineType} detected`),
             isMetric: false
           },
           {
             label: 'Container',
-            value: renderStatusPulse('Detecting...', 'Container format will be determined from the output Blob mimeType.'),
+            value: renderStatusPulse('Detecting...', 'From output Blob mimeType'),
             isMetric: false
           },
           {
             label: 'Library',
-            value: renderStatusPulse('Detecting...', 'Underlying library (libopus, LAME, etc.) will be detected from WASM/Worker analysis.'),
+            value: renderStatusPulse('Detecting...', 'From WASM/Worker analysis'),
             isMetric: false
           },
           {
             label: 'Bit Depth',
-            value: renderStatusPulse('Detecting...', 'Bit depth will be extracted from WAV header or encoder config.'),
+            value: renderStatusPulse('Detecting...', 'From WAV header or config'),
             isMetric: false
           },
           {
             label: 'Bitrate',
-            value: renderStatusPulse('Calculating...', 'Bitrate will be calculated from Blob size and duration when recording stops.'),
+            value: renderStatusPulse('Calculating...', 'From Blob size/duration'),
             isMetric: false
           },
           {
             label: 'Input',
-            value: `<span class="has-tooltip" data-tooltip="Audio processing technology detected in WebAudio pipeline">${encoderInput || pipelineType}</span>`,
+            value: `<span class="has-tooltip" data-tooltip="WebAudio processing tech">${encoderInput || pipelineType}</span>`,
             isMetric: true
           }
         ]
@@ -762,12 +763,12 @@ export const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: '<span class="has-tooltip" data-tooltip="ScriptProcessor processes raw PCM audio samples (Float32Array). Actual encoding may happen downstream.">Raw PCM</span>',
+            value: '<span class="has-tooltip" data-tooltip="Raw PCM (Float32Array)">Raw PCM</span>',
             isMetric: true
           },
           {
             label: 'Encoder',
-            value: '<span class="has-tooltip" data-tooltip="detection: Heuristic | ScriptProcessor detected - may be encoding to WAV/MP3 downstream. This is not confirmed.">ScriptProcessor</span>',
+            value: '<span class="has-tooltip" data-tooltip="Heuristic - encoding unconfirmed">ScriptProcessor</span>',
             isMetric: false
           }
         ]

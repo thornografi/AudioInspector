@@ -1,0 +1,115 @@
+/* ══════════════════════════════════════════════════════════════════════
+   AUDIO TREE v3 - Self-contained tree visualization component
+   Dependencies: Global CSS variables from popup.css
+   JS: audio-tree.js (measureTreeLabels)
+   ══════════════════════════════════════════════════════════════════════ */
+
+.audio-tree {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 0;
+  --tree-color: var(--text-muted);
+  --tree-unit: 16px;
+  --tree-line: 1px;
+  --char-width: 6.6px;
+}
+
+.tree-node {
+  position: relative;
+}
+
+.tree-label {
+  display: inline-block;
+  position: relative;
+  color: var(--text-primary);
+  font-weight: 500;
+  /* Label'i biraz yukselterek cizgilerden ayir */
+  padding-left: 2px;
+}
+
+/* Label text - JS olcumu icin ayri element */
+.tree-label-text {
+  /* display: inline - varsayilan */
+}
+
+/* Param (parantez ici) - farkli stil */
+.tree-param {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+/* Parent govdesi: label-text ortasindan asagi */
+.tree-node.has-children > .tree-label::after {
+  content: '';
+  position: absolute;
+  /* JS'ten gelen deger (measureTreeLabels), fallback: %50 */
+  left: var(--stem-left, 50%);
+  top: 100%;
+  width: var(--tree-line);
+  /* Govde yuksekligi: children container'a baglanacak kadar */
+  height: var(--tree-unit);
+  background: var(--tree-color);
+  transform: translateX(-50%);
+}
+
+/* Children container */
+.tree-children {
+  position: relative;
+  padding-left: var(--tree-unit);
+  padding-top: calc(var(--tree-unit) / 2);  /* Ustten bosluk - govde baglantisi icin */
+  /* JavaScript'ten gelen gercek label genisligi (measureTreeLabels) */
+  margin-left: var(--parent-center, 40px);
+}
+
+/* Dikey cizgi: JavaScript'ten gelen dinamik height */
+.tree-children::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* JavaScript'ten hesaplanan deger, fallback olarak eski formul */
+  height: var(--vertical-line-height, calc(100% - var(--tree-unit) / 2));
+  width: var(--tree-line);
+  background: var(--tree-color);
+}
+
+/* Yatay dal: dikey cizgiden child'a (label'in icine girmez) */
+.tree-children > .tree-node::before {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--tree-unit));
+  top: calc(var(--tree-unit) / 2);
+  /* Yatay dal - dikey ile ayni uzunluk */
+  width: var(--tree-unit);
+  height: var(--tree-line);
+  background: var(--tree-color);
+}
+
+/* Child node layout - minimum yukseklik ile tutarli dikey cizgiler */
+.tree-children > .tree-node {
+  min-height: var(--tree-unit);
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  padding-top: calc(var(--tree-unit) / 2 - 0.5em);
+}
+
+/* Varyantlar */
+.tree-node.tree-monitor .tree-label { color: var(--text-muted); }
+.tree-label.has-tooltip { cursor: default; }
+
+/* Audio Tree tooltip'leri - saga konumlandir (overflow kesme sorunu icin) */
+.audio-tree .has-tooltip::after {
+  /* Reset left-stack overrides */
+  bottom: auto;
+  right: auto;
+  text-align: left;
+  white-space: nowrap;
+  max-width: none;
+  /* Saga konumlandir */
+  top: 50%;
+  left: 100%;
+  transform: translateY(-50%);
+  margin-left: 8px;
+}

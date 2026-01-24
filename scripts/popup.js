@@ -19,6 +19,8 @@ import {
   renderEncodingSection
 } from './modules/encoder-ui.js';
 
+import { measureTreeLabels } from './modules/audio-tree.js';
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GLOBAL STATE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -117,37 +119,6 @@ function debugLog(message) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // UI UPDATE FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Tree node'larının label genişliklerini ölçer ve CSS variable olarak set eder.
- * Dikey çizginin label ortasından çıkması için gerekli.
- */
-function measureTreeLabels() {
-  const treeNodes = document.querySelectorAll('.tree-node.has-children');
-
-  treeNodes.forEach(node => {
-    const labelText = node.querySelector('.tree-label-text');
-    const children = node.querySelector('.tree-children');
-
-    if (labelText && children) {
-      const labelWidth = labelText.getBoundingClientRect().width;
-      const center = labelWidth / 2;
-
-      // CSS variable olarak set et
-      children.style.setProperty('--parent-center', `${center}px`);
-
-      // Dikey çizgi height hesapla (son child'ın yatay dal seviyesine kadar)
-      const childNodes = children.querySelectorAll(':scope > .tree-node');
-      if (childNodes.length > 0) {
-        const lastChild = childNodes[childNodes.length - 1];
-        const treeUnit = 16; // --tree-unit CSS değeri
-        // Son child'ın offsetTop + yatay dal seviyesi (tree-unit / 2)
-        const lineHeight = lastChild.offsetTop + (treeUnit / 2);
-        children.style.setProperty('--vertical-line-height', `${lineHeight}px`);
-      }
-    }
-  });
-}
 
 // Debounced UI update wrapper
 // Batches rapid storage changes (e.g., audio_contexts + audio_connections) into single UI update
