@@ -44,10 +44,9 @@ Proje, monolitik bir betikten Kayıt Desenini kullanarak modüler bir mimariye g
 *   **Günlük Kaydı:** `src/core/Logger.js` kullanın (`logger.info`, `logger.error`). **Doğrudan `console.log` kullanmayın.**
 *   **İzinler:** Dinamik içe aktarmalara izin vermek için `manifest.json`'da `web_accessible_resources` için `src/**/*.js` bulunmalıdır.
 
-### Derleme/Test
+### Derleme/Kurulum
 *   **Derleme Adımı Yok:** Proje yerel ES Modülleri kullanır.
 *   **Kurulum:** Klasörü Chrome'da "Paketlenmemiş Uzantı" olarak yükleyin.
-*   **Test Etme:** Uzantıyı yükledikten sonra WebRTC olaylarını simüle etmek için Chrome'da `tests/test.html` dosyasını açın.
 
 ## 🔄 Son Geçiş Notları (Ocak 2026)
 *   **Monolitten Modülere:** `scripts/page.js`'deki eski IIFE korunmuştur ancak `USE_NEW_ARCHITECTURE` bayrağı (`true` olarak ayarlanmıştır) aracılığıyla devre dışı bırakılmıştır.

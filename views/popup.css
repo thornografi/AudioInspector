@@ -1,0 +1,1113 @@
+:root {
+  /* Colors */
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --bg-card: #1c2128;
+  --border-primary: #30363d;
+  --border-subtle: #21262d;
+  --text-primary: #e6edf3;
+  --text-subheader: #b1bac4;  /* Alt başlıklar için (primary ve secondary arası) */
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-orange: #d29922;
+  --accent-red: #f85149;
+  --accent-purple: #a371f7;
+  --inspecting-glow: rgba(248, 81, 73, 0.4);
+  /* Typography */
+  --font-mono: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  --font-size-body: 12px;
+  --font-size-label: 11px;
+  --font-size-small: 10px;
+  --font-size-micro: 9px;
+  /* Layout */
+  --drawer-handle-height: 36px;
+  --card-padding-x: 16px;
+  /* Spacing - tutarlı dikey mesafeler */
+  --spacing-after-header: 12px;  /* Ana başlık sonrası */
+  --spacing-after-subheader: 12px; /* Alt başlık sonrası (aynı) */
+  --spacing-between-sections: 12px; /* Section'lar arası */
+  --spacing-row: 5px;  /* Tablo satır padding */
+  /* Gap */
+  --gap-tight: 6px;
+  --gap-normal: 8px;
+  /* Heights */
+  --btn-height-lg: 32px;
+  --btn-height-md: 28px;
+  --btn-height-sm: 24px;
+  /* Border Radius */
+  --radius-lg: 6px;
+  --radius-md: 4px;
+  --radius-sm: 3px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+/* Inspecting mode - entire UI shifts (red tint for active inspection) */
+body.inspecting {
+  background: linear-gradient(180deg, #1a0a0a 0%, var(--bg-primary) 100%);
+}
+
+/* Controls Bar */
+.controls {
+  height: 52px;
+  min-height: 52px;
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 3px solid var(--border-primary);
+  align-items: center;
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  font-size: var(--font-size-body);
+  font-weight: 500;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--border-primary);
+}
+
+/* Ghost buttons - secondary actions */
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  padding: 0 10px;
+  font-size: 11px;
+  height: 28px;
+}
+
+.btn-ghost:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-primary);
+  color: var(--text-primary);
+}
+
+.btn-ghost .btn-label {
+  opacity: 0.9;
+}
+
+.btn-ghost:hover .btn-label {
+  opacity: 1;
+}
+
+.btn-primary {
+  background: var(--accent-green);
+  color: #fff;
+  border-color: var(--accent-green);
+  font-weight: 600;
+  min-width: 90px;
+}
+
+.btn-primary:hover {
+  background: #2ea043;
+  border-color: #2ea043;
+  color: #fff;
+}
+
+body.inspecting .btn-primary {
+  background: var(--accent-red);
+  border-color: var(--accent-red);
+  animation: pulse-btn 2s ease-in-out infinite;
+}
+
+body.inspecting .btn-primary:hover {
+  background: #e64a43;
+  border-color: #e64a43;
+}
+
+@keyframes pulse-btn {
+  0%, 100% { box-shadow: 0 0 0 0 var(--inspecting-glow); }
+  50% { box-shadow: 0 0 12px 2px var(--inspecting-glow); }
+}
+
+.controls-spacer {
+  flex: 1;
+}
+
+/* Status Indicator */
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.3s ease;
+}
+
+body.inspecting .status-dot {
+  background: var(--accent-red);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+body.inspecting .status-text {
+  color: var(--accent-red);
+}
+
+/* Main Content Grid - 2 rows (WebRTC, GUM+Encoding+AC) */
+/* Area1 (WebRTC) = 30%, Area2 = 70% */
+.main-content {
+  flex: 1;
+  display: grid;
+  grid-template-rows: 30% 70%;
+  gap: 2px;
+  background: var(--border-primary);
+  overflow: hidden;
+  min-height: 0;
+  padding-bottom: var(--drawer-handle-height); /* Drawer handle için alan */
+}
+
+
+/* Card/Section Styles */
+.card {
+  background: var(--bg-primary);
+  padding: 12px var(--card-padding-x);
+  overflow: visible; /* Tooltip'lerin görünmesi için */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--spacing-after-header);
+  flex-shrink: 0;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-normal);
+  font-size: var(--font-size-body);
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.timestamp {
+  font-size: var(--font-size-label);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-style: italic;
+}
+
+.card-content {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ========== Global Scrollbar System ========== */
+.card-content,
+#debugContent,
+.drawer-content {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Sağ kenardaki card'lar: scrollbar overlay, border'a yaslanır */
+.left-stack .card,
+#acSection {
+  position: relative;
+}
+
+.left-stack .card-content,
+#acSection .card-content {
+  overflow-y: overlay; /* Scrollbar içerik alanını daraltmaz */
+  margin-right: calc(-1 * var(--card-padding-x)); /* Card padding'i aş, border'a dayan */
+  padding-right: var(--card-padding-x); /* İçerik hizalamasını koru */
+}
+
+/* RTC columns - scroll yok, parent (card-content) yönetiyor */
+.rtc-column {
+  overflow-y: visible;
+}
+
+/* Scrollbar width */
+.card-content::-webkit-scrollbar,
+#debugContent::-webkit-scrollbar,
+.drawer-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.card-content::-webkit-scrollbar-track,
+#debugContent::-webkit-scrollbar-track,
+.drawer-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.card-content::-webkit-scrollbar-thumb,
+#debugContent::-webkit-scrollbar-thumb,
+.drawer-content::-webkit-scrollbar-thumb {
+  background: rgba(139, 148, 158, 0.3);
+  border-radius: 2px;
+}
+
+.card-content::-webkit-scrollbar-thumb:hover,
+#debugContent::-webkit-scrollbar-thumb:hover,
+.drawer-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 148, 158, 0.6);
+}
+
+/* Show scrollbar only on card/section hover (cleaner look) */
+.card-content::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.card:hover .card-content::-webkit-scrollbar-thumb {
+  background: rgba(139, 148, 158, 0.3);
+}
+.card:hover .card-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 148, 158, 0.6);
+}
+
+/* Two Column Layout (C çizgisi: dikey ayırıcı) */
+.row-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  background: var(--border-primary);
+  min-height: 0; /* Grid içinde içerik taşmasını önle */
+}
+
+/* Left stack: GUM + Encoding vertically stacked (B çizgisi: C'den miras) */
+.left-stack {
+  display: grid;
+  grid-template-rows: 1fr 1fr; /* Tam ortadan ikiye böl */
+  gap: inherit;        /* C'den miras: 2px */
+  background: inherit; /* C'den miras: --border-primary */
+  min-height: 0;
+}
+
+.left-stack .card {
+  min-height: 0;
+}
+
+/* RTC Two Column Content */
+#rtcContent {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  height: 100%;
+  background: var(--border-primary);
+}
+
+.rtc-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-primary);
+  padding: 0 12px;
+  /* Scroll yok - parent (#rtcContent = card-content) yönetiyor */
+}
+
+.rtc-column:first-child {
+  padding-left: 0;
+}
+
+/* ========== Ortak Sub-Header Stili ========== */
+.sub-header {
+  display: flex;
+  align-items: center;
+  padding-top: var(--spacing-row); /* td padding ile hizalama (tablo satırlarıyla aynı başlangıç) */
+  padding-bottom: 4px;
+  margin-bottom: calc(var(--spacing-after-subheader) - 4px); /* padding dahil toplam = 12px */
+  border-bottom: 1px solid var(--border-subtle);
+  /* Ortak yazı stili - tüm alt başlıklar için */
+  font-size: var(--font-size-label);
+  font-weight: 600;
+  color: var(--text-subheader);
+}
+
+/* WebRTC: gap (metin doğrudan içinde) */
+.sub-header--rtc {
+  gap: var(--gap-tight);
+}
+
+/* AudioContext: space-between (sağda timestamp için) */
+.sub-header--ac {
+  justify-content: space-between;
+}
+
+/* Sub-header sonrası içerik indent - hiyerarşiyi gösterir (AudioContext için) */
+.ac-section .sub-header + table,
+.ac-section .sub-header ~ table {
+  margin-left: 12px;
+  width: calc(100% - 12px);
+}
+.ac-section .sub-header + .audio-tree,
+.ac-section .sub-header ~ .audio-tree {
+  margin-left: 12px;
+}
+/* RTC columns: indent yok - column padding zaten var */
+.rtc-column .sub-header + table,
+.rtc-column .sub-header ~ table {
+  margin-left: 0;
+  width: 100%;
+}
+
+.direction-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-micro);
+}
+
+.direction-icon.send { background: rgba(63, 185, 80, 0.2); }
+.direction-icon.recv { background: rgba(88, 166, 255, 0.2); }
+
+/* Table Styles */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-body);
+}
+
+tr {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+tr:last-child {
+  border-bottom: none;
+}
+
+td {
+  padding: var(--spacing-row) 0;
+  vertical-align: middle;
+}
+
+td:first-child {
+  color: var(--text-muted);
+  font-size: var(--font-size-label);
+  width: 50%;
+}
+
+td:last-child {
+  color: var(--text-primary);
+  font-weight: 500;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-body);
+  white-space: nowrap; /* Değerlerin tek satırda kalması için */
+}
+
+.metric-value {
+  color: var(--accent-blue);
+}
+
+.good { color: var(--accent-green); }
+.warning { color: var(--accent-orange); }
+.error { color: var(--accent-red); }
+
+.badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  font-family: var(--font-mono);
+  vertical-align: baseline;
+  line-height: 1.4;
+}
+
+.badge-code {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+/* Badge içeren td hücreleri için vertical hizalama düzeltmesi */
+td:last-child .badge {
+  vertical-align: middle;
+}
+
+.no-data {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Log Console */
+#logSection {
+  background: var(--bg-secondary);
+}
+
+#debugContent {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-label);
+  line-height: 1.6;
+}
+
+.log-line {
+  padding: 3px 0;
+  display: flex;
+  gap: var(--gap-normal);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.log-time {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.log-prefix {
+  color: var(--accent-purple);
+  flex-shrink: 0;
+}
+
+.log-message {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Log line color classes - entire row colored */
+.log-line.error .log-time,
+.log-line.error .log-prefix,
+.log-line.error .log-message { color: var(--accent-red); }
+
+.log-line.warn .log-time,
+.log-line.warn .log-prefix,
+.log-line.warn .log-message { color: var(--accent-orange); }
+
+.log-line.success .log-time,
+.log-line.success .log-prefix,
+.log-line.success .log-message { color: var(--accent-green); }
+
+.log-line.info .log-time,
+.log-line.info .log-prefix,
+.log-line.info .log-message { color: var(--accent-blue); }
+
+.btn-sm {
+  height: var(--btn-height-sm);
+  padding: 0 10px;
+  font-size: var(--font-size-label);
+  border-radius: var(--radius-md);
+}
+
+/* Multiple AudioContext support */
+.context-item {
+  margin-bottom: 8px;
+}
+
+.context-item.context-separator {
+  border-top: 1px dashed var(--border-subtle);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+
+/* Page Audio context minimal view */
+.context-minimal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 0; /* Sol/sağ padding card'dan miras, sadece dikey padding */
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.context-minimal .context-purpose {
+  font-weight: 500;
+  margin-bottom: 0;
+}
+.context-minimal .context-subtext {
+  width: 100%;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: -2px;
+}
+
+.context-purpose {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-blue);
+  margin-bottom: 4px;
+  padding: 2px 0;
+}
+
+/* Processing satırları - tablo tr gibi */
+.processing-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-row) 0;
+  font-size: var(--font-size-body);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.processing-item:last-child {
+  border-bottom: none;
+}
+
+.detail-label {
+  color: var(--text-muted);
+  font-size: var(--font-size-label);
+  width: 50%;
+  flex-shrink: 0;
+}
+
+.detail-value {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  text-align: right;
+  flex: 1;
+}
+
+/* ========== Generic Tooltip System (OCP-DRY) ========== */
+.has-tooltip {
+  position: relative;
+  cursor: default;
+  /* NOT: margin-left sadece ikon tooltip'leri için gerekli, variant class'larında tanımlı */
+}
+
+/* Tooltip varyantları (ikon) - sol margin ile metinden ayrılır */
+.has-tooltip--info {
+  margin-left: 4px;
+  color: var(--accent-blue);
+}
+
+.has-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: normal;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 1000;
+  border: 1px solid var(--border-primary);
+}
+
+.has-tooltip:hover::after {
+  opacity: 1;
+}
+
+/* Chain içindeki tooltip'ler için margin sıfırla (→ ile ayrılan işlemciler) */
+.detail-value .has-tooltip {
+  margin-left: 0;
+}
+
+/* Left-stack içindeki tooltip'ler - sağa hizalı ama taşabilir */
+.left-stack .has-tooltip::after {
+  left: auto;
+  right: 0;
+  max-width: 320px;  /* Daha geniş - tooltip kesmesin */
+  white-space: normal;
+  text-align: right;
+  overflow: visible;  /* Taşma serbert - mouse çekince kaybolacak */
+}
+
+/* Pulsing status text (Detecting / Waiting / Pending / Loading) */
+.status-pulse {
+  color: var(--accent-orange);
+  font-weight: 200;  /* %25 daha azaltılmış (300 → 200) */
+  animation: pulse-detecting 2.25s ease-in-out infinite;
+}
+@keyframes pulse-detecting {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ========== AudioContext Section Design ========== */
+.ac-section {
+  margin-top: var(--spacing-between-sections);
+}
+
+.ac-section:first-of-type,
+.ac-section--first {
+  margin-top: 0;
+}
+
+/* Sub-header içindeki başlık metni - ortak stil (font özellikleri parent'tan miras) */
+.sub-header-title,
+.ac-section-title {
+  letter-spacing: 0.3px;
+  color: inherit;  /* Parent'tan (.sub-header) renk miras al */
+}
+
+/* Audio Path timestamp - extends .timestamp with smaller font */
+.ac-detected-time-subtle {
+  font-size: var(--font-size-small);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-style: italic;
+}
+
+/* AudioContext: GETUSERMEDIA ile aynı hizalama - indent yok */
+
+/* Monitor satırı - muted stil (renk + ağırlık) */
+.detail-value-muted {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* ========== Audio Tree v3 (Düzeltilmiş) ========== */
+.audio-tree {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 0;
+  --tree-color: var(--text-muted);
+  --tree-unit: 16px;
+  --tree-line: 1px;
+  --char-width: 6.6px;
+}
+
+.tree-node {
+  position: relative;
+}
+
+.tree-label {
+  display: inline-block;
+  position: relative;
+  color: var(--text-primary);
+  font-weight: 500;
+  /* Label'ı biraz yükselterek çizgilerden ayır */
+  padding-left: 2px;
+}
+
+/* Label text - JS ölçümü için ayrı element */
+.tree-label-text {
+  /* display: inline - varsayılan */
+}
+
+/* Param (parantez içi) - farklı stil */
+.tree-param {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+/* Parent gövdesi: label ortasından aşağı */
+.tree-node.has-children > .tree-label::after {
+  content: '';
+  position: absolute;
+  /* Label sol kenarından yarı genişlik (sadece label için) */
+  left: calc(50%);
+  top: 100%;
+  width: var(--tree-line);
+  /* Gövde yüksekliği: children container'a bağlanacak kadar */
+  height: var(--tree-unit);
+  background: var(--tree-color);
+  transform: translateX(-50%);
+}
+
+/* Children container */
+.tree-children {
+  position: relative;
+  padding-left: var(--tree-unit);
+  padding-top: calc(var(--tree-unit) / 2);  /* Üstten boşluk - gövde bağlantısı için */
+  /* JavaScript'ten gelen gerçek label genişliği (measureTreeLabels) */
+  margin-left: var(--parent-center, 40px);
+}
+
+/* Dikey çizgi: JavaScript'ten gelen dinamik height */
+.tree-children::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* JavaScript'ten hesaplanan değer, fallback olarak eski formül */
+  height: var(--vertical-line-height, calc(100% - var(--tree-unit) / 2));
+  width: var(--tree-line);
+  background: var(--tree-color);
+}
+
+/* Yatay dal: dikey çizgiden child'a (label'ın içine girmez) */
+.tree-children > .tree-node::before {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--tree-unit));
+  top: calc(var(--tree-unit) / 2);
+  /* Yatay dal label'ın solunda biter, içine girmez */
+  width: calc(var(--tree-unit) - 2px);
+  height: var(--tree-line);
+  background: var(--tree-color);
+}
+
+/* Child node layout */
+.tree-children > .tree-node {
+  min-height: var(--tree-unit);
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  /* Label'ın çizgilerle çakışmaması için padding */
+  padding-top: calc(var(--tree-unit) / 2 - 0.5em);
+}
+
+/* Varyantlar */
+.tree-node.tree-monitor .tree-label { color: var(--text-muted); }
+.tree-label.has-tooltip { cursor: default; }
+
+/* Audio Tree tooltip'leri - sağa konumlandır (overflow kesme sorunu için) */
+.audio-tree .has-tooltip::after {
+  /* Reset left-stack overrides */
+  bottom: auto;
+  right: auto;
+  text-align: left;
+  white-space: nowrap;
+  max-width: none;
+  /* Sağa konumlandır */
+  top: 50%;
+  left: 100%;
+  transform: translateY(-50%);
+  margin-left: 8px;
+}
+
+/* ========== Console Drawer ========== */
+
+/* Drawer Overlay - slides up from bottom */
+.drawer-overlay {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40%;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-primary);
+  transform: translateY(100%);
+  transition: transform 0.3s ease;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.drawer-overlay.open {
+  transform: translateY(0);
+}
+
+/* Drawer Header */
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.drawer-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+/* Drawer Handle - always visible at bottom */
+.drawer-handle {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--drawer-handle-height);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  z-index: 99;
+  transition: all 0.3s ease;
+  user-select: none;
+}
+
+.drawer-handle:hover {
+  background: var(--bg-tertiary);
+}
+
+/* When drawer is open, handle moves up */
+.drawer-overlay.open ~ .drawer-handle {
+  bottom: 40%;
+}
+
+.handle-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.log-badge {
+  background: var(--accent-purple);
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 20px;
+  text-align: center;
+}
+
+.log-badge.empty {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.handle-chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 0.3s ease;
+}
+
+.drawer-overlay.open ~ .drawer-handle .handle-chevron {
+  transform: rotate(180deg);
+}
+
+/* Locked Tab Info Banner */
+.locked-tab-banner {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.locked-tab-banner.visible {
+  display: flex;
+}
+
+/* Aynı tab - yeşil/aktif stil */
+.locked-tab-banner.same-tab {
+  background: linear-gradient(180deg, rgba(63, 185, 80, 0.1) 0%, rgba(63, 185, 80, 0.05) 100%);
+  border-bottom: 1px solid var(--accent-green);
+}
+
+.locked-tab-banner.same-tab .info-text strong {
+  color: var(--accent-green);
+}
+
+/* Farklı tab - turuncu/uyarı stil */
+.locked-tab-banner.different-tab {
+  background: linear-gradient(180deg, rgba(210, 153, 34, 0.15) 0%, rgba(210, 153, 34, 0.08) 100%);
+  border-bottom: 1px solid var(--accent-orange);
+}
+
+.locked-tab-banner.different-tab .info-text strong {
+  color: var(--accent-orange);
+}
+
+.locked-tab-banner .info-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.locked-tab-banner .info-text {
+  flex: 1;
+}
+
+.locked-tab-banner .info-text strong {
+  font-weight: 600;
+}
+
+/* Controls disabled state - SADECE Start butonu (farklı tab veya system page) */
+.controls.disabled .btn-primary {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Bireysel buton disabled stili - Export/Clear için (inspector çalışırken) */
+.btn.disabled,
+.btn-ghost.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Native disabled attribute desteği */
+button:disabled,
+.btn:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Auto-Stop Notification Banner */
+.auto-stop-banner {
+  display: none;
+  background: linear-gradient(180deg, rgba(210, 153, 34, 0.15) 0%, rgba(210, 153, 34, 0.08) 100%);
+  border-bottom: 1px solid var(--accent-orange);
+  color: var(--accent-orange);
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.auto-stop-banner.visible {
+  display: block;
+}
+
+/* ========== Refresh Required Modal ========== */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.modal-overlay.visible {
+  display: flex;
+}
+
+.modal-content {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  width: 90%;
+  max-width: 320px;
+  padding: 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.modal-icon {
+  font-size: 24px;
+  color: var(--accent-orange);
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  margin-bottom: 20px;
+}
+
+.modal-body p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.modal-body p:last-child {
+  margin-bottom: 0;
+}
+
+.modal-warning {
+  color: var(--accent-orange) !important;
+  font-weight: 500;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.btn-modal-cancel {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
+}
+
+.btn-modal-cancel:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.btn-modal-confirm {
+  background: var(--accent-orange);
+  color: #fff;
+  border: 1px solid var(--accent-orange);
+  font-weight: 600;
+}
+
+.btn-modal-confirm:hover {
+  background: #c08920;
+  border-color: #c08920;
+}

@@ -115,3 +115,15 @@ export const ENCODER_KEYWORDS = [
   'encoder', 'opus', 'ogg', 'mp3', 'aac', 'vorbis', 'flac',
   'lame', 'audio', 'media', 'wasm', 'codec', 'voice', 'recorder'
 ];
+
+/**
+ * Opus codec valid frame sizes in milliseconds
+ * Used for frame size validation and unit detection
+ */
+export const OPUS_FRAME_SIZES_MS = [2.5, 5, 10, 20, 40, 60];
+
+/**
+ * Threshold for "recent" context detection (milliseconds)
+ * Contexts created within this window are considered active
+ */
+export const RECENT_CONTEXT_THRESHOLD_MS = 5000;

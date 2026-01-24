@@ -94,21 +94,17 @@ _handleAudioConnection(connection, shouldEmit = true)
 
 ## UI Rendering
 
-`popup.js` → `renderConnectionGraph(connections, contexts)` fonksiyonu:
+> **Not:** `renderChain()` fonksiyonu kaldırıldı (v2025.01).
+> Audio bağlantıları artık nested tree yapısı ile `renderAudioPathTree()` içinde gösteriliyor.
 
-| Kategori | Node Types | Label |
-|----------|------------|-------|
-| Source | MediaStreamAudioSource | Microphone |
-| Effect | BiquadFilter, Convolver, Delay | EQ, Reverb, Delay |
-| Effect | AudioWorklet (VU meter) | VU Meter |
-| Output | AudioDestination, MediaStreamAudioDestination | Speaker, Stream |
+**Audio Path Tree Rendering:**
+- `renderers.js` → `renderAudioPathTree(mainProcessors, monitors, inputSource)` fonksiyonu
+- `deriveMainChainProcessorsFromConnections()` ile graph'tan ana path çıkarılır
+- `AUDIO_NODE_DISPLAY_MAP` ile node türleri kullanıcı dostu isimlere çevrilir
+- `popup.js` → `measureTreeLabels()` ile label genişlikleri ölçülüp CSS variable set edilir
+- `peak`, `level`, `meter`, `vu` içeren processor isimleri "VU Meter" olarak etiketlenir
 
-**VU Meter Detection:**
-- `contexts` parametresi ile AudioWorkletNode processor name'leri alınır
-- `peak`, `level`, `meter`, `vu` içeren processor isimleri VU Meter olarak gösterilir
-- Örnek: `peak-worklet-processor` → "VU Meter" label
-
-**Feedback Detection:** Delay → Gain → Delay pattern
+**İlgili Referans:** `architecture/references/ui-states.md` → Pipeline Rendering bölümü
 
 ## Session Reset (Auto-Stop)
 

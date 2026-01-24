@@ -15,7 +15,7 @@ UI'da Encoding bölümünde tek encoder gösterilir. Priority sistemi.
 
 ## ScriptProcessor Encoder Fallback
 
-popup.js'deki `ENCODER_DETECTORS` array'inde ScriptProcessor en sonda. **Tasarım gereği:**
+`scripts/modules/encoder-ui.js`'deki `ENCODER_DETECTORS` array'inde ScriptProcessor en sonda. **Tasarım gereği:**
 - ScriptProcessor varlığı encoding'i **garanti etmez**
 - WAV/MP3'e dönüştürüyor OLABİLİR
 - WASM, WebRTC, MediaRecorder kesin tespit yöntemleri öncelikli
@@ -34,9 +34,10 @@ popup.js'deki `ENCODER_DETECTORS` array'inde ScriptProcessor en sonda. **Tasarı
 ## UI DETECTION_LABELS
 
 ```javascript
-// popup.js - Pattern → UI mapping
-// ⚠️ SYNC: EarlyHook.js'de yeni pattern → buraya ekle
-const DETECTION_LABELS = {
+// scripts/modules/encoder-ui.js - Pattern → UI mapping
+// ⚠️ SYNC: EarlyHook.js veya early-inject.js'de yeni pattern → buraya ekle
+// ⚠️ SYNC: encoder-patterns.js PATTERN_PRIORITY ile aynı key'ler
+export const DETECTION_LABELS = {
   'audioworklet-config': { text: 'AudioWorklet (full)', icon: '✓', tooltip: '...' },
   'audioworklet-init': { text: 'AudioWorklet (basic)', icon: '○', tooltip: '...' },
   'audioworklet-deferred': { text: 'AudioWorklet (late)', icon: '◐', tooltip: '...' },

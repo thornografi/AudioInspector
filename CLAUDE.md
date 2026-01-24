@@ -26,7 +26,10 @@ audio-inspector/
 │   │   ├── RTCPeerConnectionCollector.js
 │   │   ├── GetUserMediaCollector.js
 │   │   ├── AudioContextCollector.js
-│   │   └── MediaRecorderCollector.js
+│   │   ├── MediaRecorderCollector.js
+│   │   └── utils/            # Collector yardımcıları
+│   │       ├── encoder-patterns.js  # Pattern priority
+│   │       └── processor-handlers.js
 │   └── page/PageInspector.js # Ana orkestratör
 │
 ├── scripts/                  # Extension script'leri
@@ -34,11 +37,16 @@ audio-inspector/
 │   ├── content.js            # ISOLATED world
 │   ├── early-inject.js       # MAIN world (document_start)
 │   ├── page.js               # MAIN world (PageInspector)
-│   └── popup.js              # UI
+│   ├── popup.js              # UI
+│   └── modules/              # UI modülleri (popup.js için)
+│       ├── helpers.js        # DRY helper fonksiyonlar
+│       ├── renderers.js      # UI render fonksiyonları
+│       └── encoder-ui.js     # ENCODING section logic
 │
-├── views/popup.html          # Popup arayüzü
+├── views/                    # UI dosyaları
+│   ├── popup.html            # Popup HTML
+│   └── popup.css             # Popup stil
 ├── images/                   # İkonlar
-├── tests/                    # Test dosyaları
 └── manifest.json             # Manifest V3
 ```
 
@@ -67,8 +75,9 @@ audio-inspector/
 
 ### DRY (Don't Repeat Yourself)
 - **Yeni kod yazmadan önce mevcut yardımcıları kontrol et**
-  - CSS: `popup.html` → `.has-tooltip`, `.chain-*`, CSS değişkenleri
-  - JS: `ApiHook.js`, `constants.js`, `popup.js` → `formatProcessor()`, `renderChain()`
+  - CSS: `popup.css` → `.has-tooltip`, `.audio-tree`, CSS değişkenleri
+  - JS: `scripts/modules/helpers.js` → `formatWorkletName()`, `capitalizeFirst()`, `extractCodecName()`
+  - JS: `ApiHook.js`, `constants.js` → API hooking, veri sabitleri
 - Tekrar eden değerler → `constants.js` veya CSS değişkeni
 
 ### OCP (Open-Closed Principle)
@@ -101,8 +110,8 @@ audio-inspector/
 
 ### Dosya Yolu Kuralları
 - Manifest referansları → `/scripts`
-- HTML şablonları → `/views`
-- Modüler kod → `/src`
-- Test dosyaları → `/tests`
+- UI dosyaları (HTML/CSS) → `/views`
+- UI modülleri (popup helpers) → `/scripts/modules`
+- Modüler collector/core kod → `/src`
 
 

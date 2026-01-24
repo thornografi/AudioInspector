@@ -5,74 +5,8 @@ import { EVENTS, DATA_TYPES, DESTINATION_TYPES, streamRegistry, ENCODER_KEYWORDS
 import { logger } from '../core/Logger.js';
 import { hookAsyncMethod, hookMethod } from '../core/utils/ApiHook.js';
 import { getInstanceRegistry, cleanupClosedAudioContexts } from '../core/utils/EarlyHook.js';
-
-/**
- * Sync handlers for methodCalls - OCP: Add new handlers without modifying sync loop
- * Maps registry keys to pipeline sync functions
- *
- * ⚠️ SYNC REQUIRED: When adding a new processor type here, also add a corresponding
- * hook in EarlyHook.js → METHOD_HOOK_CONFIGS
- */
-
-/**
- * Factory: Creates a processor handler with duplicate check
- * DRY: All DSP nodes use this pattern - add new nodes with single line
- * @param {string} type - Processor type name
- * @param {Object<string, string>} [fieldMap] - Maps data fields to entry fields with defaults: { fieldName: 'defaultValue' }
- */
-const createProcessorHandler = (type, fieldMap = {}) => (data, pipeline) => {
-  if (!pipeline?.processors) return;
-
-  const nodeId = data?.nodeId || null;
-  const timestamp = data?.timestamp || Date.now();
-
-  // Prefer stable nodeId dedup when available (prevents stale duplicates across sessions)
-  if (nodeId) {
-    const existingIdx = pipeline.processors.findIndex(p => p?.nodeId === nodeId);
-    if (existingIdx >= 0) {
-      const updated = { ...pipeline.processors[existingIdx], type, nodeId, timestamp };
-      for (const [field, defaultVal] of Object.entries(fieldMap)) {
-        updated[field] = data[field] ?? defaultVal;
-      }
-      pipeline.processors[existingIdx] = updated;
-      return;
-    }
-  } else if (pipeline.processors.some(p => p.type === type && p.timestamp === timestamp)) {
-    return;
-  }
-
-  const entry = { type, nodeId, timestamp };
-  for (const [field, defaultVal] of Object.entries(fieldMap)) {
-    entry[field] = data[field] ?? defaultVal;
-  }
-  pipeline.processors.push(entry);
-};
-
-const METHOD_CALL_SYNC_HANDLERS = {
-  // Special handlers - also add to processors array for cleanup tracking
-  mediaStreamSource: (data, pipeline) => {
-    pipeline.inputSource = 'microphone';
-    // Also add as processor for proper cleanup on disconnect
-    createProcessorHandler('mediaStreamSource')(data, pipeline);
-  },
-  mediaStreamDestination: (data, pipeline) => {
-    pipeline.destinationType = DESTINATION_TYPES.MEDIA_STREAM;
-    // Also add as processor for proper cleanup on disconnect
-    createProcessorHandler('mediaStreamDestination')(data, pipeline);
-  },
-
-  // Processor handlers - OCP: Add new DSP node with single line
-  scriptProcessor: createProcessorHandler('scriptProcessor', { bufferSize: 4096, inputChannels: 2, outputChannels: 2 }),
-  analyser: createProcessorHandler('analyser', { fftSize: 2048 }),
-  gain: createProcessorHandler('gain', { gainValue: 1 }),
-  biquadFilter: createProcessorHandler('biquadFilter', { filterType: 'lowpass', frequency: null }),
-  dynamicsCompressor: createProcessorHandler('dynamicsCompressor'),
-  oscillator: createProcessorHandler('oscillator', { oscillatorType: 'sine' }),
-  delay: createProcessorHandler('delay', { maxDelayTime: 1 }),
-  convolver: createProcessorHandler('convolver'),
-  waveShaper: createProcessorHandler('waveShaper', { oversample: 'none' }),
-  panner: createProcessorHandler('panner', { panningModel: 'equalpower' })
-};
+import { METHOD_CALL_SYNC_HANDLERS } from './utils/processor-handlers.js';
+import { PATTERN_PRIORITY, getOpusApplicationName } from './utils/encoder-patterns.js';
 
 /**
  * Collects AudioContext stats (sample rate, latency).
@@ -896,19 +830,8 @@ class AudioContextCollector extends BaseCollector {
       // ═══════════════════════════════════════════════════════════════════
       // PATTERN PRIORITY: Prevent lower-priority patterns from overwriting better ones
       // Example: Blob detection (post-hoc) should not overwrite Worker detection (real-time)
+      // See: utils/encoder-patterns.js for priority definitions
       // ═══════════════════════════════════════════════════════════════════
-      const PATTERN_PRIORITY = {
-        'audioworklet-config': 5,
-        'audioworklet-init': 4,
-        'audioworklet-deferred': 4,
-        'direct': 4,
-        'nested': 4,
-        'worker-init': 3,
-        'worker-audio-init': 3,
-        'audio-blob': 2,
-        'unknown': 1
-      };
-
       const newPriority = PATTERN_PRIORITY[encoderInfo.pattern] || 1;
       const existingPriority = this.currentEncoderData
         ? (PATTERN_PRIORITY[this.currentEncoderData.pattern] || 1)
@@ -967,9 +890,8 @@ class AudioContextCollector extends BaseCollector {
       const linkedContextId = this._findBestMatchingContextId(encoderInfo.sampleRate);
 
       // Human-readable application name (Opus terminology)
-      // 2048 = OPUS_APPLICATION_VOIP, 2049 = OPUS_APPLICATION_AUDIO, 2051 = OPUS_APPLICATION_LOWDELAY
-      const appNames = { 2048: 'VoIP', 2049: 'Audio', 2051: 'LowDelay' };
-      const appName = encoderInfo.applicationName || appNames[encoderInfo.application] || null;
+      // See: utils/encoder-patterns.js for OPUS_APPLICATION_NAMES
+      const appName = getOpusApplicationName(encoderInfo.application, encoderInfo.applicationName);
 
       // Build encoder data object
       const encoderData = {

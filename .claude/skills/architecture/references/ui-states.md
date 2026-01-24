@@ -104,63 +104,117 @@ const totalLatency = baseLatency + outputLatency;      // ~52ms
 
 ## Pipeline Rendering
 
-### Chain Display (Vertical)
+### Audio Path Tree (Nested)
 
-Dikey format, sağa hizalı, oklar arasında:
-
-```
-      Gain(x3)
-         ↓
-     Convolver
-         ↓
-    Filter(x4)
-         ↓
-        Gain
-```
-
-**Gruplama Kuralları** (`getProcessorKey()`):
-- Ardışık aynı tür işlemciler `(xN)` olarak gruplanır
-- BiquadFilter, Oscillator, Delay: Parametre ayrımı **YAPILMAZ** (tümü gruplanır)
-- AudioWorkletNode: `processorName`'e göre ayrı gruplanır
-
-**Buffer Size Satırı:** ScriptProcessor varsa Chain'den sonra ayrı satır:
+Nested tree yapısı ile audio path görselleştirmesi:
 
 ```
-Chain       Gain(x3)
-               ↓
-            ScriptProcessor
-Buffer Size 4096
-Output      MediaStreamDestination
+Microphone
+    │
+    ├── Processor (passthrough)
+    │        │
+    │        └── Volume (pass)
+    │                │
+    │                ├── Encoder (output)
+    │                │
+    │                └── Analyzer (2048pt)
 ```
 
-### formatProcessor() Return
+**Rendering Flow:**
+1. `renderAudioPathTree()` - Ana fonksiyon (renderers.js)
+2. `buildNestedTree()` - Pipeline'dan nested yapı oluşturur
+3. `renderNode()` - Recursive HTML render
+4. `measureTreeLabels()` - JS ile label genişliklerini ölçer (popup.js)
 
-Object döndürür (string değil):
+### HTML Yapısı
+
+```html
+<div class="audio-tree">
+  <div class="tree-node tree-root has-children">
+    <span class="tree-label has-tooltip" data-tooltip="...">
+      <span class="tree-label-text">Microphone</span>
+    </span>
+    <div class="tree-children" style="--parent-center: 45px">
+      <div class="tree-node has-children">
+        <span class="tree-label has-tooltip" data-tooltip="...">
+          <span class="tree-label-text">Volume</span>
+          <span class="tree-param">(pass)</span>
+        </span>
+        <!-- children... -->
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+### JavaScript Ölçüm
+
+`measureTreeLabels()` fonksiyonu label genişliklerini ölçüp CSS variable olarak set eder:
 
 ```javascript
-return {
-  name: "Filter(x4)",    // Gruplanmış: count > 1 ise suffix
-  params: "",            // Gruplu node'larda parametre yok
-  tooltip: "..."         // Detaylar tooltip'te
-};
+function measureTreeLabels() {
+  const treeNodes = document.querySelectorAll('.tree-node.has-children');
+  treeNodes.forEach(node => {
+    const labelText = node.querySelector('.tree-label-text');
+    const children = node.querySelector('.tree-children');
+    if (labelText && children) {
+      const labelWidth = labelText.getBoundingClientRect().width;
+      children.style.setProperty('--parent-center', `${labelWidth / 2}px`);
+    }
+  });
+}
 ```
+
+**Çağrı:** `updateUI()` sonunda `requestAnimationFrame(() => measureTreeLabels())`
 
 ### CSS Classes
 
 | Class | Amaç |
 |-------|------|
-| `.chain-vertical` | Dikey container, sağa hizalı |
-| `.chain-node` | Node wrapper (flex) |
-| `.chain-node-name` | Node adı + count |
-| `.chain-arrow` | Ok (↓), muted renk |
+| `.audio-tree` | Ana container, CSS variables tanımlar |
+| `.tree-node` | Her node wrapper |
+| `.tree-node.has-children` | Child'ı olan node (dikey çizgi için) |
+| `.tree-node.tree-root` | Kök node |
+| `.tree-node.tree-monitor` | Monitor/analyzer node (muted stil) |
+| `.tree-label` | Label wrapper (tooltip için) |
+| `.tree-label-text` | Sadece label metni (JS ölçümü için) |
+| `.tree-param` | Parantez içi parametre (muted stil) |
+| `.tree-children` | Alt node'lar container |
 
-### Gruplanan Node'lar
+### CSS Variables
 
-| Node | Gruplu | Tooltip |
-|------|--------|---------|
-| Gain | ✓ | - |
-| BiquadFilter | ✓ (tümü) | - |
-| Oscillator | ✓ (tümü) | - |
-| Delay | ✓ (tümü) | - |
-| ScriptProcessor | ✓ | Input/Output channels |
-| AudioWorkletNode | Sadece aynı processorName | Worklet options |
+```css
+.audio-tree {
+  --tree-color: var(--text-muted);
+  --tree-unit: 16px;
+  --tree-line: 1px;
+}
+
+.tree-children {
+  /* JS'ten gelen gerçek değer, fallback 40px */
+  margin-left: var(--parent-center, 40px);
+}
+```
+
+### formatProcessorForTree() Return
+
+```javascript
+return {
+  label: "Volume",       // AUDIO_NODE_DISPLAY_MAP'ten
+  param: "pass",         // getParam() fonksiyonundan
+  tooltip: "GainNode"    // Teknik isim
+};
+```
+
+### AUDIO_NODE_DISPLAY_MAP
+
+Node türlerini kullanıcı dostu isimlere çevirir:
+
+| Node Type | Label | Param Örneği |
+|-----------|-------|--------------|
+| `mediaStreamSource` | Microphone | - |
+| `gain` | Volume | pass, muted, -6dB |
+| `biquadFilter` | Filter | LP 1000Hz |
+| `analyser` | Analyzer | 2048pt |
+| `audioWorkletNode` | Processor | Opus, MP3 |
+| `mediaStreamDestination` | Stream Output | - |

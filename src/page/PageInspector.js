@@ -227,8 +227,9 @@ class PageInspector {
 
     // Clear early hook registry to prevent memory leak
     // Hooks remain installed, only captured data is cleared
-    if (typeof window.__clearEarlyCaptures === 'function') {
-      window.__clearEarlyCaptures();
+    const win = /** @type {any} */ (window);
+    if (typeof win.__clearEarlyCaptures === 'function') {
+      win.__clearEarlyCaptures();
     }
   }
 
