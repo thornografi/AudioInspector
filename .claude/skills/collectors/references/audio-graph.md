@@ -98,8 +98,8 @@ _handleAudioConnection(connection, shouldEmit = true)
 > Audio bağlantıları artık nested tree yapısı ile `renderAudioPathTree()` içinde gösteriliyor.
 
 **Audio Path Tree Rendering:**
-- `audio-tree.js` → `renderAudioPathTree(mainProcessors, monitors, inputSource)` fonksiyonu
-- `deriveMainChainProcessorsFromConnections()` ile graph'tan ana path çıkarılır (renderers.js)
+- `audio-tree.js` → `renderAudioPathTree(processorTree, monitors, inputSource)` fonksiyonu
+- `deriveProcessorTreeFromConnections()` ile graph'tan processor tree çıkarılır (renderers.js)
 - `AUDIO_NODE_DISPLAY_MAP` ile node türleri kullanıcı dostu isimlere çevrilir (audio-tree.js)
 - `audio-tree.js` → `measureTreeLabels()` ile label genişlikleri ölçülüp CSS variable set edilir
 - `peak`, `level`, `meter`, `vu` içeren processor isimleri "VU Meter" olarak etiketlenir

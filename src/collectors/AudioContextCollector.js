@@ -1199,158 +1199,31 @@ class AudioContextCollector extends BaseCollector {
 
   /**
    * Handle audio disconnection (AudioNode.disconnect() calls)
-   * Removes connections from audioConnections array.
-   * IMPORTANT: Does NOT delete pipeline.processors entries on disconnect.
+   *
+   * NOTE (2025-01): Connection silme işlemi DEVRE DIŞI bırakıldı.
+   * ============================================================
+   * MediaRecorder.stop() sonrası site tüm node'ları disconnect ediyor.
+   * Önceden bu fonksiyon connection'ları siliyordu ve Audio Path tree kayboluyordu.
+   *
+   * Kullanıcı kayıt durduktan sonra da "kayıt sırasında nasıl bir yapı vardı"yı
+   * görmek istiyor. Bu yüzden connection'ları silmiyoruz.
+   *
+   * Full cleanup durumları (Clear butonu, tab switch, origin change, page refresh)
+   * zaten storage level'da temizleniyor - bu fonksiyona gerek yok.
+   *
    * @private
    * @param {Object} disconnectData - { action: 'disconnect', sourceId, destId, outputIndex, inputIndex, sourceType, destType, contextId, timestamp }
-   * @param {boolean} shouldEmit - If true, emit data event; if false, silent update (for early sync)
+   * @param {boolean} shouldEmit - Unused (kept for API compatibility)
    */
   _handleDisconnection(disconnectData, shouldEmit = true) {
-    const { sourceId, destId, outputIndex, inputIndex, sourceType, contextId } = disconnectData;
+    const { sourceType } = disconnectData;
 
-    if (!this.audioConnections) {
-      this.audioConnections = [];
-    }
+    // Sadece log tut, connection silme YAPMA
+    logger.info(this.logPrefix,
+      `Disconnection ignored (tree preserved): ${sourceType} disconnected`);
 
-    const beforeCount = this.audioConnections.length;
-    let removedCount = 0;
-
-    const hasDest = destId !== null && destId !== undefined;
-    const hasOutput = typeof outputIndex === 'number';
-    const hasInput = typeof inputIndex === 'number';
-
-    // Modes:
-    // 1) disconnect() → remove ALL connections from sourceId
-    // 2) disconnect(output) → remove all connections from sourceId with outputIndex
-    // 3) disconnect(destination) → remove all connections from sourceId to destId
-    // 4) disconnect(destination, output[, input]) → remove specific connection(s)
-    if (!hasDest && !hasOutput && !hasInput) {
-      this.audioConnections = this.audioConnections.filter(conn => {
-        if (conn.sourceId === sourceId) {
-          removedCount++;
-          return false;
-        }
-        return true;
-      });
-    } else if (!hasDest && hasOutput && !hasInput) {
-      this.audioConnections = this.audioConnections.filter(conn => {
-        if (conn.sourceId === sourceId && conn.outputIndex === outputIndex) {
-          removedCount++;
-          return false;
-        }
-        return true;
-      });
-    } else if (hasDest && !hasOutput && !hasInput) {
-      this.audioConnections = this.audioConnections.filter(conn => {
-        if (conn.sourceId === sourceId && conn.destId === destId) {
-          removedCount++;
-          return false;
-        }
-        return true;
-      });
-    } else {
-      this.audioConnections = this.audioConnections.filter(conn => {
-        const match = conn.sourceId === sourceId &&
-          (!hasDest || conn.destId === destId) &&
-          (!hasOutput || conn.outputIndex === outputIndex) &&
-          (!hasInput || conn.inputIndex === inputIndex);
-        if (match) {
-          removedCount++;
-          return false;
-        }
-        return true;
-      });
-    }
-
-    if (removedCount > 0) {
-      logger.info(this.logPrefix,
-        `Disconnection: removed ${removedCount} connection(s) from ${sourceType} (total: ${beforeCount} → ${this.audioConnections.length})`);
-
-      // ═══════════════════════════════════════════════════════════════════
-      // PIPELINE CLEANUP: Remove ALL orphaned processors (no connections)
-      // ═══════════════════════════════════════════════════════════════════
-      // STRATEGY: After each disconnection, sweep through ALL contexts and
-      // remove processors that have NO remaining connections (as source OR dest)
-      // This handles cases where nodes are GC'd without explicit disconnect()
-
-      for (const [, ctxData] of this.activeContexts.entries()) {
-        if (!ctxData?.pipeline?.processors) continue;
-
-        const beforeProcCount = ctxData.pipeline.processors.length;
-
-        // Filter out processors with NO connections
-        ctxData.pipeline.processors = ctxData.pipeline.processors.filter(proc => {
-          const nodeId = proc.nodeId;
-          if (!nodeId) return true; // Keep processors without nodeId (shouldn't happen)
-
-          // Check if this node has ANY connections (as source OR destination)
-          const hasConnections = this.audioConnections.some(
-            conn => conn.sourceId === nodeId || conn.destId === nodeId
-          );
-
-          return hasConnections; // Keep if has connections, remove if orphaned
-        });
-
-        const removedProcCount = beforeProcCount - ctxData.pipeline.processors.length;
-        if (removedProcCount > 0) {
-          logger.info(this.logPrefix,
-            `Pipeline sweep: removed ${removedProcCount} orphaned processor(s) from context ${ctxData.contextId || 'unknown'}`);
-        }
-
-        // Also clean up pipeline metadata fields when their nodes are removed
-        // Check if mediaStreamSource processor was removed → clear inputSource
-        const hasMediaStreamSource = ctxData.pipeline.processors.some(
-          proc => proc.type === 'mediaStreamSource'
-        );
-        if (!hasMediaStreamSource && ctxData.pipeline.inputSource) {
-          ctxData.pipeline.inputSource = null;
-          logger.info(this.logPrefix,
-            `Pipeline sweep: cleared inputSource (mediaStreamSource removed)`);
-        }
-
-        // Check if mediaStreamDestination processor was removed → clear destinationType
-        const hasMediaStreamDestination = ctxData.pipeline.processors.some(
-          proc => proc.type === 'mediaStreamDestination'
-        );
-        if (!hasMediaStreamDestination && ctxData.pipeline.destinationType) {
-          ctxData.pipeline.destinationType = null;
-          logger.info(this.logPrefix,
-            `Pipeline sweep: cleared destinationType (mediaStreamDestination removed)`);
-        }
-      }
-
-      if (shouldEmit) {
-        // Use debounced emit for disconnections too
-        this._emitConnectionsDebounced();
-      }
-    }
-  }
-
-  /**
-   * Find context metadata by nodeId (used for pipeline cleanup)
-   * @private
-   * @param {string} nodeId - Node identifier
-   * @param {string} [contextId] - Optional context hint for faster lookup
-   * @returns {Object|null} Context metadata or null
-   */
-  _findContextByNodeId(nodeId, contextId = null) {
-    // Fast path: if contextId provided, try direct lookup
-    if (contextId) {
-      for (const [, ctxData] of this.activeContexts.entries()) {
-        if (ctxData.contextId === contextId) {
-          return ctxData;
-        }
-      }
-    }
-
-    // Fallback: search all contexts (check if nodeId exists in pipeline.processors)
-    for (const [, ctxData] of this.activeContexts.entries()) {
-      if (ctxData.pipeline?.processors?.some(proc => proc.nodeId === nodeId)) {
-        return ctxData;
-      }
-    }
-
-    return null;
+    // Connection'lar korunuyor → Tree görünmeye devam eder
+    // Emit de yapmıyoruz çünkü veri değişmedi
   }
 
   /**

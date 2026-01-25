@@ -332,119 +332,10 @@ export function filterConnectionsByContext(connections, contexts) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// AUDIO PATH GRAPH HELPERS
+// PROCESSOR TREE (Paralel Branch Desteği)
 // ═══════════════════════════════════════════════════════════════════════════════
 // mapNodeTypeToProcessorType ve isDestinationNodeType artık audio-tree.js'den
 // import ediliyor (merkezi AUDIO_NODE_DISPLAY_MAP'ten türetilmiş)
-
-/**
- * Derive the main Audio Path chain from the connection graph
- */
-export function deriveMainChainProcessorsFromConnections(connections, ctx) {
-  if (!connections || connections.length === 0) return [];
-
-  const pipelineByNodeId = new Map();
-  const pipelineProcessors = ctx?.pipeline?.processors || [];
-  for (const p of pipelineProcessors) {
-    if (p?.nodeId) {
-      pipelineByNodeId.set(p.nodeId, p);
-    }
-  }
-
-  const nodeTypeById = new Map();
-  const edges = new Map();
-
-  for (const c of connections) {
-    if (!c?.sourceId || !c?.destId) continue;
-    if (typeof c.destType === 'string' && c.destType.startsWith('AudioParam(')) continue;
-
-    if (c.sourceType) nodeTypeById.set(c.sourceId, c.sourceType);
-    if (c.destType) nodeTypeById.set(c.destId, c.destType);
-
-    const list = edges.get(c.sourceId) || [];
-    list.push(c.destId);
-    edges.set(c.sourceId, list);
-  }
-
-  const startIds = connections
-    .filter(c => c?.sourceType === 'MediaStreamAudioSource' && c?.sourceId)
-    .map(c => c.sourceId);
-
-  const destIds = new Set(
-    connections
-      .filter(c => isDestinationNodeType(c?.destType) && c?.destId)
-      .map(c => c.destId)
-  );
-
-  const findPath = (startId) => {
-    const queue = [startId];
-    const prev = new Map();
-    prev.set(startId, null);
-
-    while (queue.length > 0) {
-      const cur = queue.shift();
-      if (destIds.has(cur)) {
-        const path = [];
-        let n = cur;
-        while (n) {
-          path.push(n);
-          n = prev.get(n);
-        }
-        path.reverse();
-        return path;
-      }
-
-      const neighbors = edges.get(cur) || [];
-      for (const next of neighbors) {
-        if (!next || prev.has(next)) continue;
-        prev.set(next, cur);
-        queue.push(next);
-      }
-    }
-    return null;
-  };
-
-  let bestPath = null;
-  for (const startId of startIds) {
-    const path = findPath(startId);
-    if (!path) continue;
-    if (!bestPath || path.length < bestPath.length) {
-      bestPath = path;
-    }
-  }
-
-  if (!bestPath || bestPath.length < 2) return [];
-
-  const processors = [];
-  for (const nodeId of bestPath) {
-    const nodeType = nodeTypeById.get(nodeId);
-    if (nodeType === 'MediaStreamAudioSource') continue;
-    if (isDestinationNodeType(nodeType)) continue;
-
-    const fromPipeline = pipelineByNodeId.get(nodeId);
-    if (fromPipeline) {
-      if (fromPipeline.type !== 'analyser') {
-        processors.push(fromPipeline);
-      }
-      continue;
-    }
-
-    const mappedType = mapNodeTypeToProcessorType(nodeType);
-    if (!mappedType || mappedType === 'analyser') continue;
-
-    const entry = { type: mappedType, nodeId, timestamp: Date.now() };
-    if (mappedType === 'audioWorkletNode') {
-      entry.processorName = '?';
-    }
-    processors.push(entry);
-  }
-
-  return processors;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PROCESSOR TREE (Paralel Branch Desteği)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * @typedef {Object} ProcessorTreeNode
@@ -456,7 +347,6 @@ export function deriveMainChainProcessorsFromConnections(connections, ctx) {
 /**
  * DFS ile processor tree oluştur (paralel branch + cycle detection destekli)
  *
- * Mevcut deriveMainChainProcessorsFromConnections() backward-compat için korunur.
  * Bu fonksiyon N-ary tree döndürür (paralel branch'leri destekler).
  *
  * @param {Array} connections - Audio node bağlantıları
@@ -666,21 +556,6 @@ export function flattenProcessorTree(tree) {
 }
 
 /**
- * MediaStreamSource tekrarlarını tek girdiye indirger
- */
-export function dedupeMediaStreamSources(processors) {
-  if (!processors || processors.length === 0) return [];
-
-  let seen = false;
-  return processors.filter(proc => {
-    if (proc.type !== 'mediaStreamSource') return true;
-    if (seen) return false;
-    seen = true;
-    return true;
-  });
-}
-
-/**
  * Extract Processing and Effects info from processors
  * OCP: AUDIO_NODE_DISPLAY_MAP ve getEffectNodeTypes() kullanır
  */
@@ -798,38 +673,13 @@ export function renderACStats(contexts, audioConnections = null) {
       : null;
     debugLog(` 🔍 Audio Path: processorTree=`, processorTree ? 'exists' : 'null');
 
-    // Fallback: eski linear array mantığı (backward compat)
-    let mainProcessors = [];
-    if (!processorTree) {
-      const mainFromGraph = ctxConnections.length > 0
-        ? deriveMainChainProcessorsFromConnections(ctxConnections, ctx)
-        : [];
-      debugLog(` 🔍 Audio Path: mainFromGraph.length=${mainFromGraph.length}`);
-      mainProcessors = mainFromGraph.length > 0
-        ? mainFromGraph
-        : (ctx.pipeline?.processors?.filter(p => p.type !== 'analyser') || []);
-      debugLog(` 🔍 Audio Path: mainProcessors (before fallback)=`, mainProcessors);
-
-      const hasInputSourceForFallback = !!ctx.pipeline?.inputSource;
-      if (hasInputSourceForFallback && !mainProcessors.some(p => p.type === 'mediaStreamSource')) {
-        mainProcessors = [
-          { type: 'mediaStreamSource', timestamp: ctx.pipeline?.timestamp },
-          ...mainProcessors
-        ];
-        debugLog(` 🔍 Audio Path: FALLBACK applied! Added mediaStreamSource to chain`);
-      }
-
-      mainProcessors = dedupeMediaStreamSources(mainProcessors);
-      debugLog(` 🔍 Audio Path: FINAL mainProcessors.length=${mainProcessors.length}`);
-    }
-
     const hasInputSource = !!ctx.pipeline?.inputSource;
     const monitors = ctx.pipeline?.processors?.filter(p => p.type === 'analyser') || [];
 
-    // extractProcessingInfo için: tree varsa flatten et, yoksa mainProcessors kullan
+    // extractProcessingInfo için: tree varsa flatten et, yoksa boş array
     const processorsForInfo = processorTree
       ? flattenProcessorTree(processorTree)
-      : mainProcessors;
+      : [];
     const { processingText, effectsText } = extractProcessingInfo(processorsForInfo, monitors);
 
     html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
@@ -837,7 +687,7 @@ export function renderACStats(contexts, audioConnections = null) {
     const latencyTooltip = `Base ${(baseLatency * 1000).toFixed(1)}ms + output ${(outputLatency * 1000).toFixed(1)}ms`;
 
     const inputLabel = hasInputSource
-      ? `${purpose.icon} ${capitalizeFirst(ctx.pipeline.inputSource)}`
+      ? `${purpose.icon} ${capitalizeFirst(ctx.pipeline?.inputSource || 'unknown')}`
       : '-';
 
     html += `
@@ -859,25 +709,30 @@ export function renderACStats(contexts, audioConnections = null) {
       </div>
     `;
 
-    const hasMainProcessors = mainProcessors.length > 0;
-    const hasProcessorTree = !!processorTree;
-
-    if (hasInputSource || hasMainProcessors || hasProcessorTree) {
+    if (processorTree) {
+      // Tree göster
       const pipelineTs = formatTime(ctx.pipeline?.timestamp);
-
-      // Tree varsa tree'yi geç (paralel branch desteği), yoksa linear array (backward compat)
-      const audioPathData = processorTree || mainProcessors;
-
       html += `
         <div class="ac-section">
           <div class="sub-header sub-header--ac">
             <span class="ac-section-title">Audio Path</span>
             <span class="timestamp">${pipelineTs}</span>
           </div>
-          ${renderAudioPathTree(audioPathData, monitors, ctx.pipeline?.inputSource)}
+          ${renderAudioPathTree(processorTree, monitors, ctx.pipeline?.inputSource)}
+        </div>
+      `;
+    } else if (hasInputSource) {
+      // Input var ama graph yok - hata mesajı
+      html += `
+        <div class="ac-section">
+          <div class="sub-header sub-header--ac">
+            <span class="ac-section-title">Audio Path</span>
+          </div>
+          <div class="no-data">No audio graph data</div>
         </div>
       `;
     }
+    // else: hasInputSource da yoksa Audio Path bölümü hiç gösterilmez
 
     if (ctx.encodingHint) {
       html += `

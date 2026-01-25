@@ -26,6 +26,18 @@ import {
 } from './helpers.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// TREE SABİTLERİ (CSS ile Senkron)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Bu değerler CSS (audio-tree.css) ile senkron tutulmalıdır.
+// Değişiklik yapılırsa her iki dosya da güncellenmelidir.
+
+const TREE_DEFAULTS = {
+  LABEL_HEIGHT: 14,  // CSS .tree-label { height: 14px } ve line-height: 14px
+  TREE_UNIT: 16,     // CSS .audio-tree { --tree-unit: 16px }
+  TREE_GAP: 3        // CSS .audio-tree { --tree-gap: 3px }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // CSS SELECTOR SABİTLERİ (Regresyon Koruması)
 // ═══════════════════════════════════════════════════════════════════════════════
 // Bu sabitler CSS (audio-tree.css) ile senkron tutulmalıdır.
@@ -705,13 +717,22 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
  * Dikey cizginin label ortasindan cikmasi icin gerekli.
  *
  * Called after DOM render via requestAnimationFrame in popup.js
+ *
+ * Formüller (tree-expert.md ile senkron):
+ * - stemLeft = Math.floor(center) → Gövde çizgisi X pozisyonu
+ * - parentCenter = Math.floor(center) → Children margin-left
+ * - verticalLineHeight = lastChild.offsetTop + Math.floor(lastLabelHeight / 2)
+ * - horizontalLineTop = Math.floor(labelHeight / 2)
+ *
+ * ⚠️ Math.floor vs Math.round: Tutarlılık için HEP Math.floor kullan
+ * ⚠️ Border vs Background: DPI tutarlılığı için HEP border-left/top kullan (CSS'te)
  */
 export function measureTreeLabels() {
   // --tree-unit degerini CSS'den oku (DRY: audio-tree.css ile senkron)
   const audioTree = document.querySelector(TREE_SELECTORS.TREE_CONTAINER);
   const treeUnit = audioTree
-    ? parseFloat(getComputedStyle(audioTree).getPropertyValue('--tree-unit')) || 16
-    : 16;
+    ? parseFloat(getComputedStyle(audioTree).getPropertyValue('--tree-unit')) || TREE_DEFAULTS.TREE_UNIT
+    : TREE_DEFAULTS.TREE_UNIT;
 
   // DPI bilgisi (debug için korundu)
   console.log('devicePixelRatio:', window.devicePixelRatio);
@@ -750,8 +771,9 @@ export function measureTreeLabels() {
 
         // Son child'in label ortasi = dikey cizginin bitis noktasi
         // Tum cizgiler ayni formul = tutarli kesisim noktasi
-        const lastLabelHeight = lastLabel ? lastLabel.offsetHeight : treeUnit;
-        const lineHeight = lastChild.offsetTop + Math.floor(lastLabelHeight / 2);
+        // Dikey cizgi top: TREE_GAP'ten basliyor, yukseklik buna gore ayarlanmali
+        const lastLabelHeight = lastLabel ? lastLabel.offsetHeight : TREE_DEFAULTS.LABEL_HEIGHT;
+        const lineHeight = lastChild.offsetTop + Math.floor(lastLabelHeight / 2) - TREE_DEFAULTS.TREE_GAP;
         children.style.setProperty('--vertical-line-height', `${lineHeight}px`);
 
         // 5. Her child icin yatay cizgi pozisyonu hesapla
