@@ -591,29 +591,37 @@ export function measureTreeLabels() {
     ? parseFloat(getComputedStyle(audioTree).getPropertyValue('--tree-unit')) || 16
     : 16;
 
+  // DPI bilgisi (debug için korundu)
+  console.log('devicePixelRatio:', window.devicePixelRatio);
+
   // Selector sabitleri kullan (regresyon koruması)
   const treeNodes = document.querySelectorAll(TREE_SELECTORS.NODE_WITH_CHILDREN);
 
-  treeNodes.forEach(node => {
+  treeNodes.forEach((node) => {
     const label = node.querySelector(TREE_SELECTORS.LABEL);
     const labelText = node.querySelector(TREE_SELECTORS.LABEL_TEXT);
     const children = node.querySelector(TREE_SELECTORS.CHILDREN);
 
     if (labelText && children && label) {
       // 1. Label-text genisligini olc
-      const labelTextWidth = labelText.getBoundingClientRect().width;
+      const labelTextRect = labelText.getBoundingClientRect();
+      const labelTextWidth = labelTextRect.width;
       const labelTextLeft = labelText.offsetLeft; // Label icindeki pozisyon
 
-      // 2. Govde cizgisi pozisyonu = label-text merkezi (Math.round: subpixel önleme)
-      const stemLeft = labelTextLeft + (labelTextWidth / 2);
-      label.style.setProperty('--stem-left', `${Math.round(stemLeft)}px`);
-
-      // 3. Children margin = label-text merkezi (Math.round: subpixel önleme)
+      // 2. Govde cizgisi pozisyonu = cizginin SOL KENARI (tam piksel)
+      // CSS'te translateX(-50%) YOK - yarım piksel sorunu önlendi
+      // Math.floor: çizgi merkezin soluna düşer, tam piksel garantisi
       const center = labelTextLeft + (labelTextWidth / 2);
-      children.style.setProperty('--parent-center', `${Math.round(center)}px`);
+      const stemLeft = Math.floor(center);
+      label.style.setProperty('--stem-left', `${stemLeft}px`);
+
+      // 3. Children margin = label-text merkezi (Math.floor: tutarlılık)
+      const parentCenter = Math.floor(center);
+      children.style.setProperty('--parent-center', `${parentCenter}px`);
 
       // 4. Dikey cizgi height ve yatay cizgi pozisyonlari hesapla
       const childNodes = children.querySelectorAll(TREE_SELECTORS.DIRECT_CHILD_NODES);
+
       if (childNodes.length > 0) {
         const lastChild = childNodes[childNodes.length - 1];
         const lastLabel = lastChild.querySelector(TREE_SELECTORS.LABEL);

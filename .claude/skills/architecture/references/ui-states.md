@@ -227,6 +227,29 @@ top: var(--horizontal-line-top, 8px);  /* JS'ten gelir */
 
 **Kural:** Kesişen çizgiler için AYNI formül kullan = aynı anti-aliasing kararı.
 
+### Background vs Border Rendering (DPI Fix)
+
+**Problem:** 1px çizgiler DPI scaling'de rastgele farklı kalınlıkta görünüyordu.
+
+**Kök Neden:** Browser'ın farklı rendering yaklaşımları:
+- `background` + `width: 1px` → Browser bunu "kutu" olarak görüyor
+  - Subpixel pozisyonlarda antialiasing uyguluyor → rastgele kalınlık
+- `border: 1px solid` → Browser bunu "çizgi" olarak görüyor
+  - Border rendering: Otomatik piksel sınırına hizalama → tutarlı kalınlık
+
+**Çözüm:** Pseudo-element çizgilerde border kullan:
+```css
+/* ❌ Eski (tutarsız) */
+width: 1px;
+background: var(--tree-color);
+
+/* ✅ Yeni (tutarlı) */
+width: 0;  /* veya height: 0 yatay için */
+border-left: 1px solid var(--tree-color);  /* veya border-top */
+```
+
+**Kural:** CSS'te ince çizgiler için `border` kullan, `background` + `width/height` değil.
+
 ### formatProcessorForTree() Return
 
 ```javascript
