@@ -483,6 +483,10 @@ td:last-child {
   color: var(--accent-blue);
 }
 
+.metric-label {
+  color: var(--text-subheader);
+}
+
 .good { color: var(--accent-green); }
 .warning { color: var(--accent-orange); }
 .error { color: var(--accent-red); }
@@ -1070,7 +1074,7 @@ button:disabled,
   position: fixed;
   top: var(--tt-top, 0);
   left: var(--tt-left, 0);
-  transform: translateX(-100%) translateY(-50%);
+  transform: translateX(-100%);
   background: var(--bg-tertiary);
   color: var(--text-primary);
   padding: 4px 8px;

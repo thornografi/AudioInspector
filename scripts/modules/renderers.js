@@ -136,8 +136,8 @@ export function renderRTCStats(data) {
           : createTooltip(mode, modeTooltip))
       : mode;
 
-    sendHtml += `<tr><td>Codec</td><td class="metric-value">${codec}</td></tr>`;
-    sendHtml += `<tr><td>Bitrate</td><td class="metric-value">${bitrate}</td></tr>`;
+    sendHtml += `<tr><td class="metric-label">Codec</td><td class="metric-value">${codec}</td></tr>`;
+    sendHtml += `<tr><td class="metric-label">Bitrate</td><td class="metric-value">${bitrate}</td></tr>`;
     sendHtml += `<tr><td>Mode</td><td>${modeValue}</td></tr>`;
   } else {
     sendHtml += `<tr><td>Codec</td><td>-</td></tr>`;
@@ -157,8 +157,8 @@ export function renderRTCStats(data) {
     const plr = pc.recv.packetsReceived > 0 ? ((pc.recv.packetsLost / (pc.recv.packetsReceived + pc.recv.packetsLost)) * 100) : 0;
     const plrClass = getQualityClass('packetLoss', plr);
 
-    recvHtml += `<tr><td>Codec</td><td class="metric-value">${codec}</td></tr>`;
-    recvHtml += `<tr><td>Bitrate</td><td class="metric-value">${bitrate}</td></tr>`;
+    recvHtml += `<tr><td class="metric-label">Codec</td><td class="metric-value">${codec}</td></tr>`;
+    recvHtml += `<tr><td class="metric-label">Bitrate</td><td class="metric-value">${bitrate}</td></tr>`;
     recvHtml += `<tr><td>${createTooltip('Jitter', 'Packet delay variation', 'left')}</td><td class="${jitterClass}">${jitter}</td></tr>`;
     recvHtml += `<tr><td>${createTooltip('Loss', 'Packet loss percentage', 'left')}</td><td class="${plrClass}">${plr.toFixed(1)}%</td></tr>`;
   } else {
@@ -202,7 +202,7 @@ export function renderGUMStats(data) {
   timestamp.textContent = formatTime(data.timestamp);
   const s = data.settings;
 
-  html += `<tr><td>Rate</td><td class="metric-value">${s.sampleRate || '-'} Hz</td></tr>`;
+  html += `<tr><td class="metric-label">Rate</td><td class="metric-value">${s.sampleRate || '-'} Hz</td></tr>`;
   html += `<tr><td>Channels</td><td>${formatChannels(s.channelCount)}</td></tr>`;
   html += `<tr><td>Bit Depth</td><td>${formatBitDepth(s.sampleSize)}</td></tr>`;
 
@@ -442,6 +442,229 @@ export function deriveMainChainProcessorsFromConnections(connections, ctx) {
   return processors;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROCESSOR TREE (Paralel Branch Desteği)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * @typedef {Object} ProcessorTreeNode
+ * @property {Object} processor - { type, nodeId, ... }
+ * @property {ProcessorTreeNode[]} children
+ * @property {string} [terminalType] - 'encoder' | 'speakers' | null
+ */
+
+/**
+ * DFS ile processor tree oluştur (paralel branch + cycle detection destekli)
+ *
+ * Mevcut deriveMainChainProcessorsFromConnections() backward-compat için korunur.
+ * Bu fonksiyon N-ary tree döndürür (paralel branch'leri destekler).
+ *
+ * @param {Array} connections - Audio node bağlantıları
+ * @param {Object} ctx - AudioContext verisi (pipeline.processors içerir)
+ * @returns {ProcessorTreeNode|null} - Root node veya null
+ */
+export function deriveProcessorTreeFromConnections(connections, ctx) {
+  if (!connections || connections.length === 0) return null;
+
+  // Pipeline processor'larını nodeId ile indexle
+  const pipelineByNodeId = new Map();
+  const pipelineProcessors = ctx?.pipeline?.processors || [];
+  for (const p of pipelineProcessors) {
+    if (p?.nodeId) {
+      pipelineByNodeId.set(p.nodeId, p);
+    }
+  }
+
+  // Graph yapısını kur
+  const nodeTypeById = new Map();
+  const edges = new Map(); // sourceId → [destId, ...]
+
+  for (const c of connections) {
+    if (!c?.sourceId || !c?.destId) continue;
+    // AudioParam bağlantılarını atla
+    if (typeof c.destType === 'string' && c.destType.startsWith('AudioParam(')) continue;
+
+    if (c.sourceType) nodeTypeById.set(c.sourceId, c.sourceType);
+    if (c.destType) nodeTypeById.set(c.destId, c.destType);
+
+    const list = edges.get(c.sourceId) || [];
+    list.push(c.destId);
+    edges.set(c.sourceId, list);
+  }
+
+  // Start node'ları bul (MediaStreamAudioSource)
+  const startIds = connections
+    .filter(c => c?.sourceType === 'MediaStreamAudioSource' && c?.sourceId)
+    .map(c => c.sourceId);
+
+  if (startIds.length === 0) return null;
+
+  // Destination node'ları bul
+  const destIds = new Set(
+    connections
+      .filter(c => isDestinationNodeType(c?.destType) && c?.destId)
+      .map(c => c.destId)
+  );
+
+  /**
+   * Node ID → ProcessorTreeNode dönüşümü
+   */
+  const nodeIdToProcessor = (nodeId) => {
+    const nodeType = nodeTypeById.get(nodeId);
+
+    // Destination node → terminal marker döndür
+    if (isDestinationNodeType(nodeType)) {
+      const terminalType = nodeType === 'MediaStreamAudioDestination' ? 'encoder' : 'speakers';
+      return { processor: null, terminalType, nodeId };
+    }
+
+    // Source node → skip (root'ta gösterilecek)
+    if (nodeType === 'MediaStreamAudioSource') {
+      return null;
+    }
+
+    // Pipeline'dan processor bilgisi al
+    const fromPipeline = pipelineByNodeId.get(nodeId);
+    if (fromPipeline) {
+      return { processor: { ...fromPipeline }, nodeId };
+    }
+
+    // Fallback: nodeType'dan processor oluştur
+    const mappedType = mapNodeTypeToProcessorType(nodeType);
+    if (!mappedType) return null;
+
+    const entry = { type: mappedType, nodeId, timestamp: Date.now() };
+    if (mappedType === 'audioWorkletNode') {
+      entry.processorName = '?';
+    }
+    return { processor: entry, nodeId };
+  };
+
+  /**
+   * DFS ile tree oluştur (cycle detection + merge point handling)
+   */
+  const buildTreeDFS = (nodeId, visited, globalSeen) => {
+    // Cycle detection: aynı DFS path'te tekrar görüldü
+    if (visited.has(nodeId)) {
+      return null; // Feedback loop - atla
+    }
+
+    // Merge point: farklı path'ten zaten işlendi
+    // "İlk kazansın" stratejisi: ilk gören branch gösterir
+    if (globalSeen.has(nodeId)) {
+      return null;
+    }
+
+    const nodeInfo = nodeIdToProcessor(nodeId);
+    if (!nodeInfo) {
+      // Source node - children'ları direkt işle
+      const neighbors = edges.get(nodeId) || [];
+      if (neighbors.length === 0) return null;
+
+      // Tek child varsa onu döndür
+      if (neighbors.length === 1) {
+        return buildTreeDFS(neighbors[0], visited, globalSeen);
+      }
+
+      // Birden fazla child - virtual root oluştur
+      const children = [];
+      for (const nextId of neighbors) {
+        const childTree = buildTreeDFS(nextId, new Set(visited), globalSeen);
+        if (childTree) children.push(childTree);
+      }
+      if (children.length === 0) return null;
+      if (children.length === 1) return children[0];
+
+      // Virtual root (processor: null, children var)
+      return { processor: null, children, nodeId };
+    }
+
+    // Bu node'u işaretleme
+    visited.add(nodeId);
+    globalSeen.add(nodeId);
+
+    // Terminal node (destination)
+    if (nodeInfo.terminalType) {
+      return {
+        processor: null,
+        terminalType: nodeInfo.terminalType,
+        children: [],
+        nodeId
+      };
+    }
+
+    // Normal processor node
+    const treeNode = {
+      processor: nodeInfo.processor,
+      children: [],
+      nodeId
+    };
+
+    // Children'ları işle
+    const neighbors = edges.get(nodeId) || [];
+    for (const nextId of neighbors) {
+      const childTree = buildTreeDFS(nextId, new Set(visited), globalSeen);
+      if (childTree) {
+        treeNode.children.push(childTree);
+      }
+    }
+
+    return treeNode;
+  };
+
+  // Her start node için tree oluştur
+  const globalSeen = new Set();
+  const trees = [];
+
+  for (const startId of startIds) {
+    const tree = buildTreeDFS(startId, new Set(), globalSeen);
+    if (tree) trees.push(tree);
+  }
+
+  if (trees.length === 0) return null;
+  if (trees.length === 1) return trees[0];
+
+  // Birden fazla start node - virtual root ile birleştir
+  return { processor: null, children: trees, nodeId: null };
+}
+
+/**
+ * ProcessorTree'yi flat processor array'e dönüştür
+ * extractProcessingInfo() için gerekli (Processing/Effects text hesaplama)
+ *
+ * @param {ProcessorTreeNode} tree - Tree yapısı
+ * @returns {Array} - Flat processor array
+ */
+export function flattenProcessorTree(tree) {
+  if (!tree) return [];
+
+  const processors = [];
+  const visited = new Set();
+
+  const traverse = (node) => {
+    if (!node) return;
+
+    // Cycle/duplicate prevention
+    if (node.nodeId && visited.has(node.nodeId)) return;
+    if (node.nodeId) visited.add(node.nodeId);
+
+    // Processor varsa ekle
+    if (node.processor) {
+      processors.push(node.processor);
+    }
+
+    // Children'ları traverse et
+    if (node.children && node.children.length > 0) {
+      for (const child of node.children) {
+        traverse(child);
+      }
+    }
+  };
+
+  traverse(tree);
+  return processors;
+}
+
 /**
  * MediaStreamSource tekrarlarını tek girdiye indirger
  */
@@ -568,30 +791,46 @@ export function renderACStats(contexts, audioConnections = null) {
 
     const ctxConnections = filterConnectionsByContext(audioConnections?.connections, [ctx]);
     debugLog(` 🔍 Audio Path: ctxConnections.length=${ctxConnections.length}`);
-    const mainFromGraph = ctxConnections.length > 0
-      ? deriveMainChainProcessorsFromConnections(ctxConnections, ctx)
-      : [];
-    debugLog(` 🔍 Audio Path: mainFromGraph.length=${mainFromGraph.length}`);
-    let mainProcessors = mainFromGraph.length > 0
-      ? mainFromGraph
-      : (ctx.pipeline?.processors?.filter(p => p.type !== 'analyser') || []);
-    debugLog(` 🔍 Audio Path: mainProcessors (before fallback)=`, mainProcessors);
 
-    const hasInputSource = !!ctx.pipeline?.inputSource;
+    // YENİ: Tree-based rendering dene (paralel branch desteği)
+    const processorTree = ctxConnections.length > 0
+      ? deriveProcessorTreeFromConnections(ctxConnections, ctx)
+      : null;
+    debugLog(` 🔍 Audio Path: processorTree=`, processorTree ? 'exists' : 'null');
 
-    if (hasInputSource && !mainProcessors.some(p => p.type === 'mediaStreamSource')) {
-      mainProcessors = [
-        { type: 'mediaStreamSource', timestamp: ctx.pipeline?.timestamp },
-        ...mainProcessors
-      ];
-      debugLog(` 🔍 Audio Path: FALLBACK applied! Added mediaStreamSource to chain`);
+    // Fallback: eski linear array mantığı (backward compat)
+    let mainProcessors = [];
+    if (!processorTree) {
+      const mainFromGraph = ctxConnections.length > 0
+        ? deriveMainChainProcessorsFromConnections(ctxConnections, ctx)
+        : [];
+      debugLog(` 🔍 Audio Path: mainFromGraph.length=${mainFromGraph.length}`);
+      mainProcessors = mainFromGraph.length > 0
+        ? mainFromGraph
+        : (ctx.pipeline?.processors?.filter(p => p.type !== 'analyser') || []);
+      debugLog(` 🔍 Audio Path: mainProcessors (before fallback)=`, mainProcessors);
+
+      const hasInputSourceForFallback = !!ctx.pipeline?.inputSource;
+      if (hasInputSourceForFallback && !mainProcessors.some(p => p.type === 'mediaStreamSource')) {
+        mainProcessors = [
+          { type: 'mediaStreamSource', timestamp: ctx.pipeline?.timestamp },
+          ...mainProcessors
+        ];
+        debugLog(` 🔍 Audio Path: FALLBACK applied! Added mediaStreamSource to chain`);
+      }
+
+      mainProcessors = dedupeMediaStreamSources(mainProcessors);
+      debugLog(` 🔍 Audio Path: FINAL mainProcessors.length=${mainProcessors.length}`);
     }
 
-    mainProcessors = dedupeMediaStreamSources(mainProcessors);
-    debugLog(` 🔍 Audio Path: FINAL mainProcessors.length=${mainProcessors.length}`);
-
+    const hasInputSource = !!ctx.pipeline?.inputSource;
     const monitors = ctx.pipeline?.processors?.filter(p => p.type === 'analyser') || [];
-    const { processingText, effectsText } = extractProcessingInfo(mainProcessors, monitors);
+
+    // extractProcessingInfo için: tree varsa flatten et, yoksa mainProcessors kullan
+    const processorsForInfo = processorTree
+      ? flattenProcessorTree(processorTree)
+      : mainProcessors;
+    const { processingText, effectsText } = extractProcessingInfo(processorsForInfo, monitors);
 
     html += `<div class="context-item${index > 0 ? ' context-separator' : ''}">`;
 
@@ -610,7 +849,7 @@ export function renderACStats(contexts, audioConnections = null) {
         <table class="ac-main-table">
           <tbody>
             <tr><td>Input</td><td>${inputLabel}</td></tr>
-            <tr><td>Channels</td><td class="metric-value">${formatChannels(ctx.static?.channelCount)}</td></tr>
+            <tr><td class="metric-label">Channels</td><td class="metric-value">${formatChannels(ctx.static?.channelCount)}</td></tr>
             <tr><td>State</td><td class="${stateClass}">${ctx.static?.state || '-'}</td></tr>
             <tr><td>${createTooltip('Latency', latencyTooltip, 'left')}</td><td>${latencyMs}</td></tr>
             <tr><td>Processing</td><td>${processingText || 'None'}</td></tr>
@@ -621,9 +860,13 @@ export function renderACStats(contexts, audioConnections = null) {
     `;
 
     const hasMainProcessors = mainProcessors.length > 0;
+    const hasProcessorTree = !!processorTree;
 
-    if (hasInputSource || hasMainProcessors) {
+    if (hasInputSource || hasMainProcessors || hasProcessorTree) {
       const pipelineTs = formatTime(ctx.pipeline?.timestamp);
+
+      // Tree varsa tree'yi geç (paralel branch desteği), yoksa linear array (backward compat)
+      const audioPathData = processorTree || mainProcessors;
 
       html += `
         <div class="ac-section">
@@ -631,7 +874,7 @@ export function renderACStats(contexts, audioConnections = null) {
             <span class="ac-section-title">Audio Path</span>
             <span class="timestamp">${pipelineTs}</span>
           </div>
-          ${renderAudioPathTree(mainProcessors, monitors, ctx.pipeline?.inputSource)}
+          ${renderAudioPathTree(audioPathData, monitors, ctx.pipeline?.inputSource)}
         </div>
       `;
     }

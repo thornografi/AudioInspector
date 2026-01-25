@@ -480,14 +480,133 @@ export function formatProcessorForTree(proc) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * ProcessorTreeNode yapısından display tree node'u oluştur
+ * @param {Object} treeNode - deriveProcessorTreeFromConnections() çıktısı
+ * @param {Set} nodeIdsSeen - Merge point detection için
+ * @returns {Object|null} - Display tree node
+ */
+function convertProcessorTreeToDisplayTree(treeNode, nodeIdsSeen) {
+  if (!treeNode) return null;
+
+  // Merge point: Bu nodeId daha önce işlendi
+  if (treeNode.nodeId && nodeIdsSeen.has(treeNode.nodeId)) {
+    return null;
+  }
+  if (treeNode.nodeId) {
+    nodeIdsSeen.add(treeNode.nodeId);
+  }
+
+  // Terminal node (destination)
+  if (treeNode.terminalType) {
+    const isEncoder = treeNode.terminalType === 'encoder';
+    return {
+      label: isEncoder ? 'Encoder' : 'Speakers',
+      param: isEncoder ? 'output' : null,
+      tooltip: isEncoder ? 'MediaStreamAudioDestinationNode' : 'AudioDestinationNode',
+      children: []
+    };
+  }
+
+  // Virtual root (processor: null, children var)
+  if (!treeNode.processor && treeNode.children && treeNode.children.length > 0) {
+    // Children'ları direkt döndür (virtual root'u atla)
+    const convertedChildren = [];
+    for (const child of treeNode.children) {
+      const converted = convertProcessorTreeToDisplayTree(child, nodeIdsSeen);
+      if (converted) convertedChildren.push(converted);
+    }
+    if (convertedChildren.length === 0) return null;
+    if (convertedChildren.length === 1) return convertedChildren[0];
+
+    // Birden fazla child - virtual node olarak döndür
+    return { label: null, children: convertedChildren, isVirtual: true };
+  }
+
+  // Normal processor node
+  if (treeNode.processor) {
+    const formatted = formatProcessorForTree(treeNode.processor);
+    const isMonitor = treeNode.processor.type === 'analyser';
+
+    const displayNode = {
+      label: formatted.label,
+      param: formatted.param,
+      tooltip: isMonitor ? formatted.tooltip + ' (monitoring tap)' : formatted.tooltip,
+      children: [],
+      isMonitor
+    };
+
+    // Children'ları işle
+    if (treeNode.children && treeNode.children.length > 0) {
+      for (const child of treeNode.children) {
+        const converted = convertProcessorTreeToDisplayTree(child, nodeIdsSeen);
+        if (converted) {
+          // Virtual node ise children'larını ekle
+          if (converted.isVirtual && converted.children) {
+            displayNode.children.push(...converted.children);
+          } else {
+            displayNode.children.push(converted);
+          }
+        }
+      }
+    }
+
+    return displayNode;
+  }
+
+  return null;
+}
+
+/**
  * Render Audio Path as nested ASCII tree with tooltips
+ *
+ * İki input formatını destekler:
+ * 1. Array (backward compat): mainProcessors = [{type, nodeId, ...}, ...]
+ * 2. ProcessorTreeNode: mainProcessors = {processor, children, terminalType}
+ *
+ * @param {Array|Object} mainProcessors - Linear array veya ProcessorTreeNode
+ * @param {Array} monitors - Analyser node'ları (sadece array mode'da kullanılır)
+ * @param {string} inputSource - 'microphone' | 'remote' | etc.
  */
 export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
-  if ((!mainProcessors || mainProcessors.length === 0) && !inputSource) {
+  // Empty check
+  const isArray = Array.isArray(mainProcessors);
+  const isEmpty = isArray
+    ? (!mainProcessors || mainProcessors.length === 0)
+    : !mainProcessors;
+
+  if (isEmpty && !inputSource) {
     return '<div class="no-data">No audio path</div>';
   }
 
-  const buildNestedTree = () => {
+  /**
+   * ProcessorTreeNode yapısından tree oluştur (yeni mod)
+   */
+  const buildFromProcessorTree = (processorTree) => {
+    const rootLabel = inputSource ? capitalizeFirst(inputSource) : 'Source';
+    const rootTooltip = getInputSourceTooltip(inputSource);
+    const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
+
+    if (!processorTree) return root;
+
+    const nodeIdsSeen = new Set();
+    const converted = convertProcessorTreeToDisplayTree(processorTree, nodeIdsSeen);
+
+    if (converted) {
+      // Virtual node ise children'larını root'a ekle
+      if (converted.isVirtual && converted.children) {
+        root.children.push(...converted.children);
+      } else {
+        root.children.push(converted);
+      }
+    }
+
+    return root;
+  };
+
+  /**
+   * Linear array'den tree oluştur (eski mod - backward compat)
+   */
+  const buildFromLinearArray = () => {
     const rootLabel = inputSource ? capitalizeFirst(inputSource) : 'Source';
     const rootTooltip = getInputSourceTooltip(inputSource);
     const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
@@ -518,7 +637,7 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
       children: []
     };
 
-    const analyzerNodes = monitors.map((mon) => {
+    const analyzerNodes = (monitors || []).map((mon) => {
       const formatted = formatProcessorForTree(mon);
       return {
         label: formatted.label,
@@ -535,7 +654,10 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
     return root;
   };
 
-  const tree = buildNestedTree();
+  // Input tipine göre tree oluştur
+  const tree = isArray
+    ? buildFromLinearArray()
+    : buildFromProcessorTree(mainProcessors);
 
   const renderNode = (node, isRoot = false) => {
     const hasChildren = node.children && node.children.length > 0;

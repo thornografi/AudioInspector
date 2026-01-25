@@ -633,10 +633,23 @@ function initTooltipPositioning() {
 
     const rect = el.getBoundingClientRect();
     const isLeft = el.classList.contains('tooltip-left');
+    const isTruncated = el.classList.contains('truncated-tooltip');
 
-    // Tooltip konumunu hesapla (element'in yanında, dikey ortalı)
-    const top = rect.top + rect.height / 2;
-    const left = isLeft ? rect.left - 8 : rect.right + 8;
+    // Tooltip konumunu hesapla
+    let top, left;
+    if (isTruncated) {
+      // Truncated tooltip: label'ın solunda, üst kenara hizalı
+      top = rect.top;
+      left = rect.left - 8;
+    } else if (isLeft) {
+      // Sol tooltip: dikey ortalı
+      top = rect.top + rect.height / 2;
+      left = rect.left - 8;
+    } else {
+      // Sağ tooltip: dikey ortalı
+      top = rect.top + rect.height / 2;
+      left = rect.right + 8;
+    }
 
     el.style.setProperty('--tt-top', top + 'px');
     el.style.setProperty('--tt-left', left + 'px');

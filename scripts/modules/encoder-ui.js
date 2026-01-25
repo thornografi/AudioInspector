@@ -830,8 +830,9 @@ export function renderEncodingSection(detectedEncoder, rtcStats, mediaRecorder, 
   // Build HTML from rows
   let html = `<table><tbody>`;
   encoderData.rows.forEach(row => {
+    const labelClass = row.isMetric ? 'class="metric-label"' : '';
     const valueClass = row.isMetric ? 'class="metric-value"' : (row.cssClass ? `class="${row.cssClass}"` : '');
-    html += `<tr><td>${row.label}</td><td ${valueClass}>${row.value}</td></tr>`;
+    html += `<tr><td ${labelClass}>${row.label}</td><td ${valueClass}>${row.value}</td></tr>`;
   });
   html += `</tbody></table>`;
 
