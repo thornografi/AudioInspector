@@ -632,7 +632,7 @@ function initTooltipPositioning() {
     if (!el) return;
 
     const rect = el.getBoundingClientRect();
-    const isLeft = el.classList.contains('tooltip-left');
+    const isLeft = el.classList.contains('tooltip-left') || el.classList.contains('tree-tooltip');
     const isTruncated = el.classList.contains('truncated-tooltip');
 
     // Tooltip konumunu hesapla

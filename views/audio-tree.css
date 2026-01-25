@@ -8,11 +8,12 @@
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 14px;  /* Tam piksel - subpixel label yuksekligi onleme */
-  padding: 4px 0;
-  --tree-color: var(--text-muted);
-  --tree-unit: 16px;
+  padding: 12px 0 4px 0;  /* Top: başlıktan uzaklık, Bottom: alt boşluk */
+  --tree-color: var(--text-secondary);  /* Çizgi rengi (text-muted'dan bir kademe parlak) */
+  --tree-unit: 17px;
   --tree-line: 1px;
   --tree-gap: 3px;  /* Connector→öğe boşluğu */
+  --stem-ratio: 1.25;  /* Dikey mesafe çarpanı (padding-top = ratio/2) */
 }
 
 .tree-node {
@@ -61,7 +62,7 @@
   top: calc(100% + var(--tree-gap));
   /* Border rendering: DPI tutarlılığı için (background yerine) */
   width: 0;
-  height: calc(var(--tree-unit) * 1.5);
+  height: calc(var(--tree-unit) * var(--stem-ratio));
   border-left: var(--tree-line) solid var(--tree-color);
 }
 
@@ -69,7 +70,7 @@
 .tree-children {
   position: relative;
   padding-left: var(--tree-unit);
-  padding-top: calc(var(--tree-unit) * 0.75 + var(--tree-gap));  /* Ustten bosluk - govde baglantisi icin (1.5 / 2) + gap */
+  padding-top: calc(var(--tree-unit) * var(--stem-ratio) / 2 + var(--tree-gap));  /* Ustten bosluk - govde baglantisi icin */
   /* JS tarafından set edilir (measureTreeLabels), fallback kullanılmaz */
   margin-left: var(--parent-center, 40px);
 }
@@ -79,7 +80,7 @@
   content: '';
   position: absolute;
   left: 0;
-  top: var(--tree-gap);  /* 4px gap - parent stem ile tutarlı */
+  top: var(--tree-gap);  /* 3px gap - parent stem ile tutarlı */
   /* JS tarafından set edilir (measureTreeLabels), fallback kullanılmaz */
   height: var(--vertical-line-height, calc(100% - 7px));
   /* Border rendering: DPI tutarlılığı için */
@@ -101,7 +102,7 @@
 
 /* Child node layout - minimum yukseklik ile tutarli dikey cizgiler */
 .tree-children > .tree-node {
-  min-height: calc(var(--tree-unit) * 1.5);
+  min-height: calc(var(--tree-unit) * var(--stem-ratio));
   display: flex;
   align-items: flex-start;
   flex-direction: column;

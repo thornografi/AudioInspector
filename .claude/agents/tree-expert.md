@@ -44,6 +44,15 @@ Math.floor(center)  // veya Math.round - ama hep aynı
 
 # CSS Variables
 
+## Sabit Variables (CSS'te tanımlı)
+| Variable | Değer | Amaç |
+|----------|-------|------|
+| `--tree-unit` | 17px | Yatay çizgi uzunluğu, padding base |
+| `--tree-gap` | 3px | Connector→öğe boşluğu |
+| `--tree-line` | 1px | Çizgi kalınlığı |
+| `--stem-ratio` | 1.25 | Dikey mesafe çarpanı (padding = ratio/2) |
+
+## Dinamik Variables (JS tarafından set edilir)
 | Variable | JS mi? | Amaç |
 |----------|--------|------|
 | `--parent-center` | ✅ | Children margin-left |

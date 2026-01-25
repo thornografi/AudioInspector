@@ -33,7 +33,7 @@ import {
 
 const TREE_DEFAULTS = {
   LABEL_HEIGHT: 14,  // CSS .tree-label { height: 14px } ve line-height: 14px
-  TREE_UNIT: 16,     // CSS .audio-tree { --tree-unit: 16px }
+  TREE_UNIT: 17,     // CSS .audio-tree { --tree-unit: 17px }
   TREE_GAP: 3        // CSS .audio-tree { --tree-gap: 3px }
 };
 
@@ -333,10 +333,10 @@ export const AUDIO_NODE_DISPLAY_MAP = {
     connectionType: 'ScriptProcessor',
     category: 'processor',
     label: 'Processor',
-    tooltip: 'ScriptProcessorNode (deprecated)',
+    tooltip: 'ScriptProcessorNode(deprecated)',
     getParam: (proc) => {
       if (proc.bufferSize) {
-        return `${proc.bufferSize}`;
+        return `buffer:${proc.bufferSize}`;
       }
       return null;
     }
@@ -542,7 +542,7 @@ function convertProcessorTreeToDisplayTree(treeNode, nodeIdsSeen) {
     const displayNode = {
       label: formatted.label,
       param: formatted.param,
-      tooltip: isMonitor ? formatted.tooltip + ' (monitoring tap)' : formatted.tooltip,
+      tooltip: formatted.tooltip,
       children: [],
       isMonitor
     };
@@ -654,7 +654,7 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
       return {
         label: formatted.label,
         param: formatted.param,
-        tooltip: formatted.tooltip + ' (monitoring tap)',
+        tooltip: formatted.tooltip,
         children: [],
         isMonitor: true
       };

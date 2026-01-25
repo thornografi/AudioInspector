@@ -230,7 +230,7 @@ body.inspecting .status-text {
   display: flex;
   align-items: center;
   gap: var(--gap-normal);
-  font-size: var(--font-size-body);
+  font-size: 14px;  /* Ana başlık: 12px → 14px (+2 beden) */
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: 0.5px;
@@ -243,13 +243,10 @@ body.inspecting .status-text {
   font-style: italic;
 }
 
+/* ========== Global Scrollbar System ========== */
 .card-content {
   flex: 1;
   min-height: 0;
-}
-
-/* ========== Global Scrollbar System ========== */
-.card-content {
   overflow-y: auto;
   overflow-x: visible;
 }
@@ -304,22 +301,22 @@ body.inspecting .status-text {
   background: transparent;
 }
 
-.card-content::-webkit-scrollbar-thumb,
+/* #debugContent ve .drawer-content: her zaman görünür scrollbar */
 #debugContent::-webkit-scrollbar-thumb,
 .drawer-content::-webkit-scrollbar-thumb {
   background: rgba(139, 148, 158, 0.3);
   border-radius: 2px;
 }
 
-.card-content::-webkit-scrollbar-thumb:hover,
 #debugContent::-webkit-scrollbar-thumb:hover,
 .drawer-content::-webkit-scrollbar-thumb:hover {
   background: rgba(139, 148, 158, 0.6);
 }
 
-/* Show scrollbar only on card/section hover (cleaner look) */
+/* .card-content: hover-only scrollbar (cleaner look) */
 .card-content::-webkit-scrollbar-thumb {
   background: transparent;
+  border-radius: 2px;
 }
 .card:hover .card-content::-webkit-scrollbar-thumb {
   background: rgba(139, 148, 158, 0.3);
@@ -360,21 +357,12 @@ body.inspecting .status-text {
   background: var(--border-primary);
 }
 
+/* Her iki kolon: card padding ile tutarlı içerik hizası */
 .rtc-column {
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg-primary);
-}
-
-/* İlk kolon: sol padding = card padding (içerik hizası) */
-.rtc-column:first-child {
-  padding-left: var(--card-padding-x);
-  padding-right: var(--card-padding-x);
-}
-
-/* Son kolon: sağ padding = card padding (scrollbar alanı hariç) */
-.rtc-column:last-child {
   padding-left: var(--card-padding-x);
   padding-right: var(--card-padding-x);
 }
@@ -384,11 +372,11 @@ body.inspecting .status-text {
   display: flex;
   align-items: center;
   padding-top: var(--spacing-row); /* td padding ile hizalama (tablo satırlarıyla aynı başlangıç) */
-  padding-bottom: 4px;
-  margin-bottom: calc(var(--spacing-after-subheader) - 4px); /* padding dahil toplam = 12px */
-  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 5px;  /* Metin ↔ çizgi arası */
+  margin-bottom: calc(var(--spacing-after-subheader) - 5px); /* padding dahil toplam = 12px */
+  border-bottom: 1px solid var(--border-primary);
   /* Ortak yazı stili - tüm alt başlıklar için */
-  font-size: var(--font-size-label);
+  font-size: var(--font-size-body);  /* Alt başlık: 11px → 12px (+1 beden) */
   font-weight: 600;
   color: var(--text-subheader);
 }
@@ -1103,13 +1091,6 @@ button:disabled,
   /* WebRTC: 2 sütun → 1 sütun */
   .rtc-columns {
     grid-template-columns: 1fr;
-  }
-
-  /* RTC column padding tutarlılığı (tek sütun modunda) */
-  .rtc-column:first-child,
-  .rtc-column:last-child {
-    padding-left: var(--card-padding-x);
-    padding-right: var(--card-padding-x);
   }
 
   /* GUM+AC satırı: 2 sütun → 1 sütun (stacked) */

@@ -190,8 +190,10 @@ function measureTreeLabels() {
 ```css
 .audio-tree {
   --tree-color: var(--text-muted);
-  --tree-unit: 16px;
+  --tree-unit: 17px;
   --tree-line: 1px;
+  --tree-gap: 3px;
+  --stem-ratio: 1.25;  /* Dikey mesafe çarpanı */
 }
 
 .tree-children {
