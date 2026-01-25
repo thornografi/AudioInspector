@@ -553,7 +553,7 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
       : '';
 
     const hasValidTooltip = node.tooltip && String(node.tooltip).trim().length > 0;
-    const labelClass = hasValidTooltip ? `${TREE_CLASSES.LABEL} has-tooltip` : TREE_CLASSES.LABEL;
+    const labelClass = hasValidTooltip ? `${TREE_CLASSES.LABEL} tree-tooltip` : TREE_CLASSES.LABEL;
     const tooltipAttr = hasValidTooltip ? ` data-tooltip="${escapeHtml(node.tooltip)}"` : '';
 
     let html = `<div class="${classes.join(' ')}">`;
@@ -629,7 +629,7 @@ export function measureTreeLabels() {
         // Son child'in label ortasi = dikey cizginin bitis noktasi
         // Tum cizgiler ayni formul = tutarli kesisim noktasi
         const lastLabelHeight = lastLabel ? lastLabel.offsetHeight : treeUnit;
-        const lineHeight = lastChild.offsetTop + Math.round(lastLabelHeight / 2);
+        const lineHeight = lastChild.offsetTop + Math.floor(lastLabelHeight / 2);
         children.style.setProperty('--vertical-line-height', `${lineHeight}px`);
 
         // 5. Her child icin yatay cizgi pozisyonu hesapla
@@ -639,7 +639,7 @@ export function measureTreeLabels() {
           if (childLabel) {
             // Label'in dikey ortasi (offsetHeight / 2)
             const labelHeight = childLabel.offsetHeight;
-            const horizontalTop = Math.round(labelHeight / 2);
+            const horizontalTop = Math.floor(labelHeight / 2);
             child.style.setProperty('--horizontal-line-top', `${horizontalTop}px`);
           }
         });

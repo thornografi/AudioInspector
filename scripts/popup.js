@@ -618,6 +618,71 @@ function updateLogBadge(count) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// TOOLTIP POSITIONING (overflow container'larda çalışması için)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Initialize tooltip positioning system
+ * Problem: CSS overflow-x: visible + overflow-y: auto kombinasyonu çalışmaz
+ * Çözüm: position: fixed + JavaScript ile viewport-relative konumlandırma
+ */
+function initTooltipPositioning() {
+  document.addEventListener('mouseenter', (e) => {
+    const el = e.target.closest('.has-tooltip, .tree-tooltip, .truncated-tooltip');
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const isLeft = el.classList.contains('tooltip-left');
+
+    // Tooltip konumunu hesapla (element'in yanında, dikey ortalı)
+    const top = rect.top + rect.height / 2;
+    const left = isLeft ? rect.left - 8 : rect.right + 8;
+
+    el.style.setProperty('--tt-top', top + 'px');
+    el.style.setProperty('--tt-left', left + 'px');
+  }, true); // capture phase - event bubbling'den önce yakala
+}
+
+// Initialize tooltip positioning
+initTooltipPositioning();
+
+/**
+ * Truncated value'lar için otomatik tooltip
+ * scrollWidth > clientWidth ise tooltip aktif
+ */
+function initTruncatedTooltips() {
+  const selector = 'td:last-child';  // ENCODING section value'ları
+
+  function updateTruncatedTooltips() {
+    document.querySelectorAll(selector).forEach(td => {
+      const isTruncated = td.scrollWidth > td.clientWidth;
+
+      if (isTruncated) {
+        td.classList.add('truncated-tooltip');
+        td.setAttribute('data-tooltip', td.textContent.trim());
+      } else {
+        td.classList.remove('truncated-tooltip');
+        td.removeAttribute('data-tooltip');
+      }
+    });
+  }
+
+  // İlk çalıştırma
+  updateTruncatedTooltips();
+
+  // Panel resize'da güncelle
+  const observer = new ResizeObserver(updateTruncatedTooltips);
+  observer.observe(document.body);
+
+  // DOM değişikliklerinde güncelle (yeni row eklendiğinde)
+  const mutationObserver = new MutationObserver(updateTruncatedTooltips);
+  mutationObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+// Initialize truncated tooltips
+initTruncatedTooltips();
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // EVENT LISTENERS
 // ═══════════════════════════════════════════════════════════════════════════════
 

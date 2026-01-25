@@ -147,6 +147,40 @@ export function getQualityClass(metric, value) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// TOOLTIP BUILDER (DRY: Centralized tooltip HTML generation)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Create tooltip HTML span (DRY: eliminates repetitive tooltip markup)
+ * @param {string} text - Display text (will be escaped for XSS protection)
+ * @param {string} tooltip - Tooltip content (will be escaped for XSS protection)
+ * @param {string} [position='right'] - Tooltip position: 'left' | 'right'
+ * @param {boolean} [isInfoIcon=false] - Use info icon style (has-tooltip--info)
+ * @returns {string} HTML span with tooltip
+ *
+ * @example
+ * // Basic tooltip
+ * createTooltip('🌐 WebRTC Native', 'Browser WebRTC encoder')
+ * // → '<span class="has-tooltip tooltip-right" data-tooltip="Browser WebRTC encoder">🌐 WebRTC Native</span>'
+ *
+ * @example
+ * // Info icon tooltip (left positioned)
+ * createTooltip('ⓘ', 'This tab is recording audio', 'left', true)
+ * // → '<span class="has-tooltip has-tooltip--info tooltip-left" data-tooltip="This tab is recording audio">ⓘ</span>'
+ */
+export function createTooltip(text, tooltip, position = 'right', isInfoIcon = false) {
+  const classes = isInfoIcon
+    ? `has-tooltip has-tooltip--info tooltip-${position}`
+    : `has-tooltip tooltip-${position}`;
+
+  // Security: Escape both text and tooltip to prevent XSS
+  const safeText = escapeHtml(text);
+  const safeTooltip = escapeHtml(tooltip);
+
+  return `<span class="${classes}" data-tooltip="${safeTooltip}">${safeText}</span>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // LOG HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 

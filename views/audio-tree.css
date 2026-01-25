@@ -49,7 +49,6 @@
 .tree-param {
   color: var(--text-muted);
   font-weight: 400;
-  margin-left: 4px;
 }
 
 /* Parent govdesi: label-text ortasindan asagi */
@@ -112,5 +111,43 @@
 .tree-node.tree-monitor .tree-label { color: var(--text-muted); }
 .tree-label.has-tooltip { cursor: default; }
 
-/* Audio Tree tooltip'leri: tooltip-left class'i ile yonetilir (popup.css) */
-/* Ek stil gerekirse burada override edilebilir */
+/* ══════════════════════════════════════════════════════════════════════
+   TREE TOOLTIP - ::before ile (tree stem ::after ile çakışmayı önler)
+   ══════════════════════════════════════════════════════════════════════ */
+.tree-tooltip {
+  position: relative;
+  cursor: default;
+}
+
+.tree-tooltip::before {
+  content: attr(data-tooltip);
+  position: fixed;
+  top: var(--tt-top, 0);
+  left: var(--tt-left, 0);
+  transform: translateX(-100%) translateY(-50%);  /* Sola açılır */
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: normal;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 1000;
+  border: 1px solid var(--border-primary);
+  max-width: calc(100vw - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-tooltip:hover::before {
+  opacity: 1;
+}
+
+/* Boş tooltip gösterme */
+.tree-tooltip:not([data-tooltip])::before,
+.tree-tooltip[data-tooltip=""]::before {
+  display: none;
+}

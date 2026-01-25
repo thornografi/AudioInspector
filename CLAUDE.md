@@ -63,6 +63,8 @@ audio-inspector/
 | storage.onChanged, async patterns | architecture | `references/patterns.md` |
 | Tab kilitleme, refresh modal | architecture | `references/tab-locking.md` |
 | Banner states, encoding UI, pipeline | architecture | `references/ui-states.md` |
+| Tree rendering, çizgi hizalama | architecture | `references/ui-states.md` |
+| CSS variables, pixel-perfect | architecture | - |
 | Yeni collector yazma | collectors | - |
 | DATA_TYPES, ApiHook kullanımı | collectors | - |
 | Early hook, constructor Proxy | collectors | `references/early-hooks.md` |

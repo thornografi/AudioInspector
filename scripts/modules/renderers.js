@@ -19,6 +19,7 @@ import {
   getQualityClass,
   getLogColorClass,
   formatBitDepth,
+  createTooltip,
   formatChannels,
   debugLog
 } from './helpers.js';
@@ -51,9 +52,9 @@ export const MAX_AUDIO_CONTEXTS = 4;
 
 // DSP field configuration (OCP: add new DSP types without modifying loop)
 export const DSP_FIELDS = [
-  { key: 'echoCancellation', label: 'Echo Cancel' },
-  { key: 'autoGainControl', label: 'Auto Gain' },
-  { key: 'noiseSuppression', label: 'Noise Supp' },
+  { key: 'echoCancellation', label: 'Echo Cancellation' },
+  { key: 'autoGainControl', label: 'Auto Gain Control' },
+  { key: 'noiseSuppression', label: 'Noise Suppression' },
   { key: 'voiceIsolation', label: 'Voice Isolation' }
 ];
 
@@ -79,7 +80,7 @@ export function renderRTCStats(data) {
       || data.peerConnections[0];
   }
 
-  const connInfo = connCount > 0 ? ` (${connCount})` : '';
+  const connInfo = connCount > 0 ? `(${connCount})` : '';
 
   let sendHtml = `<div class="rtc-column">
     <div class="sub-header sub-header--rtc">
@@ -126,15 +127,24 @@ export function renderRTCStats(data) {
     const mode = pc.send.opusParams ? (pc.send.opusParams.cbr === 1 ? 'CBR' : 'VBR') : '-';
     const fec = pc.send.opusParams?.useinbandfec === 1 ? '+FEC' : '';
 
+    // Build Mode cell with tooltip
+    const modeTooltip = mode !== '-' ? 'Constant/Variable Bitrate encoding' : null;
+    const fecTooltip = fec ? 'Forward Error Correction' : null;
+    const modeValue = mode !== '-'
+      ? (fec
+          ? `${createTooltip(mode, modeTooltip)} ${createTooltip(fec, fecTooltip)}`
+          : createTooltip(mode, modeTooltip))
+      : mode;
+
     sendHtml += `<tr><td>Codec</td><td class="metric-value">${codec}</td></tr>`;
     sendHtml += `<tr><td>Bitrate</td><td class="metric-value">${bitrate}</td></tr>`;
-    sendHtml += `<tr><td>Mode</td><td>${mode} ${fec}</td></tr>`;
+    sendHtml += `<tr><td>Mode</td><td>${modeValue}</td></tr>`;
   } else {
     sendHtml += `<tr><td>Codec</td><td>-</td></tr>`;
     sendHtml += `<tr><td>Bitrate</td><td>-</td></tr>`;
     sendHtml += `<tr><td>Mode</td><td>-</td></tr>`;
   }
-  sendHtml += `<tr><td>RTT</td><td class="${rttClass}">${rttText}</td></tr>`;
+  sendHtml += `<tr><td>${createTooltip('RTT', 'Round-Trip Time (network latency)')}</td><td class="${rttClass}">${rttText}</td></tr>`;
   sendHtml += `</tbody></table></div>`;
 
   // Recv column
@@ -149,13 +159,13 @@ export function renderRTCStats(data) {
 
     recvHtml += `<tr><td>Codec</td><td class="metric-value">${codec}</td></tr>`;
     recvHtml += `<tr><td>Bitrate</td><td class="metric-value">${bitrate}</td></tr>`;
-    recvHtml += `<tr><td>Jitter</td><td class="${jitterClass}">${jitter}</td></tr>`;
-    recvHtml += `<tr><td>Loss</td><td class="${plrClass}">${plr.toFixed(1)}%</td></tr>`;
+    recvHtml += `<tr><td>${createTooltip('Jitter', 'Packet delay variation', 'left')}</td><td class="${jitterClass}">${jitter}</td></tr>`;
+    recvHtml += `<tr><td>${createTooltip('Loss', 'Packet loss percentage', 'left')}</td><td class="${plrClass}">${plr.toFixed(1)}%</td></tr>`;
   } else {
     recvHtml += `<tr><td>Codec</td><td>-</td></tr>`;
     recvHtml += `<tr><td>Bitrate</td><td>-</td></tr>`;
-    recvHtml += `<tr><td>Jitter</td><td>-</td></tr>`;
-    recvHtml += `<tr><td>Loss</td><td>-</td></tr>`;
+    recvHtml += `<tr><td>${createTooltip('Jitter', 'Packet delay variation', 'left')}</td><td>-</td></tr>`;
+    recvHtml += `<tr><td>${createTooltip('Loss', 'Packet loss percentage', 'left')}</td><td>-</td></tr>`;
   }
   recvHtml += `</tbody></table></div>`;
 
@@ -179,7 +189,7 @@ export function renderGUMStats(data) {
     html += `<tr><td>Rate</td><td>-</td></tr>`;
     html += `<tr><td>Channels</td><td>-</td></tr>`;
     html += `<tr><td>Bit Depth</td><td>-</td></tr>`;
-    html += `<tr><td>In Latency</td><td>-</td></tr>`;
+    html += `<tr><td>Input Latency</td><td>-</td></tr>`;
     DSP_FIELDS.forEach(field => {
       html += `<tr><td>${field.label}</td><td>-</td></tr>`;
     });
@@ -197,7 +207,7 @@ export function renderGUMStats(data) {
   html += `<tr><td>Bit Depth</td><td>${formatBitDepth(s.sampleSize)}</td></tr>`;
 
   const inLatency = s.latency ? `${(s.latency * 1000).toFixed(1)} ms` : '-';
-  html += `<tr><td>In Latency</td><td>${inLatency}</td></tr>`;
+  html += `<tr><td>Input Latency</td><td>${inLatency}</td></tr>`;
 
   DSP_FIELDS.forEach(field => {
     const value = s[field.key];
@@ -461,7 +471,7 @@ export function extractProcessingInfo(mainProcessors, monitors) {
   if (worklet) {
     const procName = worklet.processorName || 'processor';
     const shortName = formatWorkletName(procName);
-    processingText = `Worklet (${shortName})`;
+    processingText = `Worklet(${shortName})`;
   } else if (scriptProc) {
     processingText = 'ScriptProcessor';
   }
@@ -524,7 +534,7 @@ export function renderACStats(contexts, audioConnections = null) {
   }
 
   const firstCtx = contextArray[0];
-  timestamp.textContent = formatTime(firstCtx.static?.timestamp);
+  const contextTimestamp = formatTime(firstCtx.static?.timestamp);
 
   let html = '';
 
@@ -544,7 +554,7 @@ export function renderACStats(contexts, audioConnections = null) {
     if (purpose.label === 'Page Audio') {
       html += `<div class="context-item context-minimal${index > 0 ? ' context-separator' : ''}">
         <span class="context-purpose">${purpose.icon} ${purpose.label}</span>
-        <span class="has-tooltip has-tooltip--info tooltip-left" data-tooltip="${purpose.tooltip}">ⓘ</span>
+        ${createTooltip('ⓘ', purpose.tooltip, 'left', true)}
         <span class="context-subtext">Site audio processing (VU meter, effects, etc.)</span>
       </div>`;
       return;
@@ -595,13 +605,14 @@ export function renderACStats(contexts, audioConnections = null) {
       <div class="ac-section ac-section--first">
         <div class="sub-header sub-header--ac">
           <span class="ac-section-title">Context Info</span>
+          <span class="timestamp">${contextTimestamp}</span>
         </div>
         <table class="ac-main-table">
           <tbody>
             <tr><td>Input</td><td>${inputLabel}</td></tr>
             <tr><td>Channels</td><td class="metric-value">${formatChannels(ctx.static?.channelCount)}</td></tr>
             <tr><td>State</td><td class="${stateClass}">${ctx.static?.state || '-'}</td></tr>
-            <tr><td><span class="has-tooltip tooltip-left" data-tooltip="${latencyTooltip}">Latency</span></td><td>${latencyMs}</td></tr>
+            <tr><td>${createTooltip('Latency', latencyTooltip, 'left')}</td><td>${latencyMs}</td></tr>
             <tr><td>Processing</td><td>${processingText || 'None'}</td></tr>
             <tr><td>Effects</td><td>${effectsText || 'None'}</td></tr>
           </tbody>
@@ -618,7 +629,7 @@ export function renderACStats(contexts, audioConnections = null) {
         <div class="ac-section">
           <div class="sub-header sub-header--ac">
             <span class="ac-section-title">Audio Path</span>
-            <span class="ac-detected-time-subtle">(${pipelineTs})</span>
+            <span class="timestamp">${pipelineTs}</span>
           </div>
           ${renderAudioPathTree(mainProcessors, monitors, ctx.pipeline?.inputSource)}
         </div>
@@ -630,7 +641,7 @@ export function renderACStats(contexts, audioConnections = null) {
         <div class="ac-section pcm-processing-section">
           <div class="processing-item">
             <span class="detail-label">⚠️ Processing</span>
-            <span class="detail-value has-tooltip" data-tooltip="Raw audio data - not yet encoded">${escapeHtml(ctx.encodingHint.hint)}</span>
+            <span class="detail-value">${createTooltip(ctx.encodingHint.hint, 'Raw audio data - not yet encoded')}</span>
           </div>
         </div>`;
     }
@@ -642,6 +653,9 @@ export function renderACStats(contexts, audioConnections = null) {
   debugLog(` 🔍 renderACStats: HTML preview (first 500 chars):`, html.substring(0, 500));
   container.innerHTML = html;
   debugLog(` 🔍 renderACStats: DOM updated, container.children.length=`, container.children.length);
+
+  // Clear main card-header timestamp (now shown in sub-headers)
+  if (timestamp) timestamp.textContent = '';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

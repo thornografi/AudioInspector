@@ -13,6 +13,7 @@ import {
   formatTime,
   formatWorkletName,
   extractCodecName,
+  createTooltip,
   normalizeMimeType,
   formatBitDepth,
   debugLog
@@ -45,11 +46,11 @@ export function formatEncoderDisplay(encoder) {
 
   // Generic WASM encoder types
   const detectedEncoders = {
-    'opus-wasm': 'Opus (WASM)',
-    'mp3-wasm': 'MP3 (WASM)',
-    'aac-wasm': 'AAC (WASM)',
-    'vorbis-wasm': 'Vorbis (WASM)',
-    'flac-wasm': 'FLAC (WASM)',
+    'opus-wasm': 'Opus(WASM)',
+    'mp3-wasm': 'MP3(WASM)',
+    'aac-wasm': 'AAC(WASM)',
+    'vorbis-wasm': 'Vorbis(WASM)',
+    'flac-wasm': 'FLAC(WASM)',
     'pcm': 'Linear PCM'
   };
 
@@ -59,11 +60,11 @@ export function formatEncoderDisplay(encoder) {
 
   // Legacy fallback - old format still in storage
   const legacyEncoders = {
-    'opus-recorder': 'Opus (WASM)',
-    'lamejs': 'MP3 (WASM)',
-    'fdk-aac.js': 'AAC (WASM)',
-    'vorbis.js': 'Vorbis (WASM)',
-    'libflac.js': 'FLAC (WASM)',
+    'opus-recorder': 'Opus(WASM)',
+    'lamejs': 'MP3(WASM)',
+    'fdk-aac.js': 'AAC(WASM)',
+    'vorbis.js': 'Vorbis(WASM)',
+    'libflac.js': 'FLAC(WASM)',
     'linear-pcm': 'Linear PCM'
   };
 
@@ -95,7 +96,7 @@ export function detectEncoderInputTechnology(processors) {
   if (worklet) {
     const name = worklet.name || worklet.processorName;
     const shortName = formatWorkletName(name);
-    return shortName ? `Worklet (${shortName})` : 'Worklet';
+    return shortName ? `Worklet(${shortName})` : 'Worklet';
   }
 
   // Look for ScriptProcessor (legacy audio processing)
@@ -118,7 +119,7 @@ export function detectEncoderInputTechnology(processors) {
     // Return the last WebAudio node in the chain
     const lastNode = webAudioNodes[webAudioNodes.length - 1];
     const nodeType = formatWebAudioNodeType(lastNode.type);
-    return `WebAudio (${nodeType})`;
+    return `WebAudio(${nodeType})`;
   }
 
   // Only source nodes - direct stream
@@ -127,7 +128,7 @@ export function detectEncoderInputTechnology(processors) {
     return type.includes('source');
   });
   if (sourceNode) {
-    return 'MediaStream (direct)';
+    return 'MediaStream(direct)';
   }
 
   return null;
@@ -177,16 +178,16 @@ function formatWebAudioNodeType(type) {
 //    When adding new patterns: Update both PATTERN_PRIORITY and DETECTION_LABELS
 export const DETECTION_LABELS = {
   // AudioWorklet patterns (AudioWorklet.port.postMessage hook)
-  'audioworklet-config': { text: 'AudioWorklet (full)', icon: '✓', tooltip: 'Full config via Worklet hook' },
-  'audioworklet-init': { text: 'AudioWorklet (basic)', icon: '○', tooltip: 'Basic config via Worklet hook' },
-  'audioworklet-deferred': { text: 'AudioWorklet (late)', icon: '◐', tooltip: 'Late Worklet detection' },
+  'audioworklet-config': { text: 'AudioWorklet(full)', icon: '✓', tooltip: 'Full config via Worklet hook' },
+  'audioworklet-init': { text: 'AudioWorklet(basic)', icon: '○', tooltip: 'Basic config via Worklet hook' },
+  'audioworklet-deferred': { text: 'AudioWorklet(late)', icon: '◐', tooltip: 'Late Worklet detection' },
   // Worker patterns (Worker.postMessage hook)
-  'direct': { text: 'Worker Hook (full)', icon: '✓', tooltip: 'Full config via Worker hook' },
-  'nested': { text: 'Worker Hook (full)', icon: '✓', tooltip: 'Nested config via Worker hook' },
-  'worker-init': { text: 'Worker Hook (basic)', icon: '○', tooltip: 'Basic config via Worker hook' },
-  'worker-audio-init': { text: 'Worker (real-time)', icon: '◐', tooltip: 'Worker init - bitrate may vary' },
+  'direct': { text: 'Worker Hook(full)', icon: '✓', tooltip: 'Full config via Worker hook' },
+  'nested': { text: 'Worker Hook(full)', icon: '✓', tooltip: 'Nested config via Worker hook' },
+  'worker-init': { text: 'Worker Hook(basic)', icon: '○', tooltip: 'Basic config via Worker hook' },
+  'worker-audio-init': { text: 'Worker(real-time)', icon: '◐', tooltip: 'Worker init - bitrate may vary' },
   // Blob creation patterns (audio file created - post-hoc detection)
-  'audio-blob': { text: 'Blob (post-hoc)', icon: '◑', tooltip: 'Detected from audio Blob' },
+  'audio-blob': { text: 'Blob(post-hoc)', icon: '◑', tooltip: 'Detected from audio Blob' },
   // Default
   'unknown': { text: 'Detected', icon: '?', tooltip: 'Method unknown' }
 };
@@ -315,7 +316,7 @@ export const ENCODER_DETECTORS = [
       const enc = data.detectedEncoder;
 
       // Build codec display with application type suffix if available
-      // e.g., "OPUS (VoIP)", "OPUS (Audio)", "OPUS (LowDelay)"
+      // e.g., "OPUS(VoIP)", "OPUS(Audio)", "OPUS(LowDelay)"
       const rawCodec = enc.codec ?? 'unknown';
       const isUnknownCodec = typeof rawCodec === 'string' && rawCodec.toLowerCase() === 'unknown';
 
@@ -334,7 +335,7 @@ export const ENCODER_DETECTORS = [
         ? renderStatusPulse('Detecting...', 'Confirmed when recording stops')
         : (isLinearPcmWav ? 'PCM' : String(rawCodec).toUpperCase());
       const codecDisplay = enc.applicationName
-        ? `${codecBase} (${enc.applicationName})`
+        ? `${codecBase}(${enc.applicationName})`
         : codecBase;
 
       // Build rows dynamically based on available data
@@ -395,7 +396,7 @@ export const ENCODER_DETECTORS = [
       } else if (enc.isLiveEstimate === true) {
         rows.push({
           label: 'Bitrate',
-          value: '<span class="has-tooltip tooltip-right" data-tooltip="Calculated when recording stops">Calculating...</span>',
+          value: createTooltip('Calculating...', 'Calculated when recording stops'),
           isMetric: false
         });
       } else {
@@ -460,7 +461,7 @@ export const ENCODER_DETECTORS = [
         // Encoder type - Browser's built-in WebRTC encoder
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip tooltip-right" data-tooltip="Browser WebRTC encoder">🌐 WebRTC Native</span>',
+          value: createTooltip('🌐 WebRTC Native', 'Browser WebRTC encoder'),
           isMetric: false
         }
       ];
@@ -529,7 +530,7 @@ export const ENCODER_DETECTORS = [
         },
         {
           label: 'Encoder',
-          value: '<span class="has-tooltip tooltip-right" data-tooltip="Browser MediaRecorder">🌐 MediaRecorder API</span>',
+          value: createTooltip('🌐 MediaRecorder API', 'Browser MediaRecorder'),
           isMetric: true
         },
         {
@@ -592,7 +593,7 @@ export const ENCODER_DETECTORS = [
       // This distinguishes from WASM encoders like opus-recorder, lamejs, etc.
       rows.push({
         label: 'Encoder',
-        value: '<span class="has-tooltip tooltip-right" data-tooltip="Browser MediaRecorder (native)">🌐 MediaRecorder API</span>',
+        value: createTooltip('🌐 MediaRecorder API', 'Browser MediaRecorder (native)'),
         isMetric: false
       });
 
@@ -764,12 +765,12 @@ export const ENCODER_DETECTORS = [
         rows: [
           {
             label: 'Codec',
-            value: '<span class="has-tooltip tooltip-right" data-tooltip="Raw PCM (Float32Array)">Raw PCM</span>',
+            value: createTooltip('Raw PCM', 'Raw PCM (Float32Array)'),
             isMetric: true
           },
           {
             label: 'Encoder',
-            value: '<span class="has-tooltip tooltip-right" data-tooltip="Heuristic - encoding unconfirmed">ScriptProcessor</span>',
+            value: createTooltip('ScriptProcessor', 'Heuristic - encoding unconfirmed'),
             isMetric: false
           }
         ]
