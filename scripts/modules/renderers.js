@@ -25,12 +25,17 @@ import {
 } from './helpers.js';
 
 import {
-  renderAudioPathTree,
+  renderAudioFlow,
   mapNodeTypeToProcessorType,
   isDestinationNodeType,
   getEffectNodeTypes,
   AUDIO_NODE_DISPLAY_MAP
-} from './audio-tree.js';
+} from './audio-flow.js';
+
+import {
+  deriveEncodingOutput,
+  toRenderOptions
+} from './encoding-location.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -47,6 +52,10 @@ export const DESTINATION_TYPES = {
 
 // SOURCE: src/core/constants.js - RECENT_CONTEXT_THRESHOLD_MS
 const RECENT_THRESHOLD_MS = 5000;
+
+// Encoding cache: contextId → { encodingNodeId, encoderCodec }
+// Prevents encoding badge from disappearing when inspector stops (technology change)
+const _encodingInfoCache = new Map();
 
 export const MAX_AUDIO_CONTEXTS = 4;
 
@@ -270,8 +279,11 @@ export function getContextPurpose(ctx) {
 
 /**
  * Filter AudioContext'leri - giden ses + aktif/yeni context'leri döndür
+ * @param {Array} contexts - AudioContext array
+ * @param {Object|null} audioConnections - Audio connections data (optional)
+ *        Used to prioritize contexts that have actual connections in the graph
  */
-export function filterOutgoingContexts(contexts) {
+export function filterOutgoingContexts(contexts, audioConnections = null) {
   const now = Date.now();
   // RECENT_THRESHOLD_MS defined at module level (SOURCE: constants.js)
 
@@ -305,10 +317,26 @@ export function filterOutgoingContexts(contexts) {
   debugLog(` 🔍 filterOutgoingContexts: ${micInputContexts.length} Mic Input context(s) found`);
 
   if (micInputContexts.length > 0) {
-    const sortedMicInputs = [...micInputContexts].sort(
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TECHNOLOGY CHANGE FIX: Prioritize contexts that have actual connections
+    // When technology changes, a new context (ctx_3) is created but its connections
+    // are never emitted (inspector stops). We should prefer contexts WITH connections.
+    // ═══════════════════════════════════════════════════════════════════════════
+    const connections = audioConnections?.connections || [];
+    const contextsWithConnections = micInputContexts.filter(ctx => {
+      if (connections.length === 0) return true; // No connections data - include all
+      return connections.some(conn => conn.contextId === ctx.contextId);
+    });
+
+    debugLog(` 🔍 filterOutgoingContexts: ${contextsWithConnections.length}/${micInputContexts.length} Mic Input context(s) have connections`);
+
+    // If some contexts have connections, prioritize those; otherwise fall back to all
+    const pool = contextsWithConnections.length > 0 ? contextsWithConnections : micInputContexts;
+    const sortedMicInputs = [...pool].sort(
       (a, b) => getContextTimestamp(b) - getContextTimestamp(a)
     );
-    debugLog(` 🔍 filterOutgoingContexts: returning NEWEST Mic Input context: ${sortedMicInputs[0].contextId}`);
+
+    debugLog(` 🔍 filterOutgoingContexts: returning ${contextsWithConnections.length > 0 ? 'NEWEST with connections' : 'NEWEST'}: ${sortedMicInputs[0].contextId}`);
     return [sortedMicInputs[0]];
   }
 
@@ -334,7 +362,7 @@ export function filterConnectionsByContext(connections, contexts) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROCESSOR TREE (Paralel Branch Desteği)
 // ═══════════════════════════════════════════════════════════════════════════════
-// mapNodeTypeToProcessorType ve isDestinationNodeType artık audio-tree.js'den
+// mapNodeTypeToProcessorType ve isDestinationNodeType artık audio-flow.js'den
 // import ediliyor (merkezi AUDIO_NODE_DISPLAY_MAP'ten türetilmiş)
 
 /**
@@ -419,15 +447,15 @@ export function deriveProcessorTreeFromConnections(connections, ctx) {
       return { processor: { ...fromPipeline }, nodeId };
     }
 
-    // Fallback: nodeType'dan processor oluştur
-    const mappedType = mapNodeTypeToProcessorType(nodeType);
-    if (!mappedType) return null;
-
-    const entry = { type: mappedType, nodeId, timestamp: Date.now() };
-    if (mappedType === 'audioWorkletNode') {
-      entry.processorName = '?';
-    }
-    return { processor: entry, nodeId };
+    // ═══════════════════════════════════════════════════════════════════════
+    // STRICT MODE: Pipeline'da olmayan node'ları flow'a EKLEME
+    // ═══════════════════════════════════════════════════════════════════════
+    // Eski davranış (KALDIRILDI): nodeType'dan FAKE processor oluşturuyordu
+    // Problem: Connection'da "Gain" var ama pipeline'da o nodeId yok →
+    //          Fallback gainValue=undefined → default "pass" → yanlış "Volume(pass)" gösterimi
+    // Yeni davranış: null döndür → bu node flow'da görünmez
+    console.warn(`[Audio Flow] Node ${nodeId} (${nodeType}) pipeline'da yok, atlanıyor`);
+    return null;
   };
 
   /**
@@ -607,8 +635,20 @@ export function extractProcessingInfo(mainProcessors, monitors) {
 
 /**
  * Render AudioContext stats - supports multiple contexts
+ * @param {Array|Object|null} contexts - AudioContext data
+ * @param {Object} options - Rendering options (OCP: config object pattern)
+ * @param {Object|null} options.audioConnections - Audio connection graph data
+ * @param {Object|null} options.detectedEncoder - Detected encoder data (for node-level tracking)
+ * @param {Object|null} options.mediaRecorder - MediaRecorder data (for audioSource check)
+ * @param {Object|null} options.recordingActive - Recording state data
  */
-export function renderACStats(contexts, audioConnections = null) {
+export function renderACStats(contexts, options = {}) {
+  const {
+    audioConnections = null,
+    detectedEncoder = null,
+    mediaRecorder = null,
+    recordingActive = null
+  } = options;
   const container = document.getElementById('acContent');
   const timestamp = document.getElementById('acTimestamp');
 
@@ -619,7 +659,7 @@ export function renderACStats(contexts, audioConnections = null) {
   }
 
   let contextArray = Array.isArray(contexts) ? contexts : [contexts];
-  contextArray = filterOutgoingContexts(contextArray);
+  contextArray = filterOutgoingContexts(contextArray, audioConnections);
 
   if (contextArray.length === 0) {
     container.innerHTML = '<div class="no-data">No outgoing audio</div>';
@@ -712,13 +752,48 @@ export function renderACStats(contexts, audioConnections = null) {
     if (processorTree) {
       // Tree göster
       const pipelineTs = formatTime(ctx.pipeline?.timestamp);
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // ENCODING LOCATION (Strategy Pattern - encoding-location.js)
+      // Dinamik encoding badge lokasyonu - hard-coded mantık yok
+      // ═══════════════════════════════════════════════════════════════════════
+
+      // Cache'ten oku (technology change sonrası badge korunması için)
+      const cachedEncoding = ctx.contextId ? _encodingInfoCache.get(ctx.contextId) : null;
+
+      // Strategy pattern ile encoding lokasyonunu belirle
+      const encodingData = {
+        detectedEncoder,
+        mediaRecorder,
+        recordingActive,
+        ctx
+      };
+
+      let encodingOutput = deriveEncodingOutput(encodingData, ctxConnections, processorTree);
+
+      // Cache'ten oku eğer yeni tespit yoksa
+      if (!encodingOutput && cachedEncoding) {
+        debugLog(` 🔍 Encoding cache: READ ctx=${ctx.contextId} (from cache)`);
+        encodingOutput = cachedEncoding;
+      }
+
+      // Cache'e yaz (yeni tespit varsa)
+      if (encodingOutput && ctx.contextId) {
+        _encodingInfoCache.set(ctx.contextId, encodingOutput);
+        debugLog(` 🔍 Encoding cache: WRITE ctx=${ctx.contextId}, strategy=${encodingOutput.strategyName}`);
+      }
+
+      // renderAudioFlow için options formatına dönüştür
+      const renderOptions = toRenderOptions(encodingOutput);
+      debugLog(` 🔍 Encoding render options:`, renderOptions);
+
       html += `
         <div class="ac-section">
           <div class="sub-header sub-header--ac">
             <span class="ac-section-title">Audio Path</span>
             <span class="timestamp">${pipelineTs}</span>
           </div>
-          ${renderAudioPathTree(processorTree, monitors, ctx.pipeline?.inputSource)}
+          ${renderAudioFlow(processorTree, monitors, ctx.pipeline?.inputSource, renderOptions)}
         </div>
       `;
     } else if (hasInputSource) {

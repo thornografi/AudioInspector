@@ -92,27 +92,46 @@ class RTCPeerConnectionCollector extends PollingCollector {
   }
 
   /**
-   * Start collecting stats
-   * @returns {Promise<void>}
+   * Hook: Process early captures from registry
+   * Handler already registered in initialize()
+   * @protected
+   * @override
+   * @returns {Promise<number>} Number of processed connections
    */
-  async start() {
-    // Handler already registered in initialize()
-    // Add pre-existing instances from early hook registry
+  async _processEarlyInstances() {
+    let processedCount = 0;
+
     const registry = getInstanceRegistry();
     if (registry.rtcPeerConnections.length > 0) {
       logger.info(this.logPrefix, `Found ${registry.rtcPeerConnections.length} pre-existing RTCPeerConnection(s) from early hook`);
 
       for (const { instance, timestamp } of registry.rtcPeerConnections) {
         this._handleNewConnection(instance);
+        processedCount++;
       }
     }
 
+    return processedCount;
+  }
+
+  /**
+   * Hook: Post-start actions - start polling
+   * @protected
+   * @override
+   * @param {number} processedCount
+   * @returns {Promise<void>}
+   */
+  async _onStartComplete(processedCount) {
     await this.startPolling();
   }
 
   /**
    * Re-emit current data from active peer connections
    * Called when UI needs to be refreshed (e.g., after data reset)
+   *
+   * NOTE: Overrides BaseCollector.reEmit() entirely because this collector
+   * uses collectData() for real-time stats aggregation across all connections.
+   * @override
    */
   reEmit() {
     if (!this.active) return;

@@ -190,6 +190,14 @@ class PageInspector {
         logger.info(LOG_PREFIX.INSPECTOR, '🔄 RE_EMIT_ALL received - re-emitting all collector data');
         this._reEmitAllCollectors();
       }
+
+      // Handle COLLECTOR_RESET signal (triggered when technology changes)
+      // Calls resetSession() on all collectors to clear stale state
+      if (event.data.type === 'COLLECTOR_RESET') {
+        const { resetType, sessionId } = event.data.payload || {};
+        logger.info(LOG_PREFIX.INSPECTOR, `🔄 COLLECTOR_RESET received: ${resetType} (session #${sessionId})`);
+        this._resetAllCollectors(resetType, sessionId);
+      }
     });
   }
 
@@ -201,6 +209,21 @@ class PageInspector {
   _reEmitAllCollectors() {
     for (const collector of this.collectors) {
       collector.reEmit();  // All collectors have reEmit() via BaseCollector
+    }
+  }
+
+  /**
+   * Reset session state on all collectors
+   * Called when technology changes (HARD reset) or new recording starts (SOFT reset)
+   * @private
+   * @param {'hard' | 'soft' | 'none'} resetType - Type of reset
+   * @param {number} sessionId - New recording session ID
+   */
+  _resetAllCollectors(resetType, sessionId) {
+    for (const collector of this.collectors) {
+      // resetSession is defined in BaseCollector with default no-op
+      // AudioContextCollector overrides it to handle encoder/pipeline reset
+      collector.resetSession(resetType, sessionId);
     }
   }
 

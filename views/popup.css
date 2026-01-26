@@ -194,6 +194,107 @@ body.inspecting .status-text {
   color: var(--accent-red);
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   CONSOLE DRAWER TOOLBAR & FILTERS
+   ═══════════════════════════════════════════════════════════════════ */
+.console-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 16px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.console-filters {
+  display: flex;
+  gap: 2px;
+}
+
+.filter-btn {
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.filter-btn:hover {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+}
+
+.filter-btn.active {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: var(--border-primary);
+}
+
+.console-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Drawer tab navigation - minimal underline style */
+.drawer-tabs {
+  display: flex;
+  gap: 0;
+}
+
+.drawer-tab {
+  padding: 6px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  margin-bottom: -1px; /* Border overlap with header border */
+}
+
+.drawer-tab:hover {
+  color: var(--text-secondary);
+}
+
+.drawer-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-secondary);
+}
+
+/* Drawer tab content areas */
+.drawer-tab-content {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  font-family: 'JetBrains Mono', 'Fira Code', var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  min-height: 0;
+}
+
+.drawer-tab-content.active {
+  display: block;
+}
+
+/* btn-danger for clear button */
+.btn-danger {
+  background: var(--bg-tertiary);
+  color: var(--accent-red);
+  border: 1px solid var(--border-primary);
+}
+
+.btn-danger:hover {
+  background: rgba(248, 81, 73, 0.15);
+  border-color: var(--accent-red);
+}
+
 /* Main Content Grid - 2 rows (WebRTC, GUM+Encoding+AC) */
 /* Area1 (WebRTC) = 30%, Area2 = 70% */
 .main-content {
@@ -252,7 +353,8 @@ body.inspecting .status-text {
 }
 
 #debugContent,
-.drawer-content {
+.drawer-content,
+.drawer-tab-content {
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -291,25 +393,29 @@ body.inspecting .status-text {
 /* Scrollbar width */
 .card-content::-webkit-scrollbar,
 #debugContent::-webkit-scrollbar,
-.drawer-content::-webkit-scrollbar {
+.drawer-content::-webkit-scrollbar,
+.drawer-tab-content::-webkit-scrollbar {
   width: 6px;
 }
 
 .card-content::-webkit-scrollbar-track,
 #debugContent::-webkit-scrollbar-track,
-.drawer-content::-webkit-scrollbar-track {
+.drawer-content::-webkit-scrollbar-track,
+.drawer-tab-content::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* #debugContent ve .drawer-content: her zaman görünür scrollbar */
+/* #debugContent, .drawer-content, .drawer-tab-content: her zaman görünür scrollbar */
 #debugContent::-webkit-scrollbar-thumb,
-.drawer-content::-webkit-scrollbar-thumb {
+.drawer-content::-webkit-scrollbar-thumb,
+.drawer-tab-content::-webkit-scrollbar-thumb {
   background: rgba(139, 148, 158, 0.3);
   border-radius: 2px;
 }
 
 #debugContent::-webkit-scrollbar-thumb:hover,
-.drawer-content::-webkit-scrollbar-thumb:hover {
+.drawer-content::-webkit-scrollbar-thumb:hover,
+.drawer-tab-content::-webkit-scrollbar-thumb:hover {
   background: rgba(139, 148, 158, 0.6);
 }
 
@@ -397,8 +503,8 @@ body.inspecting .status-text {
   margin-left: 12px;
   width: calc(100% - 12px);
 }
-.ac-section .sub-header + .audio-tree,
-.ac-section .sub-header ~ .audio-tree {
+.ac-section .sub-header + .audio-flow,
+.ac-section .sub-header ~ .audio-flow {
   margin-left: 12px;
 }
 /* RTC columns: indent yok - column padding zaten var */
@@ -949,6 +1055,7 @@ button:disabled,
   text-align: center;
   font-size: 12px;
   font-weight: 500;
+  cursor: pointer;  /* Click to dismiss */
 }
 
 .auto-stop-banner.visible {
@@ -1103,8 +1210,19 @@ button:disabled,
     grid-template-rows: 1fr 1fr;
   }
 
-  /* Audio tree label - daha agresif truncation */
-  .tree-label {
+  /* Audio flow label - daha agresif truncation */
+  .flow-label {
     max-width: 120px;
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   UTILITY CLASSES - DRY helpers for common patterns
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Text truncation with ellipsis - use on single-line text elements */
+.u-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

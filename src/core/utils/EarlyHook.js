@@ -142,7 +142,7 @@ function createConstructorHook(config) {
 
   const OriginalConstructor = getOriginal();
   if (!OriginalConstructor) {
-    logger.warn(LOG_PREFIX.INSPECTOR, `${globalName} not available, skipping hook`);
+    logger.info(LOG_PREFIX.INSPECTOR, `${globalName} not available, skipping hook`);
     return;
   }
 
@@ -263,6 +263,9 @@ function hookGetUserMedia() {
 function hookAudioWorkletNodePort(node, processorName) {
   if (!node?.port?.postMessage) return;
 
+  // Get stable nodeId for this AudioWorkletNode (for encoding node tracking)
+  const nodeId = getOrAssignNodeId(node);
+
   const originalPortPostMessage = node.port.postMessage.bind(node.port);
 
   node.port.postMessage = function(message, ...args) {
@@ -340,7 +343,10 @@ function hookAudioWorkletNodePort(node, processorName) {
           pattern: 'audioworklet-init',
           source: 'audioworklet-port',
           processorName: processorName,
-          status: 'initialized'
+          status: 'initialized',
+          // Node-level tracking: which AudioWorkletNode is encoding
+          encodingNodeId: nodeId,
+          encodingNodeType: 'audioWorkletNode'
         };
       }
 
@@ -398,7 +404,10 @@ function hookAudioWorkletNodePort(node, processorName) {
           pattern: 'audioworklet-config',
           source: 'audioworklet-port',
           processorName: processorName,
-          status: 'initialized'
+          status: 'initialized',
+          // Node-level tracking: which AudioWorkletNode is encoding
+          encodingNodeId: nodeId,
+          encodingNodeType: 'audioWorkletNode'
         };
       }
 

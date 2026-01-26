@@ -1,6 +1,6 @@
 ---
-name: tree-expert
-description: "Tree rendering, çizgi hizalama, pixel-perfect görsellik. Tetikleyiciler: tree, çizgi, hiza, kalınlık, pixel, line, rendering"
+name: flow-expert
+description: "Flow/Pipeline rendering, ok hizalama, split layout, pixel-perfect görsellik. Tetikleyiciler: flow, pipeline, ok, hiza, split, arrow, rendering"
 skills:
   - architecture
 model: sonnet
@@ -8,63 +8,92 @@ model: sonnet
 
 # Amaç
 
-Tree görünümü MÜKEMMEL olmalı. Kullanıcı düzen/hiza takıntılı - 1px sapma bile kabul edilemez.
+Flow/Pipeline görünümü MÜKEMMEL olmalı. Kullanıcı düzen/hiza takıntılı - 1px sapma bile kabul edilemez.
 
 # Dosyalar
 
-- `scripts/modules/audio-tree.js` - Tree rendering, ölçüm
-- `views/audio-tree.css` - Çizgi stilleri, CSS variables
+- `scripts/modules/audio-flow.js` - Flow rendering, ölçüm
+- `views/audio-flow.css` - Ok stilleri, split layout, CSS variables
 
 Detay: `architecture` skill → `references/ui-states.md`
 
-# Kritik Bilgi (3 Günlük Debug)
+# Terminoloji
 
-## Çizgi Kalınlık Sorunu
-
-**✅ ÇÖZÜM:** `background` değil `border` kullan
-
-```css
-/* ❌ Tutarsız kalınlık */
-width: 1px;
-background: color;
-
-/* ✅ Tutarlı kalınlık */
-width: 0;
-border-left: 1px solid color;
-```
-
-**Neden:** Browser background'u "kutu", border'ı "çizgi" olarak render eder. DPI scaling'de fark yaratır.
-
-## Subpixel Sorunu
-
-Kesişen çizgiler AYNI formül kullanmalı:
-```javascript
-Math.floor(center)  // veya Math.round - ama hep aynı
-```
+| Eski (Tree) | Yeni (Flow) | Açıklama |
+|-------------|-------------|----------|
+| children | outputs | Sonraki node'lar (downstream) |
+| parent | input | Önceki node (upstream) |
+| tree-children | flow-outputs | Output container |
+| has-children | has-outputs | Output var mı |
+| fork | split | Dallanma noktası |
 
 # CSS Variables
 
-## Sabit Variables (CSS'te tanımlı)
-| Variable | Değer | Amaç |
-|----------|-------|------|
-| `--tree-unit` | 17px | Yatay çizgi uzunluğu, padding base |
-| `--tree-gap` | 3px | Connector→öğe boşluğu |
-| `--tree-line` | 1px | Çizgi kalınlığı |
-| `--stem-ratio` | 1.25 | Dikey mesafe çarpanı (padding = ratio/2) |
+**Kaynak:** `views/audio-flow.css` → `.audio-flow` bloğu (satır 7-35)
+
+## Spacing Hierarchy
+```
+--spacing-unit (base)
+  ├─ --spacing-xs → --arrow-gap (ok boşlukları)
+  ├─ --spacing-lg → --flow-row-height (label yüksekliği)
+  └─ --spacing-xl → --split-gap (yan dallar arası)
+```
 
 ## Dinamik Variables (JS tarafından set edilir)
-| Variable | JS mi? | Amaç |
+| Variable | Kaynak | Amaç |
 |----------|--------|------|
-| `--parent-center` | ✅ | Children margin-left |
-| `--stem-left` | ✅ | Gövde çizgisi x pozisyonu |
-| `--vertical-line-height` | ✅ | Dikey çizgi uzunluğu |
-| `--horizontal-line-top` | ✅ | Yatay çizgi y pozisyonu |
+| `--main-arrow-left` | `measureFlowLabels()` | Dikey ok x pozisyonu (label merkezi) |
+
+# Ok Rendering
+
+**Yöntem:** SVG background-image (tek tasarım, `rotate()` ile yön değişir)
+
+| Ok Yönü | CSS Selector | Transform |
+|---------|--------------|-----------|
+| Dikey (↓) | `.has-outputs::after` | yok (default) |
+| Sağa (→) | `.is-split ... ::before` | `rotate(-90deg)` |
+| Sola (←) | `.encoder-badge::before` | `rotate(90deg)` |
+
+**SVG kaynağı:** `--arrow-svg` değişkeni (`audio-flow.css`)
+
+# Split Layout
+
+Birden fazla output varsa yatay layout:
+
+```
+[Input]
+   ↓
+[Splitter] → [Branch B] → [Branch C]
+   ↓
+[Branch A]
+```
+
+CSS class: `.is-split` - JS tarafından eklenir (node.outputs.length > 1)
 
 # Hızlı Debug Checklist
 
-1. Çizgi tutarsız mı? → `border` kullanıyor mu kontrol et
-2. Kesişim bozuk mu? → Aynı formül mü kontrol et
-3. CSS fallback JS ile senkron mu?
+1. Ok görünmüyor mu? → `.has-outputs` class var mı kontrol et
+2. Split çalışmıyor mu? → `.is-split` class var mı kontrol et
+3. Ok yanlış yerde mi? → `--arrow-left` JS tarafından set ediliyor mu
+
+# Edge Cases
+
+## Null Label Guard
+Virtual node'larda (birden fazla root output) `node.label` null olabilir.
+`renderNode()` bunu handle ediyor (`audio-flow.js:779-781`):
+```javascript
+const labelHtml = node.label
+  ? `<span class="...">${escapeHtml(node.label)}</span>`
+  : '';
+```
+
+## Deep Nesting Overflow
+`.audio-flow` container'da `overflow-x: auto` aktif (`audio-flow.css:12`).
+Çok derin pipeline'larda (5+ seviye) yatay scroll devreye girer.
+
+## Cycle/Merge Detection
+- **Cycle:** `visited` Set ile yakalanır → null döner, render edilmez
+- **Merge (Diamond):** `globalSeen` ile first-win stratejisi
 
 # Yeni Node Ekleme
 
@@ -74,6 +103,7 @@ myNode: {
   connectionType: 'MyNode',
   category: 'effect',
   label: 'UI Adı',
+  tooltip: 'MyNodeDescription',
   getParam: (proc) => proc.value || null
 }
 ```

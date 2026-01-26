@@ -29,15 +29,18 @@ class PollingCollector extends BaseCollector {
 
   /**
    * Start the polling mechanism.
-   * Subclasses should call this in their `start()` method.
+   * Subclasses should call this in their start() hooks (e.g., _onStartComplete).
+   * Note: this.active is set by BaseCollector.start() template method,
+   * so we check pollIntervalId to detect if polling is already running.
    */
   async startPolling() {
-    if (this.active) {
+    // Guard: Check if polling is already running (not active flag, which is set by BaseCollector)
+    if (this.pollIntervalId !== null) {
       logger.warn(this.logPrefix, `Polling already active.`);
       return;
     }
 
-    this.active = true;
+    // Note: this.active is already true from BaseCollector.start() template
     this.isCollecting = false; // Reset guard on start
 
     // Call collectData immediately on start

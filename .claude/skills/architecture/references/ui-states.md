@@ -53,28 +53,93 @@ async function hideLockedTabInfo() {
 }
 ```
 
+## Console Drawer
+
+### Yapı
+
+```
+drawer-overlay (slide-up panel, %40 height)
+├── drawer-header
+│   ├── drawer-tabs (Console | Extension)
+│   └── console-actions (Copy All | Clear)
+├── console-toolbar
+│   ├── console-filters (All | Errors | Warnings | Info)
+│   └── Copy butonu (copyVisibleLogsBtn)
+├── drawer-tab-content#consoleLogsContent
+└── drawer-tab-content#extensionLogsContent
+```
+
+### Copy Butonları
+
+| Buton | ID | Konum | Davranış |
+|-------|-----|-------|----------|
+| **Copy All** | `copyAllLogsBtn` | drawer-header | TÜM loglar (Console + Extension, tüm level'lar) |
+| **Copy** | `copyVisibleLogsBtn` | console-toolbar | Görünen loglar (aktif tab + aktif filter) |
+
+### İlgili Fonksiyonlar (`popup.js`)
+
+```javascript
+// Tüm logları kopyalar (no filtering)
+async function copyAllLogs() {
+  const result = await chrome.storage.local.get('debug_logs');
+  const logs = result.debug_logs || [];
+  // Format ALL logs as plain text
+  const text = logs.map(log => `${time} [${log.prefix}] ${log.message}`).join('\n');
+  await navigator.clipboard.writeText(text);
+}
+
+// Filtrelenmiş logları kopyalar (respects tab + level)
+async function copyVisibleLogs() {
+  // Filter based on active tab (currentDrawerTab)
+  // Apply level filter (currentLogFilter)
+}
+
+// Tab'a göre log ayırma
+function renderDrawerLogs(logs, badgeCallback) {
+  const consoleLogs = logs.filter(l => l.prefix === 'Console');
+  const extensionLogs = logs.filter(l => l.prefix !== 'Console');
+  // ...
+}
+
+// Level filter uygulama
+function renderLogList(container, logs, emptyMessage) {
+  const filtered = currentLogFilter === 'all'
+    ? logs
+    : logs.filter(l => l.level === currentLogFilter);
+  // ...
+}
+```
+
+### Log Filtreleme State
+
+```javascript
+let currentLogFilter = 'all';       // 'all' | 'error' | 'warn' | 'info'
+let currentDrawerTab = 'console';   // 'console' | 'extension'
+let cachedLogs = [];                // Re-render için cache
+```
+
+### CSS Layout
+
+```css
+/* console-toolbar: filters sol, copy sağ */
+.console-toolbar {
+  display: flex;
+  justify-content: space-between;  /* Sol: filters, Sağ: copy */
+  align-items: center;
+}
+```
+
 ## Encoding Section
 
 OCP-compliant `ENCODER_DETECTORS` array pattern.
 
 ### DETECTION_LABELS Mapping
 
-Pattern değerlerini UI metne çevirir:
+Pattern değerlerini UI metne çevirir.
 
-```javascript
-// ⚠️ SYNC: EarlyHook.js'de yeni pattern → buraya ekle
-const DETECTION_LABELS = {
-  'audioworklet-config': { text: 'AudioWorklet (full)', icon: '✓', tooltip: '...' },
-  'audioworklet-init': { text: 'AudioWorklet (basic)', icon: '○', tooltip: '...' },
-  'audioworklet-deferred': { text: 'AudioWorklet (late)', icon: '◐', tooltip: '...' },
-  'direct': { text: 'Worker Hook (full)', icon: '✓', tooltip: '...' },
-  'nested': { text: 'Worker Hook (full)', icon: '✓', tooltip: '...' },
-  'worker-init': { text: 'Worker Hook (basic)', icon: '○', tooltip: '...' },
-  'worker-audio-init': { text: 'Worker (real-time)', icon: '◐', tooltip: '...' },
-  'audio-blob': { text: 'Blob (post-hoc)', icon: '◑', tooltip: '...' },
-  'unknown': { text: 'Detected', icon: '?', tooltip: '...' }
-};
-```
+**Tam liste:** `collectors/references/encoder-priority.md` → UI DETECTION_LABELS bölümü
+
+**Kaynak dosya:** `scripts/modules/encoding-ui.js`
 
 ### Detection Row Format
 
@@ -90,6 +155,103 @@ const unit = msValues.includes(enc.frameSize) || enc.frameSize < 100 ? 'ms' : 's
 // 20 → "20 ms", 960 → "960 samples"
 ```
 
+## Encoding Location Strategy
+
+### Mimari (OCP Pattern)
+
+Encoding badge lokasyonunu belirlemek için strategy pattern kullanılır.
+
+**Dosya:** `scripts/modules/encoding-location.js`
+
+```javascript
+ENCODING_LOCATION_STRATEGIES = [
+  { name: 'WasmEncoder', priority: 10, ... },
+  { name: 'MediaRecorderSynthesized', priority: 8, ... },
+  { name: 'PcmPassthrough', priority: 5, ... }
+];
+```
+
+### Strategy Priority & Davranış
+
+| Priority | Strategy | Detect Koşulu | Badge Lokasyonu |
+|----------|----------|---------------|-----------------|
+| 10 | `WasmEncoder` | encodingNodeId var + codec ≠ pcm/wav | Processor node |
+| 8 | `MediaRecorderSynthesized` | audioSource = 'synthesized' | Terminal node |
+| 5 | `PcmPassthrough` | codec = pcm/wav | Virtual terminal |
+
+### Veri Akışı
+
+```
+AudioContextCollector (blob oluşturulduğunda)
+    ↓
+detectedEncoder = { codec, container, ... }
+    ↓
+deriveEncodingOutput(data, connections, tree)
+    ↓
+PcmPassthrough.getLocation() → { location: 'virtual-terminal', codec, container }
+    ↓
+toRenderOptions() → { virtualTerminal: { codec, container } }
+    ↓
+renderAudioFlow(options.virtualTerminal)
+    ↓
+codecLabel = virtualTerminal.container.toUpperCase()  // "WAV"
+```
+
+### Virtual Terminal Ekleme
+
+PCM/WAV için connection graph'ta destination olmayabilir. Bu durumda sanal `Encoder(WAV)` node eklenir.
+
+```javascript
+// audio-flow.js
+if (virtualTerminal && !hasTerminalNode(root)) {
+  const lastNode = findLastFlowNode(root);  // Gerçek leaf node (monitor dahil)
+  const codecLabel = virtualTerminal.container?.toUpperCase() || 'PCM';
+  lastNode.outputs.push({
+    label: 'Encoder',
+    param: codecLabel,  // Dinamik: WAV, PCM, vb.
+    isVirtualTerminal: true
+  });
+}
+```
+
+### findLastFlowNode Davranışı
+
+**Kritik:** Monitor node'lar dahil TÜM node'ları takip eder.
+
+```javascript
+const findLastFlowNode = (node) => {
+  const allOutputs = node.outputs || [];  // Monitor filtresi YOK
+  if (allOutputs.length === 0) return node;
+  return findLastFlowNode(allOutputs[0]);
+};
+```
+
+**Neden?** Monitor (VU Meter) filtrelenirse virtual terminal yanlış yere eklenir:
+
+```
+❌ Monitor filtrelendi:
+Processor → [Encoder, VU Meter]  (split point)
+
+✅ Monitor dahil:
+Processor → VU Meter → Encoder   (seri bağlantı)
+```
+
+### Case Coverage
+
+| Case | Kayıt Esnasında | Kayıt Sonrası |
+|------|-----------------|---------------|
+| WASM (Opus, MP3) | `← Encoder` badge processor'da | Aynı |
+| MediaRecorder | - | Badge terminal'de |
+| PCM/WAV | Badge YOK | Virtual terminal en altta |
+
+### Edge Case'ler
+
+| Edge Case | Davranış | Risk |
+|-----------|----------|------|
+| Destination olan PCM/WAV | `location: 'processor'` | Düşük |
+| VU Meter olmadan PCM/WAV | Terminal = Processor | Doğru |
+| Split point | İlk dal takip edilir | Düşük |
+
 ## AudioContext Latency
 
 İki bileşenden hesaplanır:
@@ -104,47 +266,45 @@ const totalLatency = baseLatency + outputLatency;      // ~52ms
 
 ## Pipeline Rendering
 
-### Audio Path Tree (Nested)
+### Audio Path Flow (Workflow/Pipeline)
 
-Nested tree yapısı ile audio path görselleştirmesi:
+Ok işaretli workflow/pipeline görselleştirmesi:
 
 ```
-Microphone
-    │
-    ├── Processor (passthrough)
-    │        │
-    │        └── Volume (pass)
-    │                │
-    │                ├── Encoder (output)
-    │                │
-    │                └── Analyzer (2048pt)
+[Microphone]
+     ↓
+[Volume (+6dB)]
+     ↓
+[Encoder] → [Spectrum]
+     ↓
+[Speakers]
 ```
 
 **Dosyalar:**
-- `scripts/modules/audio-tree.js` - Tree rendering ve ölçüm fonksiyonları
-- `views/audio-tree.css` - Tree stilleri (CSS variables kullanır)
+- `scripts/modules/audio-flow.js` - Flow rendering ve ölçüm fonksiyonları
+- `views/audio-flow.css` - Flow stilleri (CSS variables kullanır)
 
 **Rendering Flow:**
-1. `renderAudioPathTree()` - Ana fonksiyon (audio-tree.js)
-2. `buildNestedTree()` - Pipeline'dan nested yapı oluşturur
-3. `renderNode()` - Recursive HTML render
-4. `measureTreeLabels()` - JS ile label genişliklerini ölçer (audio-tree.js, popup.js'den import edilir)
+1. `renderAudioFlow()` - Ana fonksiyon (audio-flow.js)
+2. `convertProcessorTreeToDisplayFlow()` - ProcessorTree'den display flow oluşturur
+3. `renderNode()` - Recursive HTML render (split detection dahil)
+4. `measureFlowLabels()` - JS ile label genişliklerini ölçer (audio-flow.js, popup.js'den import edilir)
 
 ### HTML Yapısı
 
 ```html
-<div class="audio-tree">
-  <div class="tree-node tree-root has-children">
-    <span class="tree-label has-tooltip" data-tooltip="...">
-      <span class="tree-label-text">Microphone</span>
+<div class="audio-flow">
+  <div class="flow-node flow-root has-outputs">
+    <span class="flow-label flow-tooltip" data-tooltip="...">
+      <span class="flow-label-text">Microphone</span>
     </span>
-    <div class="tree-children" style="--parent-center: 45px">
-      <div class="tree-node has-children">
-        <span class="tree-label has-tooltip" data-tooltip="...">
-          <span class="tree-label-text">Volume</span>
-          <span class="tree-param">(pass)</span>
+    <div class="flow-outputs">
+      <div class="flow-node has-outputs">
+        <span class="flow-label flow-tooltip" data-tooltip="...">
+          <span class="flow-label-text">Volume</span>
+          <span class="flow-param">(pass)</span>
         </span>
-        <!-- children... -->
+        <!-- outputs... -->
       </div>
     </div>
   </div>
@@ -153,110 +313,127 @@ Microphone
 
 ### JavaScript Ölçüm
 
-`measureTreeLabels()` fonksiyonu label genişliklerini ölçüp CSS variable olarak set eder:
+`measureFlowLabels()` fonksiyonu **sadece root node'un** label merkez pozisyonunu ölçüp container'a CSS variable olarak set eder. Tüm dikey oklar bu değeri kullanarak aynı dikey hizada kalır.
 
 ```javascript
-function measureTreeLabels() {
-  const treeNodes = document.querySelectorAll('.tree-node.has-children');
-  treeNodes.forEach(node => {
-    const labelText = node.querySelector('.tree-label-text');
-    const children = node.querySelector('.tree-children');
-    if (labelText && children) {
-      const labelWidth = labelText.getBoundingClientRect().width;
-      children.style.setProperty('--parent-center', `${labelWidth / 2}px`);
-    }
-  });
+function measureFlowLabels() {
+  const container = document.querySelector('.audio-flow');
+  const rootNode = container?.querySelector('.flow-node.flow-root');
+  const rootLabelText = rootNode?.querySelector('.flow-label-text');
+  if (!rootLabelText) return;
+
+  const labelTextRect = rootLabelText.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  const labelTextLeft = labelTextRect.left - containerRect.left;
+  const center = labelTextLeft + (labelTextRect.width / 2);
+
+  // Container'a set et - tüm child'lar inherit eder
+  container.style.setProperty('--main-arrow-left', `${Math.floor(center)}px`);
 }
 ```
 
-**Çağrı:** `updateUI()` sonunda `requestAnimationFrame(() => measureTreeLabels())`
+**Çağrı:** `updateUI()` sonunda `requestAnimationFrame(() => measureFlowLabels())`
 
 ### CSS Classes
 
 | Class | Amaç |
 |-------|------|
-| `.audio-tree` | Ana container, CSS variables tanımlar |
-| `.tree-node` | Her node wrapper |
-| `.tree-node.has-children` | Child'ı olan node (dikey çizgi için) |
-| `.tree-node.tree-root` | Kök node |
-| `.tree-node.tree-monitor` | Monitor/analyzer node (muted stil) |
-| `.tree-label` | Label wrapper (tooltip için) |
-| `.tree-label-text` | Sadece label metni (JS ölçümü için) |
-| `.tree-param` | Parantez içi parametre (muted stil) |
-| `.tree-children` | Alt node'lar container |
+| `.audio-flow` | Ana container, CSS variables tanımlar |
+| `.flow-node` | Her node wrapper |
+| `.flow-node.has-outputs` | Output'u olan node (dikey ok için) |
+| `.flow-node.flow-root` | Kök node |
+| `.flow-node.is-split` | Dallanma noktası (birden fazla output) |
+| `.flow-node.flow-monitor` | Monitor/analyzer node (muted stil) |
+| `.flow-label` | Label wrapper (tooltip için) |
+| `.flow-label-text` | Sadece label metni (JS ölçümü için) |
+| `.flow-param` | Parantez içi parametre (muted stil) |
+| `.flow-outputs` | Output node'lar container |
 
 ### CSS Variables
 
 ```css
-.audio-tree {
-  --tree-color: var(--text-muted);
-  --tree-unit: 17px;
-  --tree-line: 1px;
-  --tree-gap: 3px;
-  --stem-ratio: 1.25;  /* Dikey mesafe çarpanı */
+.audio-flow {
+  /* Spacing System (merkezi) */
+  --spacing-unit: 4px;
+  --spacing-xs: 4px;   /* arrow-gap */
+  --spacing-sm: 8px;
+  --spacing-md: 12px;  /* container padding */
+  --spacing-lg: 16px;  /* row height */
+  --spacing-xl: 20px;  /* split gap */
+
+  /* Semantic Aliases */
+  --flow-row-height: var(--spacing-lg);
+  --arrow-gap: var(--spacing-xs);
+  --split-gap: var(--spacing-xl);
+  --container-padding: var(--spacing-md);
+
+  /* Flow Core */
+  --flow-unit: 17px;
+  --flow-gap: 3px;
+  --main-arrow-left: 40px;  /* JS tarafından set edilir */
+
+  /* Arrow SVG */
+  --arrow-svg: url("data:image/svg+xml,...");  /* Aşağı bakan ok */
+  --arrow-icon-size: 12px;
+
+  /* Deep nesting koruması */
+  max-width: 100%;
+  overflow-x: auto;
+}
+```
+
+### Ok Render Yöntemi (SVG)
+
+Tek SVG tasarımı, `rotate()` ile yön değişir:
+
+```css
+/* Base - tüm oklar için ortak */
+.flow-node.has-outputs::after,
+.flow-node.is-split > .flow-outputs > .flow-node:not(:first-child)::before {
+  content: '';
+  width: var(--arrow-icon-size);
+  height: var(--arrow-icon-size);
+  background: var(--arrow-svg) no-repeat center;
 }
 
-.tree-children {
-  /* JS'ten gelen gerçek değer, fallback 40px */
-  margin-left: var(--parent-center, 40px);
+/* Dikey ok (↓) - output'u olan node'un altında */
+.flow-node.has-outputs::after {
+  left: var(--main-arrow-left, 40px);  /* JS'ten gelir */
+  transform: translateX(-50%);
+  /* SVG zaten aşağı bakıyor - rotate yok */
+}
+
+/* Yatay ok (→) - split'te yan output'lara */
+.flow-node.is-split > ... ::before {
+  transform: rotate(-90deg);  /* Aşağı → Sağa */
+}
+
+/* Encoder ok (←) */
+.encoder-badge::before {
+  transform: rotate(90deg);   /* Aşağı → Sola */
 }
 ```
 
-### Çizgi Kalınlık Tutarlılığı (Subpixel Fix)
+### Split Detection
 
-**Problem:** Yatay ve dikey çizgiler farklı kalınlıklarda görünüyordu.
-
-**Kök Neden:** Matematiksel senkronizasyon eksikliği:
-- Dikey çizgi: `lastChild.offsetTop + 8px` (JS hesaplamalı)
-- Yatay çizgi: CSS'te sabit `8px`
-- Label yüksekliği: `14px`, gerçek orta: `7px`
-- 1px fark → GPU anti-aliasing tutarsızlığı
-
-**Çözüm:** Her iki çizgi de aynı formülle hesaplanmalı:
+Birden fazla output varsa `is-split` class eklenir:
 
 ```javascript
-// measureTreeLabels() içinde - audio-tree.js
-const labelHeight = label.offsetHeight;  // 14px
-const horizontalTop = Math.round(labelHeight / 2);  // 7px
-child.style.setProperty('--horizontal-line-top', `${horizontalTop}px`);
+const isSplitPoint = hasOutputs && node.outputs.length > 1;
+if (isSplitPoint) classes.push('is-split');
 ```
 
-**CSS Variable:**
-```css
-/* audio-tree.css - .tree-children > .tree-node::before */
-top: var(--horizontal-line-top, 8px);  /* JS'ten gelir */
-```
+**Split Layout:**
+- İlk output dikey akışta kalır (ana dal)
+- Sonraki output'lar yatay olarak sağa dizilir
+- Her yan dal için `→` ok gösterilir
 
-**Kural:** Kesişen çizgiler için AYNI formül kullan = aynı anti-aliasing kararı.
-
-### Background vs Border Rendering (DPI Fix)
-
-**Problem:** 1px çizgiler DPI scaling'de rastgele farklı kalınlıkta görünüyordu.
-
-**Kök Neden:** Browser'ın farklı rendering yaklaşımları:
-- `background` + `width: 1px` → Browser bunu "kutu" olarak görüyor
-  - Subpixel pozisyonlarda antialiasing uyguluyor → rastgele kalınlık
-- `border: 1px solid` → Browser bunu "çizgi" olarak görüyor
-  - Border rendering: Otomatik piksel sınırına hizalama → tutarlı kalınlık
-
-**Çözüm:** Pseudo-element çizgilerde border kullan:
-```css
-/* ❌ Eski (tutarsız) */
-width: 1px;
-background: var(--tree-color);
-
-/* ✅ Yeni (tutarlı) */
-width: 0;  /* veya height: 0 yatay için */
-border-left: 1px solid var(--tree-color);  /* veya border-top */
-```
-
-**Kural:** CSS'te ince çizgiler için `border` kullan, `background` + `width/height` değil.
-
-### formatProcessorForTree() Return
+### formatProcessorForFlow() Return
 
 ```javascript
+// audio-flow.js
 return {
-  label: "Volume",       // AUDIO_NODE_DISPLAY_MAP'ten
+  label: "Volume",       // AUDIO_NODE_DISPLAY_MAP'ten (veya getLabel() varsa dinamik)
   param: "pass",         // getParam() fonksiyonundan
   tooltip: "GainNode"    // Teknik isim
 };
@@ -285,7 +462,7 @@ Dar genişlikte (< 400px) UI davranışı:
 |---------|--------|--------------|
 | `.rtc-columns` | 2 sütun | 1 sütun |
 | `.row-2col` | 2 sütun | 1 sütun (stacked) |
-| `.tree-label` | max-width: 200px | max-width: 120px |
+| `.flow-label` | max-width: 200px | max-width: 120px |
 | `.main-content` | grid-template-rows: 30% 70% | auto 1fr |
 
 ### Table Truncation Pattern
@@ -321,22 +498,28 @@ Flex container içinde truncation için `min-width: 0` gerekli:
 }
 ```
 
-### Tree Label Truncation
+### Flow Label Truncation
 
-Audio tree label'ları için genişlik sınırı:
+Audio flow label'ları için genişlik sınırı:
 
 ```css
-/* audio-tree.css */
-.tree-label {
+/* audio-flow.css */
+.flow-label {
   max-width: 200px;  /* Normal genişlik */
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;  /* Ok (::after) görünmesi için */
   white-space: nowrap;
 }
 
+.flow-label-text {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* popup.css - dar panel */
 @media (max-width: 400px) {
-  .tree-label {
-    max-width: 120px;  /* Dar panel */
+  .flow-label {
+    max-width: 120px;
   }
 }
 ```

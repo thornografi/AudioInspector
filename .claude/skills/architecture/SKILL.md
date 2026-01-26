@@ -87,6 +87,7 @@ await chrome.scripting.executeScript({
 | `CLEAR_INSPECTOR_DATA` | content/popup→background | DRY: Merkezi veri temizleme |
 | `AUTO_STOP_NEW_RECORDING` | page→content | İkinci kayıtta inspector'ı durdur |
 | `RECORDING_STATE` | early-inject→content | Kayıt durumu değişikliği (start/stop) |
+| `SIGNATURE_CHANGE` | early-inject→content | Audio path signature değişti (technology change) |
 
 ## Merkezi State Yönetimi (Centralized Approach)
 
@@ -156,6 +157,12 @@ Aşağıdaki konular için ilgili reference dosyasını oku:
   - Encoding section rendering
   - Pipeline/chain rendering
   - Constants mirroring (popup.js ↔ constants.js)
+
+- **Technology Change:** [references/technology-change.md](references/technology-change.md)
+  - Signature yapısı (processingPath, encodingType, outputPath)
+  - Değişiklik tespiti ve stop akışı
+  - Veri koruma davranışı (eski veriler korunur)
+  - Race condition prevention
 
 ## Klasör Yapısı
 

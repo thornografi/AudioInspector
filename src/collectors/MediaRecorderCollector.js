@@ -30,7 +30,7 @@ class MediaRecorderCollector extends BaseCollector {
   async initialize() {
     logger.info(this.logPrefix, 'Initializing MediaRecorderCollector');
     if (!window.MediaRecorder) {
-      logger.warn(this.logPrefix, `window.MediaRecorder is not available. MediaRecorderCollector cannot function.`);
+      logger.error(this.logPrefix, `window.MediaRecorder is not available. MediaRecorderCollector cannot function.`);
       return;
     }
 
@@ -258,17 +258,15 @@ class MediaRecorderCollector extends BaseCollector {
   }
 
   /**
-   * Start collector
-   * @returns {Promise<void>}
+   * Hook: Process early captures (MediaRecorders created before inspector started)
+   * This handles cases like veed.io where recording starts before user
+   * clicks "Start" in the extension
+   * @protected
+   * @override
+   * @returns {Promise<number>} Number of processed recorders
    */
-  async start() {
-    this.active = true;
-
-    // ═══════════════════════════════════════════════════════════════════
-    // Process early captures (MediaRecorders created before inspector started)
-    // This handles cases like veed.io where recording starts before user
-    // clicks "Start" in the extension
-    // ═══════════════════════════════════════════════════════════════════
+  async _processEarlyInstances() {
+    let processedCount = 0;
 
     // 1. Check early-inject.js captures first (MAIN world content script)
     // @ts-ignore
@@ -279,6 +277,7 @@ class MediaRecorderCollector extends BaseCollector {
         // Skip if already processed
         if (!this.activeRecorders.has(capture.instance)) {
           this._handleNewRecorder(capture.instance, [capture.stream, capture.options || {}]);
+          processedCount++;
         }
       }
     }
@@ -292,25 +291,21 @@ class MediaRecorderCollector extends BaseCollector {
           // Registry doesn't have stream/options, try to get from recorder
           const stream = entry.instance.stream;
           this._handleNewRecorder(entry.instance, [stream, {}]);
+          processedCount++;
         }
       }
     }
 
-    const totalProcessed = this.activeRecorders.size;
-    if (totalProcessed > 0) {
-      logger.info(this.logPrefix, `✅ Processed ${totalProcessed} MediaRecorder(s) total`);
-    } else {
-      logger.info(this.logPrefix, 'Started - listening for new MediaRecorder instances');
-    }
+    return processedCount;
   }
 
   /**
-   * Re-emit current data from active recorders
-   * Called when UI needs to be refreshed (e.g., after data reset)
+   * Hook: Re-emit active recorders
+   * @protected
+   * @override
+   * @returns {number} Number of recorders emitted
    */
-  reEmit() {
-    if (!this.active) return;
-
+  _reEmitActiveItems() {
     let emittedCount = 0;
     for (const [recorder, metadata] of this.activeRecorders.entries()) {
       // Skip inactive recorders (already stopped)
@@ -321,10 +316,7 @@ class MediaRecorderCollector extends BaseCollector {
       this.emit(EVENTS.DATA, metadata);
       emittedCount++;
     }
-
-    if (emittedCount > 0) {
-      logger.info(this.logPrefix, `Re-emitted ${emittedCount} recorder(s)`);
-    }
+    return emittedCount;
   }
 
   /**

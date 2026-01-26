@@ -80,7 +80,7 @@ async function injectPageScript(attempt = 1) {
 // DRY: Storage keys fetched from background.js (single source of truth)
 // Fallback array used until background.js responds (prevents race condition)
 // ═══════════════════════════════════════════════════════════════════════════════
-let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'detected_encoder', 'audio_connections', 'recording_active'];
+let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'detected_encoder', 'audio_connections'];
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DRY HELPER: Detected Encoder data merge with null-safe field preservation
@@ -144,13 +144,73 @@ function clearSessionData(callback) {
 let audioContextQueue = [];
 let isProcessingAudioContext = false;
 
+// ═══════════════════════════════════════════════════════════════════
+// IN-MEMORY INSPECTOR STATE FLAG (sync control for race condition prevention)
+// This flag is updated SYNCHRONOUSLY when STOP command arrives
+// Queue processing checks this flag BEFORE writing to storage
+// ═══════════════════════════════════════════════════════════════════
+let inspectorRunning = false;
+let softResetScheduled = false; // SOFT reset ile detected_encoder reset log çakışmasını önler
+
 function processAudioContextQueue() {
   if (isProcessingAudioContext || audioContextQueue.length === 0) return;
+
+  // ═══════════════════════════════════════════════════════════════════
+  // RACE CONDITION PREVENTION: Check if inspector is still enabled
+  // Clears queue and aborts if inspector was stopped (prevents stale writes)
+  // ═══════════════════════════════════════════════════════════════════
+  chrome.storage.local.get(['inspectorEnabled'], (enabledResult) => {
+    if (!enabledResult.inspectorEnabled) {
+      // Inspector stopped - clear queue and abort
+      const clearedCount = audioContextQueue.length;
+      audioContextQueue.length = 0;
+      isProcessingAudioContext = false;
+      if (clearedCount > 0) {
+        logContent(`🧹 Cleared ${clearedCount} queued items (inspector stopped)`);
+      }
+      return;
+    }
+
+    // Inspector still enabled - proceed with processing
+    processAudioContextQueueInternal();
+  });
+}
+
+function processAudioContextQueueInternal() {
+  // ═══════════════════════════════════════════════════════════════════
+  // SYNC CHECK: Abort if inspector stopped (race condition prevention)
+  // This check runs BEFORE any async operation
+  // ═══════════════════════════════════════════════════════════════════
+  if (!inspectorRunning) {
+    const clearedCount = audioContextQueue.length;
+    audioContextQueue.length = 0;
+    isProcessingAudioContext = false;
+    if (clearedCount > 0) {
+      logContent(`🧹 processAudioContextQueueInternal: Cleared ${clearedCount} items (inspector stopped)`);
+    }
+    return;
+  }
+
+  if (audioContextQueue.length === 0) {
+    isProcessingAudioContext = false;
+    return;
+  }
 
   isProcessingAudioContext = true;
   const queueItem = audioContextQueue.shift();
 
   chrome.storage.local.get(['audio_contexts'], (result) => {
+    // ═══════════════════════════════════════════════════════════════════
+    // SECOND SYNC CHECK: Abort if inspector stopped during async get
+    // This prevents writing stale data after STOP command
+    // ═══════════════════════════════════════════════════════════════════
+    if (!inspectorRunning) {
+      const clearedCount = audioContextQueue.length;
+      audioContextQueue.length = 0;
+      isProcessingAudioContext = false;
+      logContent(`🧹 processAudioContextQueueInternal: Aborted write (inspector stopped during async get)`);
+      return;
+    }
     let contexts = result.audio_contexts || [];
 
     // Handle audioWorklet updates (merge into existing context)
@@ -231,6 +291,17 @@ function processAudioContextQueue() {
       audio_contexts: contexts,
       lastUpdate: Date.now()
     }, () => {
+      // ═══════════════════════════════════════════════════════════════════
+      // RACE CONDITION FIX: Abort if inspector stopped during async set
+      // Set tamamlandı ama inspector artık durmuş - döngüyü durdur
+      // ═══════════════════════════════════════════════════════════════════
+      if (!inspectorRunning) {
+        audioContextQueue.length = 0;
+        isProcessingAudioContext = false;
+        logContent('🧹 Queue processing aborted (inspector stopped during set)');
+        return;  // Döngüyü durdur, processAudioContextQueue() çağırma
+      }
+
       if (chrome.runtime.lastError) {
         persistLogs(createLog('Content', `❌ audioContext SET error: ${chrome.runtime.lastError.message}`, 'error'));
       } else if (!queueItem._isWorkletUpdate) {
@@ -238,7 +309,8 @@ function processAudioContextQueue() {
       }
 
       isProcessingAudioContext = false;
-      processAudioContextQueue(); // Process next in queue
+      // Use main function to re-check inspectorEnabled before processing next
+      processAudioContextQueue();
     });
   });
 }
@@ -251,46 +323,102 @@ const storageHandler = (key, emoji, label) => (payload) => ({
 
 const MESSAGE_HANDLERS = {
   rtc_stats: storageHandler('rtc_stats', '📡', 'WebRTC stats'),
-  userMedia: storageHandler('user_media', '🎤', 'getUserMedia'),
+  user_media: storageHandler('user_media', '🎤', 'getUserMedia'),
 
-  // Special handler for audioContext - uses queue to prevent race conditions
-  audioContext: (payload) => {
-    persistLogs(createLog('Content', `🔊 audioContext queued: id=${payload?.contextId}, rate=${payload?.static?.sampleRate}`));
+  // Special handler for audio_contexts - uses queue to prevent race conditions
+  audio_contexts: (payload) => {
+    persistLogs(createLog('Content', `🔊 audio_contexts queued: id=${payload?.contextId}, rate=${payload?.static?.sampleRate}`));
     audioContextQueue.push({ ...payload, sourceTabId: currentTabId });
     processAudioContextQueue();
     return null; // Handled internally
   },
 
-  mediaRecorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
+  media_recorder: storageHandler('media_recorder', '🎙️', 'MediaRecorder'),
 
   // CANONICAL: Tüm encoder tespitleri bu handler'dan geçer (WASM, PCM, native)
   // AudioContextCollector hem URL pattern hem opus hook için buraya emit eder
   // popup.js bu storage key'den okur (tek doğru kaynak)
   // MERGE STRATEGY: Zengin field'ları koru, null override'i engelle
-  detectedEncoder: (() => {
+  detected_encoder: (() => {
     // In-memory session tracking to prevent race condition between reset and encoder data
     // When reset arrives, we track the new sessionId so concurrent encoder events
     // from the OLD session don't merge with stale storage data
     let currentSessionId = null;
 
     return (payload) => {
+      // ═══════════════════════════════════════════════════════════════════
+      // SYNC CHECK: Abort if inspector stopped (race condition prevention)
+      // Reset commands are still allowed (cleanup operation)
+      // ═══════════════════════════════════════════════════════════════════
+      if (!inspectorRunning && payload?.reset !== true) {
+        logContent('🚫 detected_encoder ignored (inspector stopped)');
+        return null;
+      }
+
       const incomingSessionId = Number.isInteger(payload?.sessionId) ? payload.sessionId : null;
 
       // New recording session signal: clear stale encoder info
       if (payload?.reset === true) {
-        // Update in-memory session tracker FIRST (sync, immediate)
-        if (incomingSessionId !== null) {
-          currentSessionId = incomingSessionId;
+        // SOFT reset tarafından handle edilecekse skip et (log karmaşasını önler)
+        if (softResetScheduled) {
+          persistLogs(createLog('Content', `⏭️ Encoder reset skipped (SOFT reset will handle)`));
+          return null;
         }
 
-        chrome.storage.local.remove(['detected_encoder'], () => {
-          if (chrome.runtime.lastError) {
-            persistLogs(createLog('Content', `❌ detected_encoder RESET error: ${chrome.runtime.lastError.message}`, 'error'));
-          } else {
-            persistLogs(createLog('Content', `🧹 detected_encoder cleared (session #${incomingSessionId})`));
+        // ═══════════════════════════════════════════════════════════════════
+        // RACE CONDITION FIX: Delay reset to allow SIGNATURE_CHANGE processing
+        //
+        // Problem: postMessage sırası garantili FIFO
+        //   1. detected_encoder (reset) - getUserMedia hook'ta emit
+        //   2. SIGNATURE_CHANGE - createScriptProcessor hook'ta emit
+        //
+        // Ama content.js'de detected_encoder handler ÖNCE çalışıyor (inspectorRunning=true)
+        // setTimeout ile geciktirerek SIGNATURE_CHANGE'in önce işlenmesini sağlıyoruz
+        // ═══════════════════════════════════════════════════════════════════
+        const resetSessionId = incomingSessionId; // Capture for closure
+
+        // ═══════════════════════════════════════════════════════════════════
+        // SESSION-AWARE RESET: Update session tracker IMMEDIATELY
+        // This prevents the 100ms delayed reset from deleting NEW session data
+        // Scenario: Reset scheduled → New recording starts → Reset fires → Deletes new data
+        // Fix: Update currentSessionId NOW, check in setTimeout before deleting
+        // ═══════════════════════════════════════════════════════════════════
+        if (resetSessionId !== null) {
+          currentSessionId = resetSessionId;
+        }
+
+        setTimeout(() => {
+          // ═══════════════════════════════════════════════════════════════════
+          // STALE RESET CHECK: Skip if session changed during 100ms delay
+          // This prevents deleting encoder data from a NEWER session
+          // Example: T+0ms reset(#1), T+20ms encoder(#2), T+100ms reset fires → skip
+          // ═══════════════════════════════════════════════════════════════════
+          if (currentSessionId !== resetSessionId) {
+            persistLogs(createLog('Content', `⏭️ Stale reset ignored (session ${resetSessionId} → ${currentSessionId})`));
+            return;
           }
-        });
-        return null;
+
+          // ═══════════════════════════════════════════════════════════════════
+          // ASYNC RACE CONDITION CHECK (Line 352'deki sync check'ten FARKLI)
+          // - Line 352: Sync filtering (non-reset encoder data, inspector stopped ise)
+          // - Bu kontrol: Async race condition (100ms window içinde stop edilebilir)
+          // Inspector, setTimeout scheduling ile execution arasında stop edilebilir.
+          // ═══════════════════════════════════════════════════════════════════
+          if (!inspectorRunning) {
+            persistLogs(createLog('Content', `⏭️ Encoder reset skipped (inspector stopped)`));
+            return;
+          }
+
+          chrome.storage.local.remove(['detected_encoder'], () => {
+            if (chrome.runtime.lastError) {
+              persistLogs(createLog('Content', `❌ detected_encoder RESET error: ${chrome.runtime.lastError.message}`, 'error'));
+            } else {
+              persistLogs(createLog('Content', `🧹 detected_encoder cleared (session #${resetSessionId})`));
+            }
+          });
+        }, 100); // 100ms - SIGNATURE_CHANGE processing için yeterli
+
+        return null; // Hemen dön, gecikmiş reset arka planda çalışacak
       }
 
       // CRITICAL: If incoming session is older than our tracked session, ignore it
@@ -327,6 +455,15 @@ const MESSAGE_HANDLERS = {
           detected_encoder: { ...merged, sourceTabId: currentTabId },
           lastUpdate: Date.now()
         }, () => {
+          // ═══════════════════════════════════════════════════════════════════
+          // RACE CONDITION PROTECTION: Abort if stopped during async operation
+          // Prevents stale encoder data from being logged after technology change
+          // ═══════════════════════════════════════════════════════════════════
+          if (!inspectorRunning) {
+            logContent(`🚫 Encoder write completed but inspector stopped (async race)`);
+            return;
+          }
+
           if (chrome.runtime.lastError) {
             persistLogs(createLog('Content', `❌ detected_encoder SET error: ${chrome.runtime.lastError.message}`, 'error'));
           } else {
@@ -342,11 +479,11 @@ const MESSAGE_HANDLERS = {
     };
   })(),
 
-  // Special handler for audioWorklet - uses queue to prevent race conditions with audioContext
+  // Special handler for audio_worklet - uses queue to prevent race conditions with audio_contexts
   // NOTE: AudioContextCollector already handles worklets with proper context matching
   // This handler receives worklets and queues them for merge into audio_contexts
-  audioWorklet: (payload) => {
-    persistLogs(createLog('Content', `🎛️ audioWorklet queued: contextId=${payload?.contextId}, url=${payload?.moduleUrl}`));
+  audio_worklet: (payload) => {
+    persistLogs(createLog('Content', `🎛️ audio_worklet queued: contextId=${payload?.contextId}, url=${payload?.moduleUrl}`));
 
     // Queue worklet update with special flag for queue processor
     audioContextQueue.push({
@@ -363,7 +500,16 @@ const MESSAGE_HANDLERS = {
 
   // Handler for audio connection graph (AudioNode.connect() calls)
   // Stores the audio graph topology showing who connects to whom
-  audioConnection: (payload) => {
+  audio_connections: (payload) => {
+    // ═══════════════════════════════════════════════════════════════════
+    // SYNC CHECK: Abort if inspector stopped (race condition prevention)
+    // Clear commands (isClear) are still allowed for cleanup
+    // ═══════════════════════════════════════════════════════════════════
+    if (!inspectorRunning && !payload?.isClear) {
+      logContent(`🚫 audio_connections ignored (inspector stopped)`);
+      return null;
+    }
+
     chrome.storage.local.get(['audio_connections'], (result) => {
       // Store all connections array directly from payload
       const connections = payload.allConnections || [];
@@ -447,6 +593,8 @@ window.addEventListener('message', (event) => {
            // Execute action based on background.js decision
            switch (response.action) {
                case 'START':
+                   logContent('📥 Received START from background');
+
                    // Refresh/navigation/session restore: always start with a clean session (data + logs)
                    clearSessionData(() => {
                        persistLogs(createLog('Content', 'Background decision: START'));
@@ -456,10 +604,17 @@ window.addEventListener('message', (event) => {
                            type: 'SET_ENABLED',
                           enabled: true
                       }, '*');
+                      // Set flag AFTER SET_ENABLED sent - prevents premature queue processing
+                      inspectorRunning = true;
+                      logContent('✅ inspectorRunning = true (after SET_ENABLED)');
                   });
                   break;
 
                case 'STOP':
+                   // Set flag FIRST (sync) - blocks queue processing
+                   inspectorRunning = false;
+                   logContent('🛑 inspectorRunning = false (background STOP)');
+
                    // Just ensure page script is stopped (background already updated storage)
                    persistLogs(createLog('Content', 'Background decision: STOP'));
                    window.postMessage({
@@ -474,6 +629,16 @@ window.addEventListener('message', (event) => {
                    // Do nothing - inspector should stay stopped
                    persistLogs(createLog('Content', `Background decision: ${response.action || 'NONE'}`));
                    logContent('Inspector READY but staying stopped (background decision: NONE)');
+
+                   // Notify early-inject.js if another tab is locked (prevents unnecessary capture)
+                   if (response.isOtherTabLocked) {
+                       window.postMessage({
+                           __audioPipelineInspector: true,
+                           type: 'SET_TAB_LOCKED_ELSEWHERE',
+                           locked: true
+                       }, '*');
+                       logContent('🔒 Another tab is locked - capture disabled');
+                   }
                    break;
            }
        });
@@ -503,6 +668,84 @@ window.addEventListener('message', (event) => {
     }, () => {
       persistLogs(createLog('Content', `🎬 Recording state: ${active ? 'ACTIVE' : 'STOPPED'}`));
     });
+    return;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // SIGNATURE CHANGE: Technology change detection for smart session reset
+  // Triggered by early-inject.js when audio path signature changes
+  // - HARD reset: Technology changed (ScriptProcessor → AudioWorklet)
+  // - SOFT reset: Same tech, new recording (only encoder data cleared)
+  // ═══════════════════════════════════════════════════════════════════
+  if (event.data.type === 'SIGNATURE_CHANGE') {
+    const { resetType, sessionId, signature, previousSignature } = event.data.payload || {};
+
+    if (resetType === 'hard') {
+      // ═══════════════════════════════════════════════════════════════════
+      // HARD RESET: Technology changed - STOP inspector, user must restart
+      // UI shows "Stopped" with banner, lockedTab preserved for data review
+      // inspectorRunning flag set FIRST (sync) to block in-flight queue processing
+      // ═══════════════════════════════════════════════════════════════════
+      const prevPath = previousSignature?.processingPath || 'unknown';
+      const newPath = signature?.processingPath || 'unknown';
+      persistLogs(createLog('Content', `🔄 Technology change: ${prevPath} → ${newPath} (session #${sessionId})`));
+
+      // 0. SET FLAG FIRST (sync) - blocks any in-flight queue processing
+      inspectorRunning = false;
+      logContent('🛑 inspectorRunning = false (technology change, sync)');
+
+      // 1. IMMEDIATELY disable hooks (race condition prevention)
+      window.postMessage({
+        __audioPipelineInspector: true,
+        type: 'DISABLE_HOOKS'
+      }, '*');
+
+      // 2. Clear pending queue (stale data)
+      const clearedCount = audioContextQueue.length;
+      audioContextQueue.length = 0;
+      if (clearedCount > 0) {
+        logContent(`🧹 Cleared ${clearedCount} queued items on technology change`);
+      }
+
+      // 3. DON'T clear storage - data should be preserved for review
+      // User can view old session data until they manually restart
+      logContent('📦 Storage preserved (technology change - data kept for review)');
+
+      // 4. STOP collectors (PageInspector stops, earlyCaptures cleared)
+      window.postMessage({
+        __audioPipelineInspector: true,
+        type: 'SET_ENABLED',
+        enabled: false
+      }, '*');
+
+      // 5. Merkezi stop: lockedTab korunur, eski veriler UI'da görünür
+      chrome.runtime.sendMessage({ type: 'STOP_INSPECTOR', reason: 'technology_change' }, () => {
+        persistLogs(createLog('Content', `⏹️ Inspector stopped due to technology change (data preserved)`));
+      });
+      // NO RESTART - user must manually press Start
+    } else if (resetType === 'soft') {
+      // SOFT RESET: Same technology, new recording - only clear encoder data
+      // Flag set: detected_encoder reset handler'ı skip edecek (log karmaşasını önler)
+      softResetScheduled = true;
+
+      chrome.storage.local.remove(['detected_encoder'], () => {
+        softResetScheduled = false; // Flag temizle - sonraki normal reset'ler çalışabilsin
+
+        if (chrome.runtime.lastError) {
+          persistLogs(createLog('Content', `❌ SOFT reset error: ${chrome.runtime.lastError.message}`, 'error'));
+        } else {
+          persistLogs(createLog('Content', `🔃 SOFT reset: encoder cleared (session #${sessionId})`));
+        }
+
+        // Forward to page script for collector reset
+        window.postMessage({
+          __audioPipelineInspector: true,
+          type: 'COLLECTOR_RESET',
+          payload: { resetType: 'soft', sessionId }
+        }, '*');
+      });
+    }
+    // 'none' type doesn't need any action
     return;
   }
 
@@ -545,29 +788,77 @@ window.addEventListener('message', (event) => {
  * @param {Object} message - The message object containing enabled state
  */
 async function handleSetEnabled(message) {
-  // Persist state (await to ensure completion)
+  // ═══════════════════════════════════════════════════════════════════
+  // STOP PATH: Immediate hook disable + queue cleanup (race condition fix)
+  // DISABLE_HOOKS is sent BEFORE SET_ENABLED to ensure hooks stop immediately
+  // inspectorRunning flag is set FIRST (sync) to block any in-flight queue processing
+  // ═══════════════════════════════════════════════════════════════════
+  if (!message.enabled) {
+    // 0. SET FLAG FIRST (sync) - blocks any in-flight queue processing
+    inspectorRunning = false;
+    logContent('🛑 inspectorRunning = false (sync)');
+
+    // 1. IMMEDIATELY disable hooks in page script (before any async operations)
+    window.postMessage({
+      __audioPipelineInspector: true,
+      type: 'DISABLE_HOOKS'
+    }, '*');
+
+    // 2. Clear pending queue items (stale data from hooks that were in-flight)
+    const clearedCount = audioContextQueue.length;
+    audioContextQueue.length = 0;
+    if (clearedCount > 0) {
+      logContent(`🧹 Cleared ${clearedCount} queued items on STOP`);
+    }
+
+    // 3. Update storage state
+    await chrome.storage.local.set({ inspectorEnabled: false });
+
+    // 4. Add log and forward stop command
+    persistLogs(createLog('Content', '⏸️ Inspector stopped'));
+    window.postMessage({
+      __audioPipelineInspector: true,
+      type: 'SET_ENABLED',
+      enabled: false
+    }, '*');
+    return;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // START PATH: Clear stale data, then enable
+  // TIMING: Same as INSPECTOR_READY START handler for consistency
+  // 1. Clear session data
+  // 2. Send SET_ENABLED to page script
+  // 3. Set inspectorRunning = true (AFTER data cleared)
+  // This prevents queue processing from writing data WHILE clearSessionData runs
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Persist state first (await to ensure completion)
   await chrome.storage.local.set({ inspectorEnabled: message.enabled });
 
   // Clear session artifacts on start (data + logs) - AWAIT completion to prevent race condition
   // This ensures old encoding data/logs are fully removed before collectors start emitting new data
-  if (message.enabled) {
-    await new Promise(resolve => {
-      clearSessionData(() => {
-        logContent('🧹 Cleared stale session data from storage');
-        resolve();
-      });
+  await new Promise(resolve => {
+    clearSessionData(() => {
+      logContent('🧹 Cleared stale session data from storage');
+      resolve();
     });
-  }
+  });
 
   // Add explicit log to storage
-  persistLogs(createLog('Content', message.enabled ? '✅ Inspector started' : '⏸️ Inspector stopped'));
+  persistLogs(createLog('Content', '✅ Inspector started'));
 
-  // NOW forward enable/disable command to page script (after storage operations complete)
+  // NOW forward enable command to page script (after storage operations complete)
   window.postMessage({
     __audioPipelineInspector: true,
     type: 'SET_ENABLED',
-    enabled: message.enabled
+    enabled: true
   }, '*');
+
+  // Set flag AFTER SET_ENABLED sent and data cleared - prevents premature queue processing
+  // This matches INSPECTOR_READY START handler timing for consistency
+  inspectorRunning = true;
+  logContent('✅ inspectorRunning = true (after clearSessionData)');
 }
 
 // Listen for messages from popup (main frame only to prevent duplication)
@@ -595,3 +886,28 @@ if (window.self === window.top) {
   // Avoid injecting into iframes - top frame acts as single source of truth
   injected = true;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// STORAGE LISTENER: Watch for lockedTab changes
+// When another tab's lock is released, enable capture in this tab
+// ═══════════════════════════════════════════════════════════════════
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return;
+
+  // lockedTab changed - check if lock was released
+  if (changes.lockedTab) {
+    const newLockedTab = changes.lockedTab.newValue;
+    const oldLockedTab = changes.lockedTab.oldValue;
+
+    // Lock released (lockedTab removed or changed to different tab)
+    if (!newLockedTab || (oldLockedTab && newLockedTab.id !== oldLockedTab.id)) {
+      // If we were locked out before, now we're free to capture
+      window.postMessage({
+        __audioPipelineInspector: true,
+        type: 'SET_TAB_LOCKED_ELSEWHERE',
+        locked: false
+      }, '*');
+      logContent('🔓 Tab lock released - capture enabled');
+    }
+  }
+});

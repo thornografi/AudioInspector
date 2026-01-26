@@ -8,7 +8,9 @@
 const DATA_STORAGE_KEYS = [
   'rtc_stats', 'user_media', 'audio_contexts',
   'audio_worklet', 'media_recorder', 'detected_encoder',  // Renamed from wasm_encoder
-  'audio_connections', 'recording_active'
+  'audio_connections'
+  // NOTE: recording_active intentionally excluded - it's read by updateUI() but
+  // should NOT trigger storage.onChanged re-renders (causes flickering)
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -17,7 +19,7 @@ const DATA_STORAGE_KEYS = [
 // This prevents option drift and ensures consistent behavior.
 // ═══════════════════════════════════════════════════════════════════════════════
 const CLEANUP_PRESETS = Object.freeze({
-  FULL: { includeLogs: true, includeAutoStopReason: false, dataOnly: false, logsOnly: false },
+  FULL: { includeLogs: true, includeAutoStopReason: true, dataOnly: false, logsOnly: false },
   FULL_WITH_AUTOSTOP: { includeLogs: true, includeAutoStopReason: true, dataOnly: false, logsOnly: false },
   DATA_ONLY: { includeLogs: false, includeAutoStopReason: false, dataOnly: true, logsOnly: false },
   SESSION: { includeLogs: true, includeAutoStopReason: false, dataOnly: true, logsOnly: false },
@@ -124,7 +126,7 @@ function addLog(entry) {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('AudioInspector installed');
+  console.log('[Background] AudioInspector installed');
 
   // Reset ALL state on install/update - clean slate
   clearInspectorData(CLEANUP_PRESETS.FULL_WITH_AUTOSTOP);
@@ -136,7 +138,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // Chrome başlatıldığında temizlik - browser restart sonrası clean slate
 chrome.runtime.onStartup.addListener(() => {
-  console.log('AudioInspector startup - cleaning previous session');
+  console.log('[Background] AudioInspector startup - cleaning previous session');
   clearInspectorData(CLEANUP_PRESETS.FULL_WITH_AUTOSTOP);
   updateBadge(false);
 });
@@ -219,9 +221,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
       if (oldOrigin !== newOrigin) {
         console.log(`[Background] 🔄 Cross-origin navigation (${oldOrigin} → ${newOrigin}), inspector durduruluyor`);
-        chrome.storage.local.set({ autoStoppedReason: 'navigation' });
-        clearInspectorData();
-        updateBadge(false);
+        // Merkezi stop: lockedTab korunur, veri review için görünür kalır
+        stopInspector('navigation');
       }
     } catch (e) {
       // URL parse hatası - güvenli tarafta kal, inspector'ı durdur
@@ -254,14 +255,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       // Farklı tab'a geçildi, otomatik durdur
       console.log('[Background] Tab switched during monitoring - auto-stopping');
 
-      // Auto-stop reason set et
-      await chrome.storage.local.set({ autoStoppedReason: 'tab_switch' });
-
-      // Inspector'ı durdur (lockedTab kalsın - review için)
-      await chrome.storage.local.remove(['inspectorEnabled']);
-
-      // Badge'i güncelle
-      updateBadge(false);
+      // Merkezi stop: lockedTab korunur, veri review için görünür kalır
+      await stopInspector('tab_switch');
 
       // Locked tab'e mesaj gönder (page script'i durdur)
       try {
@@ -310,9 +305,9 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
     if (lockedTab.windowId !== windowId) {
       // Farklı pencereye geçildi
       console.log('[Background] 🪟 Window switched during monitoring - auto-stopping');
-      await chrome.storage.local.set({ autoStoppedReason: 'window_switch' });
-      await chrome.storage.local.remove(['inspectorEnabled']);
-      updateBadge(false);
+
+      // Merkezi stop: lockedTab korunur, veri review için görünür kalır
+      await stopInspector('window_switch');
 
       // Kilitli tab'e mesaj gönder (page script'i durdur)
       try {
@@ -328,26 +323,89 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CENTRALIZED STOP FUNCTION
+// All stop operations go through here to ensure consistent behavior
+// lockedTab is PRESERVED for data review - only cleared on full cleanup
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Merkezi stop fonksiyonu - TÜM stop işlemleri buradan geçer
+ * @param {string} [reason] - Auto-stop sebebi (yoksa manual stop)
+ * @returns {Promise<void>}
+ */
+async function stopInspector(reason) {
+  // 1. Auto-stop reason varsa set et (banner için)
+  if (reason) {
+    await chrome.storage.local.set({ autoStoppedReason: reason });
+  }
+
+  // 2. Inspector'ı durdur (lockedTab KORUNUR - veri review için)
+  await chrome.storage.local.remove(['inspectorEnabled']);
+
+  // 3. Badge yönetimi:
+  // - reason varsa → notification badge (storage.onChanged tarafından)
+  // - reason yoksa → badge temizlenir (aşağıdaki storage.onChanged tarafından)
+  console.log(`[Background] stopInspector called: reason=${reason || 'manual'}`);
+}
+
 // Update badge based on inspector state (simpler than icon switching)
-function updateBadge(isMonitoring) {
-  if (isMonitoring) {
-    // Show blue dot badge when monitoring (not red - that implies recording)
-    chrome.action.setBadgeText({ text: '●' });
-    chrome.action.setBadgeBackgroundColor({ color: '#007aff' }); // iOS blue - monitoring, not recording
-    console.log('[Background] ✅ Badge set to monitoring');
-  } else {
-    // Clear badge when stopped
-    chrome.action.setBadgeText({ text: '' });
-    console.log('[Background] ✅ Badge cleared (stopped)');
+// Supports three states: monitoring, notification, none
+// Also supports legacy boolean calls (true → monitoring, false → none)
+function updateBadge(state) {
+  // Legacy boolean support for existing calls
+  if (state === true) state = 'monitoring';
+  if (state === false) state = 'none';
+
+  switch (state) {
+    case 'monitoring':
+      // Blue dot - inspector actively monitoring
+      chrome.action.setBadgeText({ text: '●' });
+      chrome.action.setBadgeBackgroundColor({ color: '#007aff' });
+      console.log('[Background] ✅ Badge set to monitoring');
+      break;
+    case 'notification':
+      // Orange exclamation - inspector stopped but has notification
+      chrome.action.setBadgeText({ text: '!' });
+      chrome.action.setBadgeBackgroundColor({ color: '#ff9500' });
+      console.log('[Background] ✅ Badge set to notification');
+      break;
+    case 'none':
+    default:
+      // Clear badge
+      chrome.action.setBadgeText({ text: '' });
+      console.log('[Background] ✅ Badge cleared');
+      break;
   }
 }
 
-// Listen for inspector state changes
+// Listen for inspector state changes and auto-stop notifications
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === 'local' && changes.inspectorEnabled) {
-    const isEnabled = changes.inspectorEnabled.newValue === true;
-    console.log('[Background] Inspector state changed:', isEnabled);
-    updateBadge(isEnabled);
+  if (areaName === 'local') {
+    // Inspector enabled state changed
+    if (changes.inspectorEnabled) {
+      const isEnabled = changes.inspectorEnabled.newValue === true;
+      console.log('[Background] Inspector state changed:', isEnabled);
+      if (isEnabled) {
+        updateBadge('monitoring');
+      } else if (!changes.autoStoppedReason) {
+        // Manual stop (no auto-stop reason in same batch) → clear badge
+        // Auto-stop will set autoStoppedReason which triggers notification badge below
+        updateBadge('none');
+      }
+    }
+
+    // Auto-stop reason set - show notification badge (persists until popup opened)
+    if (changes.autoStoppedReason?.newValue) {
+      updateBadge('notification');
+    }
+
+    // Auto-stop reason removed → clear badge (if not actively monitoring)
+    if (changes.autoStoppedReason && !changes.autoStoppedReason.newValue) {
+      chrome.storage.local.get(['inspectorEnabled'], (r) => {
+        if (!r.inspectorEnabled) updateBadge('none');
+      });
+    }
   }
 });
 
@@ -381,7 +439,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleInjection(tabId, sender.frameId)
       .then(() => sendResponse({ success: true, tabId })) // Include tabId in response (sync alternative)
       .catch((err) => {
-        console.error('Injection failed:', err);
+        console.error('[Background] Injection failed:', err);
         sendResponse({ success: false, error: err.message });
       });
 
@@ -423,6 +481,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GET_STORAGE_KEYS') {
     sendResponse({ keys: DATA_STORAGE_KEYS });
     return false; // sync response
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CENTRALIZED STOP: All scripts can request stop via message
+  // This ensures consistent behavior (lockedTab preserved, badge managed)
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (message.type === 'STOP_INSPECTOR') {
+    stopInspector(message.reason).then(() => {
+      sendResponse({ success: true });
+    });
+    return true; // async response
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -505,17 +574,15 @@ async function handlePageReady(message, sender) {
     // Tab ID check
     if (tabId !== lockedTabId) {
       console.log(`[Background] Different tab (${tabId} != ${lockedTabId}) - not restoring`);
-      return { action: 'NONE', reason: 'different_tab' };
+      return { action: 'NONE', reason: 'different_tab', isOtherTabLocked: true };
     }
 
     // Origin check - same tab but navigated to different site
     if (origin !== lockedOrigin) {
       console.log(`[Background] 🔄 Origin changed (${lockedOrigin} → ${origin}) - auto-stopping`);
 
-      // Auto-stop and clear state
-      await chrome.storage.local.set({ autoStoppedReason: 'origin_change' });
-      await clearInspectorData();
-      updateBadge(false);
+      // Merkezi stop: lockedTab korunur, veri review için görünür kalır
+      await stopInspector('origin_change');
 
       return { action: 'STOP', reason: 'origin_change' };
     }
@@ -527,6 +594,9 @@ async function handlePageReady(message, sender) {
     await chrome.storage.local.set({
       lockedTab: { id: tabId, url, title }
     });
+
+    // autoStoppedReason temizlemesi artık checkTabLock()'ta merkezi olarak yapılıyor
+    // (inspector çalışıyorsa banner gösterilmez, durmuşsa gösterilir ve temizlenir)
 
     return { action: 'START', reason: 'session_restore' };
   }
@@ -542,7 +612,9 @@ async function handlePageReady(message, sender) {
     await clearInspectorData(CLEANUP_PRESETS.FULL_WITH_AUTOSTOP);
   }
 
-  return { action: 'NONE', reason: 'inspector_stopped' };
+  // Check if another tab is locked (for early-inject capture decision)
+  const isOtherTabLocked = result.lockedTab && result.lockedTab.id !== tabId;
+  return { action: 'NONE', reason: 'inspector_stopped', isOtherTabLocked };
 }
 
 /**

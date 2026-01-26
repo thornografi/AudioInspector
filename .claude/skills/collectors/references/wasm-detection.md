@@ -112,7 +112,9 @@ if (message.type === 'config' && message.config?.opus) {
 
 ## Pattern Priority System
 
-Düşük öncelikli pattern'ler yüksek önceliklileri ezemez:
+Düşük öncelikli pattern'ler yüksek önceliklileri ezemez.
+
+**Detaylı priority sistemi:** `collectors/references/encoder-priority.md`
 
 ```javascript
 const PATTERN_PRIORITY = {

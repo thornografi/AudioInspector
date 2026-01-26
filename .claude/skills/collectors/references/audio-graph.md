@@ -95,13 +95,13 @@ _handleAudioConnection(connection, shouldEmit = true)
 ## UI Rendering
 
 > **Not:** `renderChain()` fonksiyonu kaldırıldı (v2025.01).
-> Audio bağlantıları artık nested tree yapısı ile `renderAudioPathTree()` içinde gösteriliyor.
+> Audio bağlantıları artık workflow/pipeline yapısı ile `renderAudioFlow()` içinde gösteriliyor.
 
-**Audio Path Tree Rendering:**
-- `audio-tree.js` → `renderAudioPathTree(processorTree, monitors, inputSource)` fonksiyonu
+**Audio Path Flow Rendering:**
+- `audio-flow.js` → `renderAudioFlow(processorTree, monitors, inputSource)` fonksiyonu
 - `deriveProcessorTreeFromConnections()` ile graph'tan processor tree çıkarılır (renderers.js)
-- `AUDIO_NODE_DISPLAY_MAP` ile node türleri kullanıcı dostu isimlere çevrilir (audio-tree.js)
-- `audio-tree.js` → `measureTreeLabels()` ile label genişlikleri ölçülüp CSS variable set edilir
+- `AUDIO_NODE_DISPLAY_MAP` ile node türleri kullanıcı dostu isimlere çevrilir (audio-flow.js)
+- `audio-flow.js` → `measureFlowLabels()` ile label genişlikleri ölçülüp CSS variable set edilir
 - `peak`, `level`, `meter`, `vu` içeren processor isimleri "VU Meter" olarak etiketlenir
 
 **İlgili Referans:** `architecture/references/ui-states.md` → Pipeline Rendering bölümü

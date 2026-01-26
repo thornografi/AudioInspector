@@ -353,7 +353,7 @@ class AudioContextCollector extends BaseCollector {
   _syncMethodCallsToExistingContext(instance, methodCalls) {
     const ctxData = this.activeContexts.get(instance);
     if (!ctxData) {
-      logger.warn(this.logPrefix, 'Cannot sync methodCalls - context not in activeContexts');
+      logger.error(this.logPrefix, 'Cannot sync methodCalls - context not in activeContexts');
       return;
     }
 
@@ -490,7 +490,7 @@ class AudioContextCollector extends BaseCollector {
             logger.info(this.logPrefix, `ScriptProcessor created: buffer=${bufferSize}, in=${inputChannels}ch, out=${outputChannels}ch (context: ${ctxData.contextId})`);
       } else {
            // Context gerçekten null veya undefined (iframe/cross-origin)
-           logger.warn(this.logPrefix, `ScriptProcessor created but context is ${node.context === null ? 'null' : 'undefined'}`);
+           logger.info(this.logPrefix, `ScriptProcessor created but context is ${node.context === null ? 'null' : 'undefined'} (orphan)`);
 
            // Emit as orphan data (yeni yapıda)
            const now = Date.now();
@@ -983,8 +983,43 @@ class AudioContextCollector extends BaseCollector {
           blobSize: encoderInfo.blobSize, // Blob size in bytes (for bitrate calc)
           mimeType: encoderInfo.mimeType, // MIME type from Blob
           wavBitDepth: encoderInfo.wavBitDepth, // WAV bit depth (16, 24, 32 for PCM)
-          linkedContextId  // Context bağlantısı (null olabilir)
+          linkedContextId,  // Context bağlantısı (null olabilir)
+          // Node-level tracking: which node is encoding (for tree visualization)
+          encodingNodeId: encoderInfo.encodingNodeId || null,
+          encodingNodeType: encoderInfo.encodingNodeType || null,
+          matchConfidence: encoderInfo.matchConfidence || null
       };
+
+      // ─────────────────────────────────────────────────────────────────
+      // Worker path heuristic: Find encoding ScriptProcessor when nodeId unknown
+      // AudioWorklet path provides nodeId directly; Worker path needs heuristic
+      // ─────────────────────────────────────────────────────────────────
+      if (!encoderData.encodingNodeId && encoderInfo.source !== 'audioworklet-port') {
+        // @ts-ignore - global function from early-inject.js
+        const spResult = window.__findEncodingScriptProcessor?.(linkedContextId);
+        if (spResult) {
+          encoderData.encodingNodeId = spResult.nodeId;
+          encoderData.encodingNodeType = 'scriptProcessor';
+          encoderData.matchConfidence = spResult.confidence;
+          logger.info(this.logPrefix, `🔧 Encoding node matched via ScriptProcessor heuristic: ${spResult.nodeId} (${spResult.confidence})`);
+        }
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      // AudioWorklet fallback heuristic for passthrough/WAV case
+      // If ScriptProcessor heuristic failed, try AudioWorklet
+      // This handles cases where port.postMessage() is never called
+      // ─────────────────────────────────────────────────────────────────
+      if (!encoderData.encodingNodeId) {
+        // @ts-ignore - global function from early-inject.js
+        const workletResult = window.__findEncodingAudioWorklet?.(linkedContextId);
+        if (workletResult) {
+          encoderData.encodingNodeId = workletResult.nodeId;
+          encoderData.encodingNodeType = 'audioWorkletNode';
+          encoderData.matchConfidence = workletResult.confidence;
+          logger.info(this.logPrefix, `🔧 Encoding node matched via AudioWorklet heuristic: ${workletResult.processorName} (${workletResult.confidence})`);
+        }
+      }
 
       // Store current encoder data for priority comparison
       this.currentEncoderData = encoderData;
@@ -1347,6 +1382,13 @@ class AudioContextCollector extends BaseCollector {
 
   /**
    * Start collector
+   *
+   * NOTE: Overrides BaseCollector.start() entirely due to complex initialization:
+   * - WeakSet deduplication for earlyCaptures vs registry
+   * - Multiple methodCalls sync phases
+   * - Pending encoder data emission
+   * - Early connections and AudioWorkletNodes sync
+   * @override
    * @returns {Promise<void>}
    */
   async start() {
@@ -1370,7 +1412,14 @@ class AudioContextCollector extends BaseCollector {
 
     // 1. Clear activeContexts Map (our internal state)
     const previousSize = this.activeContexts.size;
-    this.currentEncoderData = null; // Clear encoder pattern priority state
+    // ═══════════════════════════════════════════════════════════════════
+    // CRITICAL: Clear BOTH encoder data references to prevent stale data
+    // - currentEncoderData: Pattern priority comparison state
+    // - pendingEncoderData: Encoder detected before collector active
+    // Without this, pendingEncoderData from previous session could leak
+    // ═══════════════════════════════════════════════════════════════════
+    this.currentEncoderData = null;
+    this.pendingEncoderData = null;
     this.activeContexts.clear();
     // Keep counter in sync with global context ID map to avoid duplicates
     const win = /** @type {any} */ (window);
@@ -1571,6 +1620,10 @@ class AudioContextCollector extends BaseCollector {
   /**
    * Re-emit current data from active contexts and connections
    * Called when UI needs to be refreshed (e.g., after data reset)
+   *
+   * NOTE: Overrides BaseCollector.reEmit() entirely because this collector
+   * emits both contexts AND connections (multiple data types in single reEmit).
+   * @override
    */
   reEmit() {
     if (!this.active) return;
@@ -1602,6 +1655,71 @@ class AudioContextCollector extends BaseCollector {
       });
       logger.info(this.logPrefix, `Re-emitted ${this.audioConnections.length} audio connection(s)`);
     }
+  }
+
+  /**
+   * Reset session state when technology changes or new recording starts
+   * Called by PageInspector when COLLECTOR_RESET message is received
+   *
+   * @override
+   * @param {'hard' | 'soft' | 'none'} resetType - Type of reset
+   * @param {number} sessionId - New recording session ID
+   */
+  resetSession(resetType, sessionId) {
+    if (!this.active) return;
+
+    // Update session ID
+    if (Number.isInteger(sessionId) && sessionId >= 0) {
+      this.recordingSessionId = sessionId;
+    }
+
+    // Always clear encoder state (both hard and soft reset)
+    this.currentEncoderData = null;
+    this.pendingEncoderData = null;
+
+    if (resetType === 'hard') {
+      // HARD RESET: Technology changed - clear all pipeline state
+      logger.info(this.logPrefix, `🔄 Technology change: clearing pipeline state (session #${sessionId})`);
+
+      // Clear audio connections
+      this.audioConnections = [];
+
+      // Clear pending worklets
+      this.pendingWorklets = [];
+
+      // Clear processors from all active contexts
+      for (const [ctx, ctxData] of this.activeContexts) {
+        if (ctx.state !== 'closed' && ctxData.pipeline) {
+          ctxData.pipeline.processors = [];
+          ctxData.pipeline.timestamp = Date.now();
+        }
+      }
+
+      // Emit empty connections (clears UI)
+      this.emit(EVENTS.DATA, {
+        type: DATA_TYPES.AUDIO_CONNECTION,
+        timestamp: Date.now(),
+        allConnections: []
+      });
+
+      // Re-emit contexts with empty processors (updates UI)
+      for (const [ctx, ctxData] of this.activeContexts) {
+        if (ctx.state !== 'closed') {
+          this.emit(EVENTS.DATA, ctxData);
+        }
+      }
+    } else {
+      // SOFT RESET: Same technology, only encoder state cleared (already done above)
+      logger.info(this.logPrefix, `🔃 SOFT reset: encoder state cleared (session #${sessionId})`);
+    }
+
+    // Emit encoder reset signal to content.js
+    this.emit(EVENTS.DATA, {
+      type: DATA_TYPES.DETECTED_ENCODER,
+      reset: true,
+      sessionId: this.recordingSessionId,
+      timestamp: Date.now()
+    });
   }
 
   /**

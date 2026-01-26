@@ -41,13 +41,14 @@ audio-inspector/
 │   └── modules/              # UI modülleri (popup.js için)
 │       ├── helpers.js        # DRY helper fonksiyonlar
 │       ├── renderers.js      # UI render fonksiyonları
-│       ├── encoder-ui.js     # ENCODING section logic
-│       └── audio-tree.js     # Audio path tree rendering
+│       ├── encoding-ui.js    # ENCODING section logic
+│       ├── audio-flow.js     # Audio path flow/pipeline rendering
+│       └── report-generator.js  # Text report export (UI → TXT)
 │
 ├── views/                    # UI dosyaları
 │   ├── popup.html            # Popup HTML
 │   ├── popup.css             # Popup stil
-│   └── audio-tree.css        # Audio tree stilleri
+│   └── audio-flow.css        # Audio flow/pipeline stilleri
 ├── images/                   # İkonlar
 └── manifest.json             # Manifest V3
 ```
@@ -63,7 +64,9 @@ audio-inspector/
 | storage.onChanged, async patterns | architecture | `references/patterns.md` |
 | Tab kilitleme, refresh modal | architecture | `references/tab-locking.md` |
 | Banner states, encoding UI, pipeline | architecture | `references/ui-states.md` |
-| Tree rendering, çizgi hizalama | architecture | `references/ui-states.md` |
+| Flow rendering, ok hizalama, split | architecture | `references/ui-states.md` |
+| Encoding location strategy, virtual terminal | architecture | `references/ui-states.md` |
+| Technology change, signature değişikliği | architecture | `references/technology-change.md` |
 | CSS variables, pixel-perfect | architecture | - |
 | Yeni collector yazma | collectors | - |
 | DATA_TYPES, ApiHook kullanımı | collectors | - |
@@ -80,9 +83,9 @@ audio-inspector/
 ### DRY (Don't Repeat Yourself)
 - **Yeni kod yazmadan önce mevcut yardımcıları kontrol et**
   - CSS: `popup.css` → `.has-tooltip`, CSS değişkenleri
-  - CSS: `audio-tree.css` → `.audio-tree`, tree stilleri
+  - CSS: `audio-flow.css` → `.audio-flow`, flow/pipeline stilleri
   - JS: `scripts/modules/helpers.js` → `formatWorkletName()`, `capitalizeFirst()`, `extractCodecName()`
-  - JS: `scripts/modules/audio-tree.js` → `renderAudioPathTree()`, `measureTreeLabels()`
+  - JS: `scripts/modules/audio-flow.js` → `renderAudioFlow()`, `measureFlowLabels()`
   - JS: `ApiHook.js`, `constants.js` → API hooking, veri sabitleri
 - Tekrar eden değerler → `constants.js` veya CSS değişkeni
 

@@ -1,9 +1,9 @@
 /**
- * audio-tree.js - Audio Path Tree Rendering Module
+ * audio-flow.js - Audio Path Flow/Pipeline Rendering Module
  *
- * Self-contained audio tree visualization component.
+ * Self-contained workflow/pipeline visualization component.
  * Dependencies: helpers.js (escapeHtml, capitalizeFirst, formatWorkletName)
- * CSS: audio-tree.css
+ * CSS: audio-flow.css
  *
  * Contains:
  * - AUDIO_NODE_DISPLAY_MAP: Merkezi node config (connectionType, category, label, tooltip)
@@ -12,11 +12,11 @@
  * - getNodeTypesByCategory(): Kategori bazlı node listesi
  * - getEffectNodeTypes(): Effect kategorisindeki node'lar (lazy)
  * - invalidateConnectionTypeCache(): Cache temizleme (yeni node türü eklenirse)
- * - formatProcessorForTree(): Format processor for tree display
- * - renderAudioPathTree(): Render audio path as nested ASCII tree
- * - measureTreeLabels(): Measure label widths for vertical line positioning
+ * - formatProcessorForFlow(): Format processor for flow display
+ * - renderAudioFlow(): Render audio path as workflow pipeline
+ * - measureFlowLabels(): Measure label widths for arrow positioning
  *
- * CSS Selectors (TREE_SELECTORS, TREE_CLASSES): Regresyon koruması için sabitler
+ * CSS Selectors (FLOW_SELECTORS, FLOW_CLASSES): Regresyon koruması için sabitler
  */
 
 import {
@@ -26,43 +26,57 @@ import {
 } from './helpers.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// TREE SABİTLERİ (CSS ile Senkron)
+// FLOW SABİTLERİ (CSS ile Senkron)
 // ═══════════════════════════════════════════════════════════════════════════════
-// Bu değerler CSS (audio-tree.css) ile senkron tutulmalıdır.
+// Bu değerler CSS (audio-flow.css) ile senkron tutulmalıdır.
 // Değişiklik yapılırsa her iki dosya da güncellenmelidir.
 
-const TREE_DEFAULTS = {
-  LABEL_HEIGHT: 14,  // CSS .tree-label { height: 14px } ve line-height: 14px
-  TREE_UNIT: 17,     // CSS .audio-tree { --tree-unit: 17px }
-  TREE_GAP: 3        // CSS .audio-tree { --tree-gap: 3px }
+const FLOW_DEFAULTS = {
+  LABEL_HEIGHT: 14,  // CSS .flow-label { height: 14px } ve line-height: 14px
+  FLOW_UNIT: 17,     // CSS .audio-flow { --flow-unit: 17px }
+  FLOW_GAP: 3        // CSS .audio-flow { --flow-gap: 3px }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CSS SELECTOR SABİTLERİ (Regresyon Koruması)
 // ═══════════════════════════════════════════════════════════════════════════════
-// Bu sabitler CSS (audio-tree.css) ile senkron tutulmalıdır.
+// Bu sabitler CSS (audio-flow.css) ile senkron tutulmalıdır.
 // Class ismi değişikliği hem CSS hem JS tarafında yapılmalıdır.
 
-const TREE_SELECTORS = {
-  TREE_CONTAINER: '.audio-tree',
-  NODE_WITH_CHILDREN: '.tree-node.has-children',
-  LABEL: '.tree-label',
-  LABEL_TEXT: '.tree-label-text',
-  CHILDREN: '.tree-children',
-  DIRECT_CHILD_NODES: ':scope > .tree-node'
+const FLOW_SELECTORS = {
+  CONTAINER: '.audio-flow',
+  NODE_WITH_OUTPUTS: '.flow-node.has-outputs',
+  LABEL: '.flow-label',
+  LABEL_TEXT: '.flow-label-text',
+  OUTPUTS: '.flow-outputs',
+  DIRECT_OUTPUT_NODES: ':scope > .flow-node'
 };
 
 // CSS Class isimleri (renderNode'da kullanılır)
-const TREE_CLASSES = {
-  TREE_CONTAINER: 'audio-tree',
-  NODE: 'tree-node',
-  ROOT: 'tree-root',
-  HAS_CHILDREN: 'has-children',
-  MONITOR: 'tree-monitor',
-  LABEL: 'tree-label',
-  LABEL_TEXT: 'tree-label-text',
-  PARAM: 'tree-param',
-  CHILDREN: 'tree-children'
+const FLOW_CLASSES = {
+  CONTAINER: 'audio-flow',
+  NODE: 'flow-node',
+  ROOT: 'flow-root',
+  HAS_OUTPUTS: 'has-outputs',
+  SPLIT: 'is-split',  // Birden fazla output (dallanma noktası)
+  MONITOR: 'flow-monitor',
+  ENCODING_NODE: 'encoding-node',  // Node-level encoding indicator
+  LABEL: 'flow-label',
+  LABEL_TEXT: 'flow-label-text',
+  PARAM: 'flow-param',
+  OUTPUTS: 'flow-outputs'
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TERMINAL NODE LABELS (Encoding Durumuna Göre)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Terminal node (destination) label'ları:
+// - Encoding aktifse (PCM/WAV, MediaRecorder) → ENCODING label
+// - Yoksa → DEFAULT label (speakers output)
+
+const TERMINAL_NODE_LABELS = {
+  DEFAULT: 'Speakers',   // Normal playback destination
+  ENCODING: 'Encoder'    // When terminal node is doing encoding (PCM/WAV, MediaRecorder)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -456,13 +470,13 @@ function getInputSourceTooltip(inputSource) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// TREE FORMATTING
+// FLOW FORMATTING
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Format processor for tree display
+ * Format processor for flow display
  */
-export function formatProcessorForTree(proc) {
+export function formatProcessorForFlow(proc) {
   const mapping = AUDIO_NODE_DISPLAY_MAP[proc.type];
 
   if (mapping) {
@@ -487,17 +501,23 @@ export function formatProcessorForTree(proc) {
   };
 }
 
+// Backward compatibility alias
+export const formatProcessorForTree = formatProcessorForFlow;
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// AUDIO PATH TREE RENDERING
+// AUDIO PATH FLOW RENDERING
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * ProcessorTreeNode yapısından display tree node'u oluştur
+ * ProcessorTreeNode yapısından display flow node'u oluştur
  * @param {Object} treeNode - deriveProcessorTreeFromConnections() çıktısı
  * @param {Set} nodeIdsSeen - Merge point detection için
- * @returns {Object|null} - Display tree node
+ * @param {string|null} encodingNodeId - Node-level encoding indicator
+ * @param {string|null} encoderCodec - Encoder codec type for param display
+ * @param {boolean} isMediaRecorderEncoding - MediaRecorder terminal encoding flag
+ * @returns {Object|null} - Display flow node
  */
-function convertProcessorTreeToDisplayTree(treeNode, nodeIdsSeen) {
+function convertProcessorTreeToDisplayFlow(treeNode, nodeIdsSeen, encodingNodeId = null, encoderCodec = null, isMediaRecorderEncoding = false) {
   if (!treeNode) return null;
 
   // Merge point: Bu nodeId daha önce işlendi
@@ -510,53 +530,84 @@ function convertProcessorTreeToDisplayTree(treeNode, nodeIdsSeen) {
 
   // Terminal node (destination)
   if (treeNode.terminalType) {
-    const isEncoder = treeNode.terminalType === 'encoder';
+    // ═══════════════════════════════════════════════════════════════════════
+    // DYNAMIC TERMINAL LABEL (Strategy Pattern ile belirlenir)
+    // - MediaRecorder encoding: Terminal = "Encoder" (API-level encoding)
+    // - Diğer durumlar: Terminal = "Speakers" (connection graph'tan)
+    // ═══════════════════════════════════════════════════════════════════════
+    const isEncodingAtTerminal = isMediaRecorderEncoding;
+    const terminalLabel = isEncodingAtTerminal
+      ? TERMINAL_NODE_LABELS.ENCODING
+      : TERMINAL_NODE_LABELS.DEFAULT;
+
+    // Debug log: terminal node label seçimi
+    console.log('[Audio Flow] Terminal node created:', {
+      terminalType: treeNode.terminalType,
+      isMediaRecorderEncoding,
+      isEncodingAtTerminal,
+      terminalLabel
+    });
+
     return {
-      label: isEncoder ? 'Encoder' : 'Speakers',
-      param: isEncoder ? 'output' : null,
-      tooltip: isEncoder ? 'MediaStreamAudioDestinationNode' : 'AudioDestinationNode',
-      children: []
+      label: terminalLabel,
+      param: 'output',
+      tooltip: treeNode.terminalType === 'encoder'
+        ? 'MediaStreamAudioDestinationNode'
+        : 'AudioDestinationNode',
+      outputs: [],
+      isEncodingNode: isEncodingAtTerminal  // CSS styling için
     };
   }
 
   // Virtual root (processor: null, children var)
   if (!treeNode.processor && treeNode.children && treeNode.children.length > 0) {
-    // Children'ları direkt döndür (virtual root'u atla)
-    const convertedChildren = [];
+    // Output'ları direkt döndür (virtual root'u atla)
+    const convertedOutputs = [];
     for (const child of treeNode.children) {
-      const converted = convertProcessorTreeToDisplayTree(child, nodeIdsSeen);
-      if (converted) convertedChildren.push(converted);
+      const converted = convertProcessorTreeToDisplayFlow(child, nodeIdsSeen, encodingNodeId, encoderCodec, isMediaRecorderEncoding);
+      if (converted) convertedOutputs.push(converted);
     }
-    if (convertedChildren.length === 0) return null;
-    if (convertedChildren.length === 1) return convertedChildren[0];
+    if (convertedOutputs.length === 0) return null;
+    if (convertedOutputs.length === 1) return convertedOutputs[0];
 
-    // Birden fazla child - virtual node olarak döndür
-    return { label: null, children: convertedChildren, isVirtual: true };
+    // Birden fazla output - virtual node olarak döndür
+    return { label: null, outputs: convertedOutputs, isVirtual: true };
   }
 
   // Normal processor node
   if (treeNode.processor) {
-    const formatted = formatProcessorForTree(treeNode.processor);
+    const formatted = formatProcessorForFlow(treeNode.processor);
     const isMonitor = treeNode.processor.type === 'analyser';
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ENCODING NODE DETECTION (Dinamik - Strategy Pattern ile belirlenir)
+    // encodingNodeId → encoding-location.js tarafından hesaplanır
+    // ═══════════════════════════════════════════════════════════════════════
+    const isEncodingNode = encodingNodeId && treeNode.nodeId === encodingNodeId;
+
+    // Encoder codec is shown in Encoder terminal node, not in processor param
+    const finalParam = formatted.param;
 
     const displayNode = {
       label: formatted.label,
-      param: formatted.param,
+      param: finalParam,
       tooltip: formatted.tooltip,
-      children: [],
-      isMonitor
+      outputs: [],
+      isMonitor,
+      isEncodingNode,  // Node-level encoding indicator (for CSS styling)
+      nodeId: treeNode.nodeId  // Preserve for debugging
     };
 
-    // Children'ları işle
+    // Output'ları işle
     if (treeNode.children && treeNode.children.length > 0) {
       for (const child of treeNode.children) {
-        const converted = convertProcessorTreeToDisplayTree(child, nodeIdsSeen);
+        const converted = convertProcessorTreeToDisplayFlow(child, nodeIdsSeen, encodingNodeId, encoderCodec, isMediaRecorderEncoding);
         if (converted) {
-          // Virtual node ise children'larını ekle
-          if (converted.isVirtual && converted.children) {
-            displayNode.children.push(...converted.children);
+          // Virtual node ise output'larını ekle
+          if (converted.isVirtual && converted.outputs) {
+            displayNode.outputs.push(...converted.outputs);
           } else {
-            displayNode.children.push(converted);
+            displayNode.outputs.push(converted);
           }
         }
       }
@@ -569,7 +620,7 @@ function convertProcessorTreeToDisplayTree(treeNode, nodeIdsSeen) {
 }
 
 /**
- * Render Audio Path as nested ASCII tree with tooltips
+ * Render Audio Path as workflow pipeline with arrow connectors
  *
  * İki input formatını destekler:
  * 1. Array (backward compat): mainProcessors = [{type, nodeId, ...}, ...]
@@ -578,8 +629,32 @@ function convertProcessorTreeToDisplayTree(treeNode, nodeIdsSeen) {
  * @param {Array|Object} mainProcessors - Linear array veya ProcessorTreeNode
  * @param {Array} monitors - Analyser node'ları (sadece array mode'da kullanılır)
  * @param {string} inputSource - 'microphone' | 'remote' | etc.
+ * @param {Object} options - Rendering options
+ * @param {string|null} options.encodingNodeId - Node ID that is doing encoding (highlighted in flow)
+ * @param {string|null} options.encoderCodec - Encoder codec type (e.g., 'opus', 'mp3', 'pcm')
+ * @param {boolean} options.isMediaRecorderEncoding - MediaRecorder terminal encoding flag
+ * @param {Object|null} options.virtualTerminal - Virtual terminal node config (for PCM/WAV)
+ * @param {string} options.virtualTerminal.codec - Codec name
+ * @param {string} options.virtualTerminal.container - Container format
  */
-export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
+export function renderAudioFlow(mainProcessors, monitors, inputSource, options = {}) {
+  const {
+    encodingNodeId = null,
+    encoderCodec = null,
+    isMediaRecorderEncoding = false,
+    virtualTerminal = null
+  } = options;
+
+  // Debug log: terminal node label mantığı için
+  console.log('[Audio Flow] renderAudioFlow options:', {
+    isMediaRecorderEncoding,
+    encodingNodeId,
+    encoderCodec,
+    virtualTerminal,
+    inputSource,
+    expectedTerminal: isMediaRecorderEncoding ? 'Encoder' : (virtualTerminal ? 'Virtual Encoder' : 'Speakers')
+  });
+
   // Empty check
   const isArray = Array.isArray(mainProcessors);
   const isEmpty = isArray
@@ -591,24 +666,44 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
   }
 
   /**
-   * ProcessorTreeNode yapısından tree oluştur (yeni mod)
+   * ProcessorTreeNode yapısından flow oluştur (yeni mod)
    */
   const buildFromProcessorTree = (processorTree) => {
     const rootLabel = inputSource ? capitalizeFirst(inputSource) : 'Source';
     const rootTooltip = getInputSourceTooltip(inputSource);
-    const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
+    const root = { label: rootLabel, tooltip: rootTooltip, outputs: [], isRoot: true };
 
     if (!processorTree) return root;
 
     const nodeIdsSeen = new Set();
-    const converted = convertProcessorTreeToDisplayTree(processorTree, nodeIdsSeen);
+    const converted = convertProcessorTreeToDisplayFlow(processorTree, nodeIdsSeen, encodingNodeId, encoderCodec, isMediaRecorderEncoding);
 
     if (converted) {
-      // Virtual node ise children'larını root'a ekle
-      if (converted.isVirtual && converted.children) {
-        root.children.push(...converted.children);
+      // Virtual node ise output'larını root'a ekle
+      if (converted.isVirtual && converted.outputs) {
+        root.outputs.push(...converted.outputs);
       } else {
-        root.children.push(converted);
+        root.outputs.push(converted);
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VIRTUAL TERMINAL NODE (PCM/WAV - connection graph'ta destination yok)
+    // Strategy pattern ile belirlenen virtualTerminal varsa → sanal Encoder node ekle
+    // ═══════════════════════════════════════════════════════════════════════
+    if (virtualTerminal && !hasTerminalNode(root)) {
+      const lastNode = findLastFlowNode(root);
+      if (lastNode) {
+        const codecLabel = virtualTerminal.container?.toUpperCase() || virtualTerminal.codec?.toUpperCase() || 'PCM';
+        lastNode.outputs.push({
+          label: TERMINAL_NODE_LABELS.ENCODING,
+          param: codecLabel,
+          tooltip: 'Audio encoding output (PCM/WAV)',
+          outputs: [],
+          isEncodingNode: true,
+          isVirtualTerminal: true
+        });
+        console.log('[Audio Flow] Virtual terminal added:', codecLabel);
       }
     }
 
@@ -616,12 +711,45 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
   };
 
   /**
-   * Linear array'den tree oluştur (eski mod - backward compat)
+   * Flow tree'de terminal node var mı kontrol et
+   */
+  const hasTerminalNode = (node) => {
+    if (!node) return false;
+    if (node.outputs && node.outputs.length === 0 && !node.isRoot && !node.isMonitor) {
+      // Leaf node (output yok) ve monitor değil → potential terminal
+      return true;
+    }
+    if (node.outputs) {
+      return node.outputs.some(child => hasTerminalNode(child));
+    }
+    return false;
+  };
+
+  /**
+   * Flow tree'nin son (leaf) node'unu bul
+   * Virtual terminal eklemek için kullanılır (monitor dahil tüm node'lar)
+   */
+  const findLastFlowNode = (node) => {
+    if (!node) return null;
+
+    const allOutputs = node.outputs || [];
+
+    if (allOutputs.length === 0) {
+      // Bu node'un output'u yok → bu son node (leaf)
+      return node.isRoot ? null : node;
+    }
+
+    // İlk output'u takip et (sıralama render sırasında yapılır)
+    return findLastFlowNode(allOutputs[0]);
+  };
+
+  /**
+   * Linear array'den flow oluştur (eski mod - backward compat)
    */
   const buildFromLinearArray = () => {
     const rootLabel = inputSource ? capitalizeFirst(inputSource) : 'Source';
     const rootTooltip = getInputSourceTooltip(inputSource);
-    const root = { label: rootLabel, tooltip: rootTooltip, children: [], isRoot: true };
+    const root = { label: rootLabel, tooltip: rootTooltip, outputs: [], isRoot: true };
 
     const chainProcessors = (mainProcessors || []).filter(p => p.type !== 'mediaStreamSource');
 
@@ -629,15 +757,15 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
     let lastProcessorNode = root;
 
     chainProcessors.forEach((proc) => {
-      const formatted = formatProcessorForTree(proc);
+      const formatted = formatProcessorForFlow(proc);
       const node = {
         label: formatted.label,
         param: formatted.param,
         tooltip: formatted.tooltip,
-        children: []
+        outputs: []
       };
 
-      currentParent.children.push(node);
+      currentParent.outputs.push(node);
       lastProcessorNode = node;
       currentParent = node;
     });
@@ -646,57 +774,87 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
       label: 'Encoder',
       param: 'output',
       tooltip: null,  // Self-explanatory, no tooltip needed
-      children: []
+      outputs: []
     };
 
     const analyzerNodes = (monitors || []).map((mon) => {
-      const formatted = formatProcessorForTree(mon);
+      const formatted = formatProcessorForFlow(mon);
       return {
         label: formatted.label,
         param: formatted.param,
         tooltip: formatted.tooltip,
-        children: [],
+        outputs: [],
         isMonitor: true
       };
     });
 
-    lastProcessorNode.children.push(encoderNode);
-    analyzerNodes.forEach(an => lastProcessorNode.children.push(an));
+    lastProcessorNode.outputs.push(encoderNode);
+    analyzerNodes.forEach(an => lastProcessorNode.outputs.push(an));
 
     return root;
   };
 
-  // Input tipine göre tree oluştur
-  const tree = isArray
+  // Input tipine göre flow oluştur
+  const flow = isArray
     ? buildFromLinearArray()
     : buildFromProcessorTree(mainProcessors);
 
   const renderNode = (node, isRoot = false) => {
-    const hasChildren = node.children && node.children.length > 0;
+    const hasOutputs = node.outputs && node.outputs.length > 0;
+    const isSplitPoint = hasOutputs && node.outputs.length > 1;
 
     // CSS class'ları sabitlerden al (regresyon koruması)
-    const classes = [TREE_CLASSES.NODE];
-    if (isRoot) classes.push(TREE_CLASSES.ROOT);
-    if (hasChildren) classes.push(TREE_CLASSES.HAS_CHILDREN);
-    if (node.isMonitor) classes.push(TREE_CLASSES.MONITOR);
+    const classes = [FLOW_CLASSES.NODE];
+    if (isRoot) classes.push(FLOW_CLASSES.ROOT);
+    if (hasOutputs) classes.push(FLOW_CLASSES.HAS_OUTPUTS);
+    if (isSplitPoint) classes.push(FLOW_CLASSES.SPLIT);
+    if (node.isMonitor) classes.push(FLOW_CLASSES.MONITOR);
+    if (node.isEncodingNode) classes.push(FLOW_CLASSES.ENCODING_NODE);
 
-    // Label ve param ayri elementler - JS olcumu icin gerekli
-    const labelHtml = `<span class="${TREE_CLASSES.LABEL_TEXT}">${escapeHtml(node.label)}</span>`;
+    // Label ve param ayrı elementler - JS ölçümü için gerekli
+    // Guard: Virtual node'larda label null olabilir
+    const labelHtml = node.label
+      ? `<span class="${FLOW_CLASSES.LABEL_TEXT}">${escapeHtml(node.label)}</span>`
+      : '';
     const paramHtml = node.param
-      ? `<span class="${TREE_CLASSES.PARAM}">(${escapeHtml(node.param)})</span>`
+      ? `<span class="${FLOW_CLASSES.PARAM}">(${escapeHtml(node.param)})</span>`
+      : '';
+    // Encoding badge: encoding yapan node'un yanına ← Encoder göster
+    // Badge sadece label "Encoder" olmayan node'lar için
+    // (Terminal node label="Encoder" olduğunda badge gereksiz - çift gösterim önlenir)
+    const showEncoderBadge = node.isEncodingNode && node.label !== TERMINAL_NODE_LABELS.ENCODING;
+    const encoderBadgeHtml = showEncoderBadge
+      ? '<span class="encoder-badge">Encoder</span>'
       : '';
 
     const hasValidTooltip = node.tooltip && String(node.tooltip).trim().length > 0;
-    const labelClass = hasValidTooltip ? `${TREE_CLASSES.LABEL} tree-tooltip` : TREE_CLASSES.LABEL;
+    const labelClass = hasValidTooltip ? `${FLOW_CLASSES.LABEL} flow-tooltip` : FLOW_CLASSES.LABEL;
     const tooltipAttr = hasValidTooltip ? ` data-tooltip="${escapeHtml(node.tooltip)}"` : '';
 
     let html = `<div class="${classes.join(' ')}">`;
-    html += `<span class="${labelClass}"${tooltipAttr}>${labelHtml}${paramHtml}</span>`;
+    html += `<span class="${labelClass}"${tooltipAttr}>${labelHtml}${paramHtml}${encoderBadgeHtml}</span>`;
 
-    if (hasChildren) {
-      html += `<div class="${TREE_CLASSES.CHILDREN}">`;
-      node.children.forEach(child => {
-        html += renderNode(child, false);
+    if (hasOutputs) {
+      // Outputs sıralaması: ana akış önce, monitorlar sona
+      // Bu sayede split point'te dikey akış doğru dalı takip eder
+      const sortedOutputs = [...node.outputs].sort((a, b) => {
+        // 1. Monitor node'lar (VU Meter, Spectrum) HER ZAMAN sona
+        // Bu check önce yapılmalı - monitor node'lar yan dal olarak gösterilmeli
+        if (a.isMonitor && !b.isMonitor) return 1;
+        if (!a.isMonitor && b.isMonitor) return -1;
+
+        // 2. hasOutputs olanlar önce (destination'a giden yol)
+        const aHasOutputs = a.outputs && a.outputs.length > 0;
+        const bHasOutputs = b.outputs && b.outputs.length > 0;
+        if (aHasOutputs && !bHasOutputs) return -1;
+        if (!aHasOutputs && bHasOutputs) return 1;
+
+        return 0; // Aynı öncelik - orijinal sıra korunur
+      });
+
+      html += `<div class="${FLOW_CLASSES.OUTPUTS}">`;
+      sortedOutputs.forEach(output => {
+        html += renderNode(output, false);
       });
       html += '</div>';
     }
@@ -705,89 +863,56 @@ export function renderAudioPathTree(mainProcessors, monitors, inputSource) {
     return html;
   };
 
-  return `<div class="${TREE_CLASSES.TREE_CONTAINER}">${renderNode(tree, true)}</div>`;
+  return `<div class="${FLOW_CLASSES.CONTAINER}">${renderNode(flow, true)}</div>`;
 }
 
+// Backward compatibility alias
+export const renderAudioPathTree = renderAudioFlow;
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// TREE LABEL MEASUREMENT
+// FLOW LABEL MEASUREMENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Tree node'larinin label genisliklerini olcer ve CSS variable olarak set eder.
- * Dikey cizginin label ortasindan cikmasi icin gerekli.
+ * Root node'un label merkez pozisyonunu ölçer ve container'a CSS variable olarak set eder.
+ * Tüm dikey oklar bu değeri kullanarak aynı dikey hizada kalır.
  *
  * Called after DOM render via requestAnimationFrame in popup.js
  *
- * Formüller (tree-expert.md ile senkron):
- * - stemLeft = Math.floor(center) → Gövde çizgisi X pozisyonu
- * - parentCenter = Math.floor(center) → Children margin-left
- * - verticalLineHeight = lastChild.offsetTop + Math.floor(lastLabelHeight / 2)
- * - horizontalLineTop = Math.floor(labelHeight / 2)
+ * Formül:
+ * - mainArrowLeft = Math.floor(labelText center) → Tüm okların X pozisyonu
  *
- * ⚠️ Math.floor vs Math.round: Tutarlılık için HEP Math.floor kullan
- * ⚠️ Border vs Background: DPI tutarlılığı için HEP border-left/top kullan (CSS'te)
+ * ⚠️ Math.floor: Tutarlılık için HEP Math.floor kullan
  */
-export function measureTreeLabels() {
-  // --tree-unit degerini CSS'den oku (DRY: audio-tree.css ile senkron)
-  const audioTree = document.querySelector(TREE_SELECTORS.TREE_CONTAINER);
-  const treeUnit = audioTree
-    ? parseFloat(getComputedStyle(audioTree).getPropertyValue('--tree-unit')) || TREE_DEFAULTS.TREE_UNIT
-    : TREE_DEFAULTS.TREE_UNIT;
+export function measureFlowLabels() {
+  const container = document.querySelector(FLOW_SELECTORS.CONTAINER);
+  if (!container) return;
 
   // DPI bilgisi (debug için korundu)
-  console.log('devicePixelRatio:', window.devicePixelRatio);
+  console.log('[Audio Flow] devicePixelRatio:', window.devicePixelRatio);
 
-  // Selector sabitleri kullan (regresyon koruması)
-  const treeNodes = document.querySelectorAll(TREE_SELECTORS.NODE_WITH_CHILDREN);
+  // Root node'u bul (.flow-root class'ı olan)
+  const rootNode = container.querySelector('.flow-node.flow-root');
+  if (!rootNode) return;
 
-  treeNodes.forEach((node) => {
-    const label = node.querySelector(TREE_SELECTORS.LABEL);
-    const labelText = node.querySelector(TREE_SELECTORS.LABEL_TEXT);
-    const children = node.querySelector(TREE_SELECTORS.CHILDREN);
+  const rootLabelText = rootNode.querySelector(FLOW_SELECTORS.LABEL_TEXT);
+  if (!rootLabelText) return;
 
-    if (labelText && children && label) {
-      // 1. Label-text genisligini olc
-      const labelTextRect = labelText.getBoundingClientRect();
-      const labelTextWidth = labelTextRect.width;
-      const labelTextLeft = labelText.offsetLeft; // Label icindeki pozisyon
+  // Root label-text merkez pozisyonunu hesapla
+  const labelTextRect = rootLabelText.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
 
-      // 2. Govde cizgisi pozisyonu = cizginin SOL KENARI (tam piksel)
-      // CSS'te translateX(-50%) YOK - yarım piksel sorunu önlendi
-      // Math.floor: çizgi merkezin soluna düşer, tam piksel garantisi
-      const center = labelTextLeft + (labelTextWidth / 2);
-      const stemLeft = Math.floor(center);
-      label.style.setProperty('--stem-left', `${stemLeft}px`);
+  // Container'a göre relatif pozisyon
+  const labelTextLeft = labelTextRect.left - containerRect.left;
+  const labelTextWidth = labelTextRect.width;
 
-      // 3. Children margin = label-text merkezi (Math.floor: tutarlılık)
-      const parentCenter = Math.floor(center);
-      children.style.setProperty('--parent-center', `${parentCenter}px`);
+  // Ok pozisyonu = root label-text merkezi (tam piksel)
+  const center = labelTextLeft + (labelTextWidth / 2);
+  const mainArrowLeft = Math.floor(center);
 
-      // 4. Dikey cizgi height ve yatay cizgi pozisyonlari hesapla
-      const childNodes = children.querySelectorAll(TREE_SELECTORS.DIRECT_CHILD_NODES);
-
-      if (childNodes.length > 0) {
-        const lastChild = childNodes[childNodes.length - 1];
-        const lastLabel = lastChild.querySelector(TREE_SELECTORS.LABEL);
-
-        // Son child'in label ortasi = dikey cizginin bitis noktasi
-        // Tum cizgiler ayni formul = tutarli kesisim noktasi
-        // Dikey cizgi top: TREE_GAP'ten basliyor, yukseklik buna gore ayarlanmali
-        const lastLabelHeight = lastLabel ? lastLabel.offsetHeight : TREE_DEFAULTS.LABEL_HEIGHT;
-        const lineHeight = lastChild.offsetTop + Math.floor(lastLabelHeight / 2) - TREE_DEFAULTS.TREE_GAP;
-        children.style.setProperty('--vertical-line-height', `${lineHeight}px`);
-
-        // 5. Her child icin yatay cizgi pozisyonu hesapla
-        // Label'in gercek dikey ortasi = tutarli cizgi kalinligi
-        childNodes.forEach((child) => {
-          const childLabel = child.querySelector(TREE_SELECTORS.LABEL);
-          if (childLabel) {
-            // Label'in dikey ortasi (offsetHeight / 2)
-            const labelHeight = childLabel.offsetHeight;
-            const horizontalTop = Math.floor(labelHeight / 2);
-            child.style.setProperty('--horizontal-line-top', `${horizontalTop}px`);
-          }
-        });
-      }
-    }
-  });
+  // Container'a set et - tüm child node'lar bu değeri inherit eder
+  container.style.setProperty('--main-arrow-left', `${mainArrowLeft}px`);
 }
+
+// Backward compatibility alias
+export const measureTreeLabels = measureFlowLabels;

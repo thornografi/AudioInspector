@@ -122,6 +122,42 @@ hookAsyncMethod(AudioWorklet.prototype, 'addModule', (result, args, thisArg) => 
 initialize() → start() → [emit('data')] → reEmit() → stop()
 ```
 
+## Template Method Pattern (BaseCollector)
+
+`BaseCollector.start()` ve `reEmit()` template method olarak tasarlandı.
+Subclass'lar tüm metodu override etmek yerine hook'ları override eder.
+
+### Hook Metodları
+
+| Metod | Amaç | Default | Override Eden |
+|-------|------|---------|---------------|
+| `_processEarlyInstances()` | Early capture'ları işle | `return 0` | Tüm collector'lar |
+| `_onStartComplete(count)` | Start sonrası işlemler | no-op | GUM, RTC |
+| `_reEmitActiveItems()` | Aktif item'ları re-emit et | `return 0` | GUM, MR |
+
+### Tam Override Gereken Durumlar
+
+- **AudioContextCollector.start()**: Karmaşık init (WeakSet deduplication, multi-sync phases)
+- **AudioContextCollector.reEmit()**: Hem contexts hem connections emit ediyor
+- **RTCPeerConnectionCollector.reEmit()**: collectData() async pattern kullanıyor
+
+Tam override yapılırken `@override` JSDoc eklenmeli.
+
+### Örnek: Hook Override
+
+```javascript
+// GetUserMediaCollector
+async _processEarlyInstances() {
+  const earlyCaptures = window.__earlyCaptures?.getUserMedia;
+  if (!earlyCaptures?.length) return 0;
+
+  for (const capture of earlyCaptures) {
+    await this._processStream(capture.stream, capture.constraints);
+  }
+  return earlyCaptures.length;
+}
+```
+
 ## reEmit() Pattern
 
 UI yenileme için mevcut verileri tekrar emit et:

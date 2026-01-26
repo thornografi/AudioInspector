@@ -110,14 +110,15 @@ class GetUserMediaCollector extends BaseCollector {
   }
 
   /**
-   * Start collector (passive)
-   * @returns {Promise<void>}
+   * Hook: Process early captures from early-inject.js
+   * These are getUserMedia calls that happened before page.js loaded
+   * @protected
+   * @override
+   * @returns {Promise<number>} Number of processed streams
    */
-  async start() {
-    this.active = true;
+  async _processEarlyInstances() {
+    let processedCount = 0;
 
-    // Process early captures from early-inject.js
-    // These are getUserMedia calls that happened before page.js loaded
     // @ts-ignore
     const earlyCaptures = window.__earlyCaptures?.getUserMedia;
     if (earlyCaptures?.length) {
@@ -136,6 +137,7 @@ class GetUserMediaCollector extends BaseCollector {
 
         try {
           await this._processStream(capture.stream, capture.constraints);
+          processedCount++;
         } catch (err) {
           logger.error(this.logPrefix, `Error processing early capture:`, err);
         }
@@ -145,33 +147,39 @@ class GetUserMediaCollector extends BaseCollector {
       // hala aktif stream'leri tekrar işleyebilmek için tutuyoruz
     }
 
+    return processedCount;
+  }
+
+  /**
+   * Hook: Post-start actions - emit existing streams
+   * Bu, inspector aktif değilken yakalanan stream'lerin UI'da görünmesini sağlar
+   * @protected
+   * @override
+   * @param {number} processedCount
+   * @returns {Promise<void>}
+   */
+  async _onStartComplete(processedCount) {
     // Mevcut activeStreams'deki verileri emit et
-    // Bu, inspector aktif değilken yakalanan stream'lerin UI'da görünmesini sağlar
     // (hook tetiklendi ama emit() o zaman inactive olduğu için çalışmadı)
     if (this.activeStreams.size > 0) {
       logger.info(this.logPrefix, `📤 Emitting ${this.activeStreams.size} existing stream(s)`);
       this.reEmit();
     }
-
-    logger.info(this.logPrefix, `Started`);
   }
 
   /**
-   * Re-emit current data from active streams
-   * Called when UI needs to be refreshed (e.g., after data reset)
+   * Hook: Re-emit active streams
+   * @protected
+   * @override
+   * @returns {number} Number of streams emitted
    */
-  reEmit() {
-    if (!this.active) return;
-
+  _reEmitActiveItems() {
     let emittedCount = 0;
     for (const [streamId, metadata] of this.activeStreams.entries()) {
       this.emit(EVENTS.DATA, metadata);
       emittedCount++;
     }
-
-    if (emittedCount > 0) {
-      logger.info(this.logPrefix, `Re-emitted ${emittedCount} stream(s)`);
-    }
+    return emittedCount;
   }
 
   /**

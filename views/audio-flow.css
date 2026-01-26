@@ -1,127 +1,208 @@
 /* ══════════════════════════════════════════════════════════════════════
-   AUDIO TREE v3 - Self-contained tree visualization component
+   AUDIO FLOW - Workflow/Pipeline visualization component
    Dependencies: Global CSS variables from popup.css
-   JS: audio-tree.js (measureTreeLabels)
+   JS: audio-flow.js (measureFlowLabels)
    ══════════════════════════════════════════════════════════════════════ */
 
-.audio-tree {
+.audio-flow {
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 14px;  /* Tam piksel - subpixel label yuksekligi onleme */
-  padding: 12px 0 4px 0;  /* Top: başlıktan uzaklık, Bottom: alt boşluk */
-  --tree-color: var(--text-secondary);  /* Çizgi rengi (text-muted'dan bir kademe parlak) */
-  --tree-unit: 17px;
-  --tree-line: 1px;
-  --tree-gap: 3px;  /* Connector→öğe boşluğu */
-  --stem-ratio: 1.25;  /* Dikey mesafe çarpanı (padding-top = ratio/2) */
+  line-height: 14px;  /* Tam piksel - subpixel label yüksekliği önleme */
+  max-width: 100%;
+  overflow-x: auto;   /* Deep nesting overflow koruması */
+  /* ═══ SPACING SYSTEM - Merkezi Yönetim ═══ */
+  --spacing-unit: 4px;                         /* Base unit */
+  --spacing-xs: var(--spacing-unit);           /* 4px  - ok boşlukları */
+  --spacing-sm: calc(var(--spacing-unit) * 2); /* 8px  - küçük padding */
+  --spacing-md: calc(var(--spacing-unit) * 3); /* 12px - container padding */
+  --spacing-lg: calc(var(--spacing-unit) * 4); /* 16px - node height */
+  --spacing-xl: calc(var(--spacing-unit) * 5); /* 20px - split gap */
+
+  /* ═══ SEMANTIC ALIASES - Kullanım yerleri ═══ */
+  --flow-row-height: var(--spacing-lg);        /* 16px - label row height */
+  --arrow-gap: var(--spacing-xs);              /* 4px  - ok ↔ içerik */
+  --split-gap: var(--spacing-xl);              /* 20px - yatay dallar arası */
+  --container-padding: var(--spacing-md);      /* 12px - üst padding */
+  --arrow-line-height: var(--flow-row-height); /* Tüm oklar için tutarlı */
+
+  padding: var(--container-padding) 0 var(--spacing-xs) 0;
+  --flow-unit: 17px;
+  --flow-gap: 3px;  /* Connector→öğe boşluğu */
+  /* JS tarafından set edilir - tüm dikey okların X pozisyonu */
+  --main-arrow-left: 40px;
+
+  /* SVG ok - tek tasarım, rotate ile yön değişir (aşağı bakan ok) */
+  --arrow-svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v14M5 12l7 7 7-7'/%3E%3C/svg%3E");
+  --arrow-icon-size: 12px;
 }
 
-.tree-node {
+.flow-node {
   position: relative;
-}
-
-/* Parent node'lar (root dahil) flex layout - block/flex tutarsizligini onler */
-.tree-node.has-children {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
 }
 
-.tree-label {
+.flow-label {
   display: inline-block;
-  position: relative;
+  position: relative;  /* ::after için positioning context */
   color: var(--text-primary);
   font-weight: 500;
-  /* Label'i çizgilerden ayır - margin ile GERÇEK gap */
-  margin-left: var(--tree-gap);
-  height: 14px;  /* line-height ile ayni - flexbox subpixel onleme */
-  /* Truncation - dar panelde taşma önleme */
+  /* margin-left kaldırıldı - tüm node'lar aynı sol kenardan başlasın */
+  height: var(--flow-row-height);  /* Merkezi spacing - flexbox subpixel önleme */
   max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* overflow: visible - ok (::after) görünmesi için gerekli */
+  overflow: visible;
   white-space: nowrap;
 }
 
-/* Label text - JS olcumu icin ayri element */
-.tree-label-text {
-  /* display: inline - varsayilan */
+/* Label text - truncation için ayrı element
+   NOTE: overflow/text-overflow patterns → popup.css .u-truncate utility
+   (white-space: nowrap parent'tan miras alınır, burada gereksiz) */
+.flow-label-text {
+  display: inline-block;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 
-/* Param (parantez ici) - farkli stil */
-.tree-param {
+/* Param (parantez içi) - farklı stil */
+.flow-param {
   color: var(--text-muted);
   font-weight: 400;
 }
 
-/* Parent govdesi: label-text ortasindan asagi */
-.tree-node.has-children > .tree-label::after {
+/* ══════════════════════════════════════════════════════════════════════
+   ARROW CONNECTORS - SVG ikonlar
+   Tek SVG tasarımı, rotate() ile yön değişikliği
+   Avantaj: Tüm oklar piksel-perfect aynı kalınlık
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Arrow base styles - tüm oklar için ortak SVG görünüm (DRY) */
+.flow-node.has-outputs::after,
+.flow-node.is-split > .flow-outputs > .flow-node:not(:first-child)::before,
+.encoder-badge::before {
   content: '';
-  position: absolute;
-  /* JS tarafından set edilir (measureTreeLabels), fallback kullanılmaz */
-  left: var(--stem-left, 50%);
-  top: calc(100% + var(--tree-gap));
-  /* Border rendering: DPI tutarlılığı için (background yerine) */
-  width: 0;
-  height: calc(var(--tree-unit) * var(--stem-ratio));
-  border-left: var(--tree-line) solid var(--tree-color);
+  display: inline-block;
+  width: var(--arrow-icon-size);
+  height: var(--arrow-icon-size);
+  background: var(--arrow-svg) no-repeat center;
+  background-size: contain;
 }
 
-/* Children container */
-.tree-children {
+/* Dikey ok (↓): output'u olan her node'un altında */
+/* SVG zaten aşağı bakıyor - rotate yok */
+.flow-node.has-outputs::after {
+  position: absolute;
+  left: var(--main-arrow-left, 40px);
+  top: calc(var(--flow-row-height) + var(--arrow-gap));
+  transform: translateX(-50%);
+  z-index: 1;
+}
+
+/* Outputs container */
+.flow-outputs {
   position: relative;
-  padding-left: var(--tree-unit);
-  padding-top: calc(var(--tree-unit) * var(--stem-ratio) / 2 + var(--tree-gap));  /* Ustten bosluk - govde baglantisi icin */
-  /* JS tarafından set edilir (measureTreeLabels), fallback kullanılmaz */
-  margin-left: var(--parent-center, 40px);
+  /* Ok için alan bırak - ok boyutu + üst/alt boşluk */
+  padding-top: calc(var(--arrow-icon-size) + var(--arrow-gap) * 2);
+  /* margin-left kaldırıldı - cascade indent önleme */
 }
 
-/* Dikey cizgi: JavaScript'ten gelen dinamik height */
-.tree-children::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: var(--tree-gap);  /* 3px gap - parent stem ile tutarlı */
-  /* JS tarafından set edilir (measureTreeLabels), fallback kullanılmaz */
-  height: var(--vertical-line-height, calc(100% - 7px));
-  /* Border rendering: DPI tutarlılığı için */
-  width: 0;
-  border-left: var(--tree-line) solid var(--tree-color);
+/* Output node'ları için minimum spacing */
+.flow-outputs > .flow-node {
+  min-height: calc(var(--flow-unit) + var(--spacing-xs));
 }
-
-/* Yatay dal: dikey cizgiden child'a (label'in icine girmez) */
-.tree-children > .tree-node::before {
-  content: '';
-  position: absolute;
-  left: calc(-1 * var(--tree-unit));
-  top: var(--horizontal-line-top, 7px);  /* JS tarafından set edilir, fallback: 14px / 2 = 7px */
-  /* Border rendering: DPI tutarlılığı için */
-  width: var(--tree-unit);
-  height: 0;
-  border-top: var(--tree-line) solid var(--tree-color);
-}
-
-/* Child node layout - minimum yukseklik ile tutarli dikey cizgiler */
-.tree-children > .tree-node {
-  min-height: calc(var(--tree-unit) * var(--stem-ratio));
-  display: flex;
-  align-items: flex-start;
-  flex-direction: column;
-  /* padding-top kaldirildi - cizgi hesaplamasi JS'te yapiliyor (measureTreeLabels) */
-}
-
-/* Varyantlar */
-.tree-node.tree-monitor .tree-label { color: var(--text-muted); }
-.tree-label.has-tooltip { cursor: default; }
 
 /* ══════════════════════════════════════════════════════════════════════
-   TREE TOOLTIP - ::before ile (tree stem ::after ile çakışmayı önler)
+   SPLIT LAYOUT - Birden fazla output (ana dal dikey, yan dallar yatay)
+   Grid layout: İlk child sol kolonda (dikey akış), diğerleri sağ kolonda
    ══════════════════════════════════════════════════════════════════════ */
-.tree-tooltip {
+
+/* Split container - grid layout */
+.flow-node.is-split > .flow-outputs {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto;
+  align-items: start;
+  column-gap: var(--split-gap);
+}
+
+/* İlk child: Sol kolon, dikey akış devam eder */
+.flow-node.is-split > .flow-outputs > .flow-node:first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+/* Yan dallar: Sağ kolon, ilk satırda (ilk child'ın yanında) */
+.flow-node.is-split > .flow-outputs > .flow-node:not(:first-child) {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;
+}
+
+/* Yatay ok (→) - split'te yan output'lara */
+/* Aşağı bakan SVG'yi -90° döndürüp sağa çevir */
+/* Spacing: sol 4px + ok 12px + sağ 4px = 20px (split-gap ile uyumlu) */
+.flow-node.is-split > .flow-outputs > .flow-node:not(:first-child)::before {
+  position: absolute;
+  left: calc(-1 * (var(--arrow-icon-size) + var(--arrow-gap)));
+  top: 0;
+  transform: rotate(-90deg);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   VARIANTS - Monitor, encoding node stilleri
+   ══════════════════════════════════════════════════════════════════════ */
+
+.flow-node.flow-monitor .flow-label {
+  color: var(--text-muted);
+}
+
+.flow-label.has-tooltip {
+  cursor: default;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ENCODING NODE - Shows which node is doing the encoding
+   Simple text label, no animation
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Encoding label: simple muted text */
+.encoding-label {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 10px;
+}
+
+/* Encoder badge: encoding yapan node'un yanında gösterilir (← Encoder) */
+/* Text kısmı parent'tan 11px inherit alır, ok CSS ::before ile eklenir */
+.encoder-badge {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  /* font-size inherit - parent'tan 11px alır */
+  font-weight: 500;  /* Flow label ile aynı */
+  line-height: var(--arrow-line-height);
+  margin-left: var(--spacing-xs);
+}
+
+/* Encoder ok (←) - inline, label'dan önce gösterilir */
+/* Aşağı bakan SVG'yi 90° döndürüp sola çevir */
+.encoder-badge::before {
+  margin-right: var(--spacing-xs);
+  transform: rotate(90deg);
+  vertical-align: middle;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   FLOW TOOLTIP - ::before ile (flow arrow ::after ile çakışmayı önler)
+   ══════════════════════════════════════════════════════════════════════ */
+.flow-tooltip {
   position: relative;
   cursor: default;
 }
 
-.tree-tooltip::before {
+.flow-tooltip::before {
   content: attr(data-tooltip);
   position: fixed;
   top: var(--tt-top, 0);
@@ -144,12 +225,12 @@
   text-overflow: ellipsis;
 }
 
-.tree-tooltip:hover::before {
+.flow-tooltip:hover::before {
   opacity: 1;
 }
 
 /* Boş tooltip gösterme */
-.tree-tooltip:not([data-tooltip])::before,
-.tree-tooltip[data-tooltip=""]::before {
+.flow-tooltip:not([data-tooltip])::before,
+.flow-tooltip[data-tooltip=""]::before {
   display: none;
 }

@@ -10,6 +10,19 @@
   window.__audioInspectorEarlyHooksInstalled = true;
 
   // ═══════════════════════════════════════════════════════════════════
+  // GLOBAL INSPECTOR STATE FLAG
+  // Used to immediately disable hooks when inspector stops
+  // Prevents race condition where hooks continue firing after STOP
+  // ═══════════════════════════════════════════════════════════════════
+  window.__audioInspectorEnabled = false;
+
+  // ═══════════════════════════════════════════════════════════════════
+  // TAB LOCK FLAG: Skip capture when another tab is locked
+  // Prevents memory waste from capturing data in inactive tabs
+  // ═══════════════════════════════════════════════════════════════════
+  window.__otherTabLocked = false;
+
+  // ═══════════════════════════════════════════════════════════════════
   // Debug Log Helper - Sends logs to extension's console panel
   // ═══════════════════════════════════════════════════════════════════
   const debugLog = (message, data = null) => {
@@ -109,6 +122,26 @@
     }, '*');
   };
 
+  // ═══════════════════════════════════════════════════════════════════
+  // DRY Helper: Check if createMediaStreamSource should trigger PCM/WAV recording
+  // Called from both AudioContext instance hook and prototype hook
+  // ═══════════════════════════════════════════════════════════════════
+  const tryBroadcastPcmRecordingStart = (stream, logPrefix = 'Early') => {
+    if (!stream) return;
+
+    const isMicrophoneStream = window.__earlyCaptures?.getUserMedia?.some(
+      gum => gum.stream?.id === stream.id
+    );
+    const hasMediaRecorder = window.__earlyCaptures?.mediaRecorders?.length > 0;
+
+    // PCM/WAV path: Microphone connected to AudioContext, no MediaRecorder
+    // IMPORTANT: Only broadcast if NOT already active (prevents duplicate broadcasts)
+    if (isMicrophoneStream && !window.__recordingState?.active && !hasMediaRecorder) {
+      broadcastRecordingState(true);
+      console.log(`[AudioInspector] ${logPrefix}: Microphone connected (PCM/WAV path) - recording state: ACTIVE`);
+    }
+  };
+
   const installConsoleForwarding = () => {
     if (console.__audioInspectorForwardingInstalled) return;
     console.__audioInspectorForwardingInstalled = true;
@@ -135,16 +168,41 @@
     };
   };
 
-  // Toggle forwarding with the same SET_ENABLED command used by the inspector.
-  // This avoids spamming logs when the inspector is stopped.
+  // ═══════════════════════════════════════════════════════════════════
+  // INSPECTOR STATE CONTROL: Handle SET_ENABLED and DISABLE_HOOKS
+  // SET_ENABLED: Normal start/stop from popup or background
+  // DISABLE_HOOKS: Immediate hook disable (race condition prevention)
+  // ═══════════════════════════════════════════════════════════════════
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     if (!event.data?.__audioPipelineInspector) return;
-    if (event.data.type !== 'SET_ENABLED') return;
 
-    forwardConsoleEnabled = event.data.enabled === true;
-    if (forwardConsoleEnabled) {
-      installConsoleForwarding();
+    // DISABLE_HOOKS: Immediate disable, no other processing
+    // This is sent BEFORE SET_ENABLED=false to prevent hook race condition
+    if (event.data.type === 'DISABLE_HOOKS') {
+      window.__audioInspectorEnabled = false;
+      debugLog('Hooks disabled immediately (DISABLE_HOOKS)');
+      return;
+    }
+
+    // SET_TAB_LOCKED_ELSEWHERE: Another tab is locked - skip capture
+    // Prevents memory waste from capturing data in inactive tabs
+    if (event.data.type === 'SET_TAB_LOCKED_ELSEWHERE') {
+      window.__otherTabLocked = event.data.locked === true;
+      debugLog(`Tab lock status: ${window.__otherTabLocked ? 'OTHER_TAB_LOCKED' : 'NOT_LOCKED'}`);
+      return;
+    }
+
+    // SET_ENABLED: Normal inspector start/stop
+    if (event.data.type === 'SET_ENABLED') {
+      window.__audioInspectorEnabled = event.data.enabled === true;
+      forwardConsoleEnabled = event.data.enabled === true;
+
+      if (forwardConsoleEnabled) {
+        installConsoleForwarding();
+      }
+
+      debugLog(`Inspector state: ${window.__audioInspectorEnabled ? 'ENABLED' : 'DISABLED'}`);
     }
   });
 
@@ -157,6 +215,210 @@
     mediaRecorders: [],    // { instance, timestamp }
     workers: [],           // { instance, url, timestamp, isEncoder }
     connections: []        // { sourceType, sourceId, destType, destId, timestamp }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // AUDIO PATH SIGNATURE: Technology detection for session reset logic
+  // Tracks processingPath, encodingType, outputPath to detect tech changes
+  // ═══════════════════════════════════════════════════════════════════
+  window.__audioSignatures = {
+    previous: null,
+    current: null
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // SESSION-SCOPED SIGNATURE CHECK FLAG
+  // Ensures signature is checked only once per recording session
+  // Reset on: recording stop, getUserMedia (new session)
+  // ═══════════════════════════════════════════════════════════════════
+  let signatureCheckedThisSession = false;
+
+  /**
+   * Calculate current audio path signature from early captures
+   * @returns {{processingPath: string, encodingType: string, outputPath: string}|null}
+   */
+  const calculateCurrentSignature = () => {
+    const earlyCaptures = window.__earlyCaptures;
+    if (!earlyCaptures) return null;
+
+    // Check for AudioWorklet nodes (peak-worklet, opus-encoder, etc.)
+    const hasWorklet = earlyCaptures.audioWorkletNodes?.length > 0;
+
+    // Check for ScriptProcessor in any AudioContext's methodCalls
+    const hasScriptProcessor = earlyCaptures.audioContexts?.some(ctx =>
+      ctx.methodCalls?.some(m => m.type === 'scriptProcessor')
+    );
+
+    // Determine processing path
+    let processingPath = 'none';
+    if (hasWorklet) {
+      processingPath = 'audioWorklet';
+    } else if (hasScriptProcessor) {
+      processingPath = 'scriptProcessor';
+    }
+
+    // Check for MediaRecorder (browser native encoding)
+    const hasMediaRecorder = earlyCaptures.mediaRecorders?.length > 0;
+
+    // Check for WASM encoder workers
+    const hasWasmWorker = earlyCaptures.workers?.some(w => w.isEncoder);
+
+    // Check for encoder AudioWorklet (opus-encoder, mp3-encoder, etc.)
+    const hasEncoderWorklet = earlyCaptures.audioWorkletNodes?.some(n => {
+      const name = (n.processorName || '').toLowerCase();
+      return name.includes('encoder') || name.includes('opus') || name.includes('mp3') ||
+             name.includes('aac') || name.includes('vorbis') || name.includes('flac');
+    });
+
+    // Determine encoding type
+    let encodingType = 'browser_native';
+    if (hasEncoderWorklet) {
+      encodingType = 'wasm_audioworklet';
+    } else if (hasWasmWorker) {
+      encodingType = 'wasm_worker';
+    } else if (hasMediaRecorder) {
+      encodingType = 'browser_native';
+    }
+
+    // Check for MediaStreamDestination (output to stream instead of speakers)
+    const hasMediaStreamDest = earlyCaptures.audioContexts?.some(ctx =>
+      ctx.methodCalls?.some(m => m.type === 'mediaStreamDestination')
+    );
+
+    // Also check connections for MediaStreamAudioDestination
+    const hasMediaStreamDestConnection = earlyCaptures.connections?.some(c =>
+      c.destType === 'MediaStreamAudioDestination'
+    );
+
+    // Determine output path
+    const outputPath = (hasMediaStreamDest || hasMediaStreamDestConnection)
+      ? 'mediaStreamDestination'
+      : 'speakers';
+
+    return {
+      processingPath,
+      encodingType,
+      outputPath
+    };
+  };
+
+  /**
+   * Compare two signatures and determine reset type
+   * @param {Object|null} previous
+   * @param {Object|null} current
+   * @returns {'hard' | 'soft' | 'none'}
+   */
+  const determineResetType = (previous, current) => {
+    // First recording - no reset needed, just store signature
+    if (!previous) return 'none';
+
+    // No current signature (shouldn't happen, but handle gracefully)
+    if (!current) return 'none';
+
+    // Check for technology changes (HARD reset)
+    if (previous.processingPath !== current.processingPath ||
+        previous.encodingType !== current.encodingType ||
+        previous.outputPath !== current.outputPath) {
+      return 'hard';
+    }
+
+    // Same technology, new recording (SOFT reset - only encoder)
+    return 'soft';
+  };
+
+  /**
+   * Broadcast signature change to content.js for session management
+   * @param {'hard' | 'soft' | 'none'} resetType
+   */
+  const broadcastSignatureChange = (resetType) => {
+    const sessionId = window.__recordingState?.sessionCount || 0;
+
+    window.postMessage({
+      __audioPipelineInspector: true,
+      type: 'SIGNATURE_CHANGE',
+      payload: {
+        resetType,
+        signature: window.__audioSignatures.current,
+        previousSignature: window.__audioSignatures.previous,
+        sessionId,
+        timestamp: Date.now()
+      }
+    }, '*');
+
+    debugLog(`Signature change: ${resetType}`, {
+      previous: window.__audioSignatures.previous,
+      current: window.__audioSignatures.current,
+      sessionId
+    });
+  };
+
+  /**
+   * Check for signature change and broadcast if detected (EARLY CHECK)
+   * Called from critical hooks BEFORE destination connect
+   * Enables early detection of technology changes
+   * @param {string} trigger - Hook name for debugging
+   * @returns {boolean} - True if hard reset was triggered
+   */
+  const checkSignatureChange = (trigger) => {
+    // Already checked this session (prevents multiple broadcasts)
+    if (signatureCheckedThisSession) return false;
+
+    // Need previous signature for comparison
+    if (!window.__audioSignatures.previous) return false;
+
+    // Calculate current signature from earlyCaptures
+    const newSignature = calculateCurrentSignature();
+    if (!newSignature) return false;
+
+    // Compare with previous
+    const resetType = determineResetType(
+      window.__audioSignatures.previous,
+      newSignature
+    );
+
+    if (resetType === 'hard') {
+      signatureCheckedThisSession = true;
+
+      debugLog(`Early signature check (${trigger})`, {
+        previous: window.__audioSignatures.previous,
+        current: newSignature,
+        trigger
+      });
+
+      // Update current signature BEFORE broadcast (so broadcastSignatureChange reads correct value)
+      window.__audioSignatures.current = newSignature;
+
+      // Now broadcast HARD reset
+      broadcastSignatureChange('hard');
+
+      return true;
+    }
+
+    return false;
+  };
+
+  /**
+   * Check signature and broadcast if technology changed
+   * Called at recording start (getUserMedia, MediaRecorder.start)
+   */
+  const checkAndBroadcastSignature = () => {
+    // Calculate current signature
+    const newSignature = calculateCurrentSignature();
+
+    // Store previous and update current
+    window.__audioSignatures.previous = window.__audioSignatures.current;
+    window.__audioSignatures.current = newSignature;
+
+    // Determine reset type
+    const resetType = determineResetType(
+      window.__audioSignatures.previous,
+      newSignature
+    );
+
+    // Broadcast if any reset is needed
+    if (resetType !== 'none') {
+      broadcastSignatureChange(resetType);
+    }
   };
 
   // Shared AudioContext ID map (used by page.js collectors and audio graph)
@@ -203,7 +465,175 @@
     window.__earlyCaptures.workers = [];
     window.__earlyCaptures.connections = [];
     window.__earlyCaptures.audioWorkletNodes = [];
-    console.log('[AudioInspector] Early: Registry cleared');
+
+    // Preserve previous signature for technology change detection across sessions
+    // Only clear current - previous is needed to detect tech changes after restart
+    if (window.__audioSignatures.current) {
+      window.__audioSignatures.previous = window.__audioSignatures.current;
+    }
+    window.__audioSignatures.current = null;
+
+    // Reset session-scoped signature check flag
+    signatureCheckedThisSession = false;
+
+    console.log('[AudioInspector] Early: Registry cleared (previous signature preserved)');
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Connection Status Helper - DRY filter for active connections
+  // Supports: 'connect' action AND legacy connections without action field
+  // ═══════════════════════════════════════════════════════════════════
+  const isActiveConnection = (c) => c.action === 'connect' || !c.action;
+
+  // ═══════════════════════════════════════════════════════════════════
+  // findEncodingScriptProcessor - Heuristic to find which SP is encoding
+  // Used when Worker→ScriptProcessor direct connection is unavailable
+  // Returns: { nodeId: string, confidence: 'high'|'medium'|'low' } | null
+  // ═══════════════════════════════════════════════════════════════════
+  window.__findEncodingScriptProcessor = function(contextId = null) {
+    const connections = window.__earlyCaptures?.connections || [];
+    if (connections.length === 0) return null;
+
+    // Filter connections by contextId if provided
+    const ctxConnections = contextId
+      ? connections.filter(c => c.contextId === contextId)
+      : connections;
+
+    // Find all ScriptProcessor connections (active only)
+    const spConnections = ctxConnections.filter(c =>
+      c.sourceType === 'ScriptProcessor' && isActiveConnection(c)
+    );
+
+    if (spConnections.length === 0) return null;
+
+    // ───────────────────────────────────────────────────────────────────
+    // Strategy 1: SP → MediaStreamAudioDestination (HIGH CONFIDENCE)
+    // If a ScriptProcessor connects to MediaStreamAudioDestination,
+    // it's almost certainly for encoding (sending audio to a Worker/Blob)
+    // ───────────────────────────────────────────────────────────────────
+    const spToStreamDest = spConnections.filter(c =>
+      c.destType === 'MediaStreamAudioDestination'
+    );
+    if (spToStreamDest.length === 1) {
+      return { nodeId: spToStreamDest[0].sourceId, confidence: 'high' };
+    }
+    // Multiple SP→MediaStreamDest is rare, take the most recent one
+    if (spToStreamDest.length > 1) {
+      const sorted = [...spToStreamDest].sort((a, b) => b.timestamp - a.timestamp);
+      return { nodeId: sorted[0].sourceId, confidence: 'high' };
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Strategy 2: Elimination - SP NOT connected to Speakers (MEDIUM)
+    // Speakers connection = playback/monitoring, not encoding
+    // ───────────────────────────────────────────────────────────────────
+    const speakerConnectedSPs = new Set(
+      spConnections
+        .filter(c => c.destType === 'AudioDestination')
+        .map(c => c.sourceId)
+    );
+
+    const nonSpeakerSPs = spConnections
+      .map(c => c.sourceId)
+      .filter(id => !speakerConnectedSPs.has(id));
+
+    // Unique non-speaker SP nodeIds
+    const uniqueNonSpeakerSPs = [...new Set(nonSpeakerSPs)];
+
+    if (uniqueNonSpeakerSPs.length === 1) {
+      return { nodeId: uniqueNonSpeakerSPs[0], confidence: 'medium' };
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Strategy 3: Single SP (MEDIUM)
+    // If there's only one ScriptProcessor, it's likely the encoder
+    // ───────────────────────────────────────────────────────────────────
+    const uniqueSPIds = [...new Set(spConnections.map(c => c.sourceId))];
+    if (uniqueSPIds.length === 1) {
+      return { nodeId: uniqueSPIds[0], confidence: 'medium' };
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Strategy 4: Multiple SPs, can't determine (LOW)
+    // Return the first one with low confidence
+    // ───────────────────────────────────────────────────────────────────
+    if (uniqueSPIds.length > 1) {
+      return { nodeId: uniqueSPIds[0], confidence: 'low' };
+    }
+
+    return null;
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // findEncodingAudioWorklet - Heuristic for passthrough/WAV AudioWorklets
+  // Used when port.postMessage() is never called (no init message)
+  // Returns: { nodeId: string, processorName: string, confidence: 'high'|'medium'|'low' } | null
+  // ═══════════════════════════════════════════════════════════════════
+  window.__findEncodingAudioWorklet = function(contextId = null) {
+    const workletNodes = window.__earlyCaptures?.audioWorkletNodes || [];
+    const connections = window.__earlyCaptures?.connections || [];
+
+    if (workletNodes.length === 0) return null;
+
+    // Filter by contextId if provided
+    const ctxWorklets = contextId
+      ? workletNodes.filter(w => {
+          // Match via contextId stored during capture
+          return w.contextId === contextId;
+        })
+      : workletNodes;
+
+    if (ctxWorklets.length === 0) return null;
+
+    // ─────────────────────────────────────────────────────────────────
+    // Strategy 1: AudioWorklet → MediaStreamAudioDestination (HIGH)
+    // If AudioWorklet connects to MediaStreamAudioDestination,
+    // it's in the encoding path (sending audio to Worker/Blob)
+    // ─────────────────────────────────────────────────────────────────
+    const workletToStreamDest = connections.filter(c =>
+      c.sourceType === 'AudioWorklet' &&
+      c.destType === 'MediaStreamAudioDestination' &&
+      isActiveConnection(c)
+    );
+
+    if (workletToStreamDest.length > 0) {
+      const match = ctxWorklets.find(w => {
+        const nodeId = w.nodeId || w.instance?.__nodeId;
+        return workletToStreamDest.some(c => c.sourceId === nodeId);
+      });
+      if (match) {
+        return {
+          nodeId: match.nodeId || match.instance?.__nodeId,
+          processorName: match.processorName,
+          confidence: 'high'
+        };
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Strategy 2: Single AudioWorklet (MEDIUM)
+    // If there's only one AudioWorkletNode, it's likely the encoder
+    // ─────────────────────────────────────────────────────────────────
+    if (ctxWorklets.length === 1) {
+      const w = ctxWorklets[0];
+      return {
+        nodeId: w.nodeId || w.instance?.__nodeId,
+        processorName: w.processorName,
+        confidence: 'medium'
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Strategy 3: Most recent AudioWorklet (LOW)
+    // Multiple worklets - pick the most recently created one
+    // ─────────────────────────────────────────────────────────────────
+    const sorted = [...ctxWorklets].sort((a, b) => b.timestamp - a.timestamp);
+    const w = sorted[0];
+    return {
+      nodeId: w.nodeId || w.instance?.__nodeId,
+      processorName: w.processorName,
+      confidence: 'low'
+    };
   };
 
   // ═══════════════════════════════════════════════════════════════════
@@ -214,6 +644,14 @@
 
     navigator.mediaDevices.getUserMedia = async function(constraints) {
       const stream = await originalGUM(constraints);
+
+      // ═══════════════════════════════════════════════════════════════════
+      // EARLY RETURN: Skip capture if another tab is locked
+      // Prevents memory waste from capturing data in inactive tabs
+      // ═══════════════════════════════════════════════════════════════════
+      if (window.__otherTabLocked) {
+        return stream;
+      }
 
       if (constraints?.audio) {
         const capture = {
@@ -232,11 +670,59 @@
           window.__recordingState.sessionCount = (window.__recordingState.sessionCount || 0) + 1;
           const sessionNum = window.__recordingState.sessionCount;
 
+          // ═══════════════════════════════════════════════════════════════
+          // FIX: Set startTime for PCM/WAV path (blob tracking için)
+          // CRITICAL: active set ETMEYİN - createMediaStreamSource'da set edilecek
+          // Aksi halde broadcastRecordingState çağrılmaz ve pulse kaybolur
+          //
+          // Akış: getUserMedia → startTime set (flicker fix)
+          //       createMediaStreamSource → !active TRUE → broadcast → pulse
+          // ═══════════════════════════════════════════════════════════════
+          if (!window.__recordingState.startTime) {
+            window.__recordingState.startTime = Date.now();
+            window.__recordingState.duration = null;
+            window.__recordingState.startedByBlob = false;  // getUserMedia başlattı, blob değil
+            // active BURADA set edilmemeli - createMediaStreamSource broadcast'i tetiklemeli
+          }
+
           // Clear stale encoder detection
           window.__detectedEncoderData = null;
           if (window.__newRecordingSessionHandler) {
             window.__newRecordingSessionHandler(sessionNum);
           }
+
+          // ═══════════════════════════════════════════════════════════════
+          // PIPELINE RESET: Clear pipeline-specific captures from previous session
+          // AudioContext instances are preserved (pre-warmed context reuse), but
+          // pipeline nodes (AudioWorkletNodes, methodCalls) are reset.
+          // This ensures technology change detection works correctly when user
+          // switches from AudioWorklet to ScriptProcessor (or vice versa).
+          //
+          // NOTE: connections are NOT cleared - they are needed for UI tree rendering
+          // when inspector stops due to technology change. Context filtering in
+          // renderACStats will select the appropriate context based on connections.
+          // ═══════════════════════════════════════════════════════════════
+          const prevWorkletCount = window.__earlyCaptures.audioWorkletNodes?.length || 0;
+          window.__earlyCaptures.audioWorkletNodes = [];
+          // connections TEMİZLENMESİN - tree UI için korunmalı
+          // Clear methodCalls in each AudioContext (pipeline setup is session-specific)
+          window.__earlyCaptures.audioContexts.forEach(ctx => {
+            ctx.methodCalls = [];
+          });
+          if (prevWorkletCount > 0) {
+            debugLog('Pipeline reset', `Cleared ${prevWorkletCount} worklet(s) (connections preserved for UI)`);
+          }
+
+          // ═══════════════════════════════════════════════════════════════
+          // SIGNATURE PRESERVATION: Save current as previous BEFORE new session
+          // Critical for WASM encoder path where MediaRecorder.stop doesn't fire
+          // This ensures technology change detection works even without stop event
+          // ═══════════════════════════════════════════════════════════════
+          if (window.__audioSignatures.current) {
+            window.__audioSignatures.previous = window.__audioSignatures.current;
+            window.__audioSignatures.current = null;
+          }
+          signatureCheckedThisSession = false;
 
           console.log(`[AudioInspector] Early: New recording session #${sessionNum} (getUserMedia trigger)`);
         }
@@ -310,6 +796,15 @@
     window.AudioContext = new Proxy(OriginalAudioContext, {
       construct(target, args, newTarget) {
         const instance = Reflect.construct(target, args, newTarget);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY RETURN: Skip capture if another tab is locked
+        // Prevents memory waste from capturing data in inactive tabs
+        // ═══════════════════════════════════════════════════════════════════
+        if (window.__otherTabLocked) {
+          return instance;
+        }
+
         const contextId = getOrAssignContextId(instance);
 
         const capture = {
@@ -333,31 +828,24 @@
               const result = original.apply(this, methodArgs);
 
               // Record method call with normalized type
+              const methodType = METHOD_TYPE_MAP[methodName];
               capture.methodCalls.push({
-                type: METHOD_TYPE_MAP[methodName],
+                type: methodType,
                 ...extractMethodArgs(methodName, methodArgs),
                 timestamp: Date.now()
               });
 
-              // ═══════════════════════════════════════════════════════════
-              // RECORDING START SIGNAL: When microphone connects to AudioContext
-              // This is the earliest reliable signal for PCM/WAV recordings
-              // Check if stream is from getUserMedia (microphone capture)
-              // IMPORTANT: Only broadcast if NO MediaRecorder exists
-              // Sites with MediaRecorder should wait for MediaRecorder.start()
-              // ═══════════════════════════════════════════════════════════
-              if (methodName === 'createMediaStreamSource' && methodArgs[0]) {
-                const stream = methodArgs[0];
-                const isMicrophoneStream = window.__earlyCaptures?.getUserMedia?.some(
-                  gum => gum.stream?.id === stream.id
-                );
-                const hasMediaRecorder = window.__earlyCaptures?.mediaRecorders?.length > 0;
-                if (isMicrophoneStream && !window.__recordingState?.active && !hasMediaRecorder) {
-                  // PCM/WAV path: Microphone connected to AudioContext, no MediaRecorder
-                  // This is likely the start of a raw audio recording
-                  broadcastRecordingState(true);
-                  console.log('[AudioInspector] Early: Microphone connected (PCM/WAV path) - recording state: ACTIVE');
-                }
+              // ═══════════════════════════════════════════════════════════════════
+              // SIGNATURE CHECK: ScriptProcessor or MediaStreamDestination creation
+              // Early detection of AudioWorklet → ScriptProcessor or output path change
+              // ═══════════════════════════════════════════════════════════════════
+              if (methodType === 'scriptProcessor' || methodType === 'mediaStreamDestination') {
+                checkSignatureChange(methodName);
+              }
+
+              // PCM/WAV recording start signal (DRY: uses helper)
+              if (methodName === 'createMediaStreamSource') {
+                tryBroadcastPcmRecordingStart(methodArgs[0], 'Early');
               }
 
               console.log('[AudioInspector] Early: ' + methodName + '() captured');
@@ -413,7 +901,7 @@
               methodCalls: []
             };
             window.__earlyCaptures.audioContexts.push(capture);
-            console.log('[AudioInspector] Early (proto): Late-discovered AudioContext (' + this.sampleRate + 'Hz)');
+            console.log('[AudioInspector] Early: (proto) Late-discovered AudioContext (' + this.sampleRate + 'Hz)');
 
             // Notify collector handler if already registered
             if (window.__audioContextCollectorHandler) {
@@ -422,31 +910,27 @@
           }
 
           // Record method call
+          const methodType = METHOD_TYPE_MAP[methodName];
           capture.methodCalls.push({
-            type: METHOD_TYPE_MAP[methodName],
+            type: methodType,
             ...extractMethodArgs(methodName, args),
             timestamp: Date.now()
           });
 
-          // ═══════════════════════════════════════════════════════════
-          // RECORDING START SIGNAL: When microphone connects to AudioContext
-          // This is the earliest reliable signal for PCM/WAV recordings
-          // IMPORTANT: Only broadcast if NO MediaRecorder exists
-          // ═══════════════════════════════════════════════════════════
-          if (methodName === 'createMediaStreamSource' && args[0]) {
-            const stream = args[0];
-            const isMicrophoneStream = window.__earlyCaptures?.getUserMedia?.some(
-              gum => gum.stream?.id === stream.id
-            );
-            const hasMediaRecorder = window.__earlyCaptures?.mediaRecorders?.length > 0;
-            if (isMicrophoneStream && !window.__recordingState?.active && !hasMediaRecorder) {
-              // PCM/WAV path: Microphone connected, no MediaRecorder
-              broadcastRecordingState(true);
-              console.log('[AudioInspector] Early (proto): Microphone connected (PCM/WAV path) - recording state: ACTIVE');
-            }
+          // ═══════════════════════════════════════════════════════════════════
+          // SIGNATURE CHECK: ScriptProcessor or MediaStreamDestination creation
+          // Early detection of AudioWorklet → ScriptProcessor or output path change
+          // ═══════════════════════════════════════════════════════════════════
+          if (methodType === 'scriptProcessor' || methodType === 'mediaStreamDestination') {
+            checkSignatureChange(methodName);
           }
 
-          console.log('[AudioInspector] Early (proto): ' + methodName + '() captured');
+          // PCM/WAV recording start signal (DRY: uses helper)
+          if (methodName === 'createMediaStreamSource') {
+            tryBroadcastPcmRecordingStart(args[0], 'Early (proto)');
+          }
+
+          console.log('[AudioInspector] Early: (proto) ' + methodName + '() captured');
           return result;
         };
       }
@@ -594,6 +1078,14 @@
       // Call original connect first
       const result = originalConnect.apply(this, arguments);
 
+      // ═══════════════════════════════════════════════════════════════════
+      // EARLY RETURN: Skip capture if another tab is locked
+      // Prevents memory waste from capturing data in inactive tabs
+      // ═══════════════════════════════════════════════════════════════════
+      if (window.__otherTabLocked) {
+        return result;
+      }
+
       // Capture connection info
       const sourceType = getNodeTypeName(this);
       const sourceId = getNodeId(this);
@@ -607,6 +1099,7 @@
       const contextId = getOrAssignContextId(this.context);
 
       const connection = {
+        action: 'connect',
         sourceType,
         sourceId,
         destType,
@@ -630,6 +1123,35 @@
         console.log(`[AudioInspector] Early: ${sourceType} → ${destType}`);
       }
 
+      // ═══════════════════════════════════════════════════════════════════
+      // SIGNATURE CHECK: First destination connection triggers check
+      // This is the optimal timing - pipeline is definitely ready
+      // Triggered by: AudioDestination (speakers) or MediaStreamAudioDestination
+      // ═══════════════════════════════════════════════════════════════════
+      if (!signatureCheckedThisSession &&
+          (destType === 'AudioDestination' || destType === 'MediaStreamAudioDestination')) {
+
+        signatureCheckedThisSession = true;
+
+        const newSignature = calculateCurrentSignature();
+        const resetType = determineResetType(
+          window.__audioSignatures.previous,
+          newSignature
+        );
+
+        if (resetType === 'hard') {
+          broadcastSignatureChange('hard');
+        }
+
+        window.__audioSignatures.current = newSignature;
+
+        debugLog('Signature check (connect)', {
+          resetType,
+          previous: window.__audioSignatures.previous,
+          current: newSignature
+        });
+      }
+
       return result;
     };
 
@@ -642,6 +1164,14 @@
 
     AudioNode.prototype.disconnect = function(...args) {
       const result = originalDisconnect.apply(this, args);
+
+      // ═══════════════════════════════════════════════════════════════════
+      // EARLY RETURN: Skip capture if another tab is locked
+      // Prevents memory waste from capturing data in inactive tabs
+      // ═══════════════════════════════════════════════════════════════════
+      if (window.__otherTabLocked) {
+        return result;
+      }
 
       const sourceType = getNodeTypeName(this);
       const sourceId = getNodeId(this);
@@ -713,6 +1243,14 @@
       construct(target, args, newTarget) {
         const instance = Reflect.construct(target, args, newTarget);
 
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY RETURN: Skip capture if another tab is locked
+        // Prevents memory waste from capturing data in inactive tabs
+        // ═══════════════════════════════════════════════════════════════════
+        if (window.__otherTabLocked) {
+          return instance;
+        }
+
         const context = args[0];      // AudioContext
         const processorName = args[1]; // 'peak-worklet-processor', 'opus-encoder', etc.
         const options = args[2];       // Optional parameters
@@ -736,6 +1274,12 @@
           window.__audioWorkletNodeHandler(instance, args);
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        // SIGNATURE CHECK: AudioWorkletNode = potential processingPath change
+        // Early detection of ScriptProcessor → AudioWorklet technology change
+        // ═══════════════════════════════════════════════════════════════════
+        checkSignatureChange('AudioWorkletNode');
+
         console.log(`[AudioInspector] Early: AudioWorkletNode created (${processorName})`);
 
         return instance;
@@ -753,6 +1297,14 @@
     window.RTCPeerConnection = new Proxy(OriginalRTCPC, {
       construct(target, args, newTarget) {
         const instance = Reflect.construct(target, args, newTarget);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY RETURN: Skip capture if another tab is locked
+        // Prevents memory waste from capturing data in inactive tabs
+        // ═══════════════════════════════════════════════════════════════════
+        if (window.__otherTabLocked) {
+          return instance;
+        }
 
         const capture = {
           instance,
@@ -772,6 +1324,47 @@
     });
 
     console.log('[AudioInspector] Early: Hooked RTCPeerConnection constructor');
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RTCPeerConnection.addTrack Hook - WebRTC Audio Track Detection
+    // WebRTC doesn't use AudioNode.connect(), so we hook addTrack instead
+    // This triggers signature check for WebRTC-only audio pipelines
+    // ═══════════════════════════════════════════════════════════════════
+    const originalAddTrack = RTCPeerConnection.prototype.addTrack;
+    if (originalAddTrack) {
+      RTCPeerConnection.prototype.addTrack = function(track, ...streams) {
+        const result = originalAddTrack.apply(this, arguments);
+
+        // Audio track signature check (WebRTC path)
+        if (track && track.kind === 'audio' && !signatureCheckedThisSession) {
+          signatureCheckedThisSession = true;
+
+          // WebRTC signature: processingPath='none', encodingType='browser_native'
+          const newSignature = calculateCurrentSignature();
+          const resetType = determineResetType(
+            window.__audioSignatures.previous,
+            newSignature
+          );
+
+          if (resetType === 'hard') {
+            broadcastSignatureChange('hard');
+          }
+
+          window.__audioSignatures.current = newSignature;
+
+          debugLog('Signature check (addTrack)', {
+            resetType,
+            trackKind: track.kind,
+            previous: window.__audioSignatures.previous,
+            current: newSignature
+          });
+        }
+
+        return result;
+      };
+
+      console.log('[AudioInspector] Early: Hooked RTCPeerConnection.prototype.addTrack');
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -802,6 +1395,14 @@
       construct(target, args, newTarget) {
         const instance = Reflect.construct(target, args, newTarget);
 
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY RETURN: Skip capture if another tab is locked
+        // Prevents memory waste from capturing data in inactive tabs
+        // ═══════════════════════════════════════════════════════════════════
+        if (window.__otherTabLocked) {
+          return instance;
+        }
+
         // Capture stream and options for late processing by MediaRecorderCollector
         const capture = {
           instance,
@@ -810,6 +1411,12 @@
           timestamp: Date.now()
         };
         window.__earlyCaptures.mediaRecorders.push(capture);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // SIGNATURE CHECK: MediaRecorder = potential encodingType change
+        // Early detection of WASM → MediaRecorder (browser_native) switch
+        // ═══════════════════════════════════════════════════════════════════
+        checkSignatureChange('MediaRecorder');
 
         // Track recording duration for bitrate calculation
         // NOTE: Session reset is now handled in getUserMedia hook (earlier signal)
@@ -827,6 +1434,10 @@
           // Broadcast to storage for popup's PendingWebAudio detector
           broadcastRecordingState(true);
 
+          // NOTE: Signature check moved to connect() hook for precise timing
+          // MediaRecorder.start no longer triggers signature check directly
+          // The check will happen when audio pipeline connects to destination
+
           debugLog('MediaRecorder started', `Session #${window.__recordingState.sessionCount}`);
         });
 
@@ -838,6 +1449,14 @@
             broadcastRecordingState(false);
             debugLog('MediaRecorder stopped', `Duration: ${window.__recordingState.duration.toFixed(1)}s`);
           }
+
+          // ═══════════════════════════════════════════════════════════════════
+          // SIGNATURE PRESERVATION: Save current signature as previous
+          // This enables technology change detection for next recording
+          // Also reset session flag to allow check on next recording
+          // ═══════════════════════════════════════════════════════════════════
+          window.__audioSignatures.previous = calculateCurrentSignature();
+          signatureCheckedThisSession = false;
         });
 
         // Notify collector handler if already registered
@@ -907,6 +1526,15 @@
     window.Worker = new Proxy(OriginalWorker, {
       construct(target, args, newTarget) {
         const instance = Reflect.construct(target, args, newTarget);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY RETURN: Skip capture if another tab is locked
+        // Prevents memory waste from capturing data in inactive tabs
+        // ═══════════════════════════════════════════════════════════════════
+        if (window.__otherTabLocked) {
+          return instance;
+        }
+
         const workerUrl = args[0];
 
         if (workerUrl) {
@@ -937,6 +1565,12 @@
           // Worker data is captured in __earlyCaptures.workers for later use
 
           if (analysis.isEncoder) {
+            // ═══════════════════════════════════════════════════════════════════
+            // SIGNATURE CHECK: Encoder Worker = potential encodingType change
+            // Early detection of MediaRecorder → WASM encoder switch
+            // ═══════════════════════════════════════════════════════════════════
+            checkSignatureChange('encoder-worker');
+
             console.log('[AudioInspector] Early: Encoder Worker created (' + analysis.filename + ')');
           }
         }
@@ -955,6 +1589,14 @@
   const originalWorkerPostMessage = Worker.prototype.postMessage;
   let workerMessageCount = 0;  // Debug counter
   Worker.prototype.postMessage = function(message, ...args) {
+    // ═══════════════════════════════════════════════════════════════════
+    // EARLY RETURN: Skip capture if another tab is locked
+    // Prevents memory waste from capturing data in inactive tabs
+    // ═══════════════════════════════════════════════════════════════════
+    if (window.__otherTabLocked) {
+      return originalWorkerPostMessage.apply(this, [message, ...args]);
+    }
+
     workerMessageCount++;
 
     // ═══════════════════════════════════════════════════════════════════
@@ -985,14 +1627,14 @@
 
       // Also log to browser console for DevTools debugging
       if (typeof message === 'object' && message !== null && !ArrayBuffer.isView(message)) {
-        console.log(`[Early] Worker.postMessage #${workerMessageCount} type=${msgType}:`, JSON.stringify(message, null, 2).substring(0, 500));
+        console.log(`[AudioInspector] Early: Worker.postMessage #${workerMessageCount} type=${msgType}:`, JSON.stringify(message, null, 2).substring(0, 500));
 
         // Check if this looks like audio-related message
         const keys = Object.keys(message);
         const audioKeywords = ['sample', 'rate', 'buffer', 'channel', 'bit', 'encode', 'init', 'start', 'record', 'audio', 'codec', 'mp3', 'opus', 'aac'];
         const hasAudioKey = keys.some(k => audioKeywords.some(kw => k.toLowerCase().includes(kw)));
         if (hasAudioKey) {
-          console.log(`[Early] Worker.postMessage AUDIO:`, JSON.stringify(message, null, 2));
+          console.log(`[AudioInspector] Early: Worker.postMessage AUDIO:`, JSON.stringify(message, null, 2));
         }
       }
     }
@@ -1163,8 +1805,8 @@
         debugLog(`Encoder init detected (${encoderInfo.pattern})`, `${codec.toUpperCase()}${libraryInfo}, ${encoderInfo.sampleRate}Hz, buffer=${encoderInfo.bufferSize}, worker=${workerMeta?.filename || 'unknown'}`);
 
         // Also log to browser console for DevTools debugging
-        console.log(`[Early] Encoder init detected (${encoderInfo.pattern}): ${codec.toUpperCase()}${libraryInfo}, ${encoderInfo.sampleRate}Hz, buffer=${encoderInfo.bufferSize}, worker=${workerMeta?.filename || 'unknown'}`);
-        console.log(`[Early] Full encoderInfo:`, JSON.stringify(encoderInfo, null, 2));
+        console.log(`[AudioInspector] Early: Encoder init detected (${encoderInfo.pattern}): ${codec.toUpperCase()}${libraryInfo}, ${encoderInfo.sampleRate}Hz, buffer=${encoderInfo.bufferSize}, worker=${workerMeta?.filename || 'unknown'}`);
+        console.log(`[AudioInspector] Early: Full encoderInfo:`, JSON.stringify(encoderInfo, null, 2));
       }
 
       // Notify handler if encoder detected
@@ -1173,11 +1815,11 @@
         // sessionCount is incremented on MediaRecorder start or BlobTracking start
         encoderInfo.sessionId = window.__recordingState?.sessionCount || 0;
 
-        console.log(`[Early] Notifying handler, registered: ${!!window.__detectedEncoderHandler}`);
+        console.log(`[AudioInspector] Early: Notifying handler, registered: ${!!window.__detectedEncoderHandler}`);
         if (window.__detectedEncoderHandler) {
           window.__detectedEncoderHandler(encoderInfo);
         } else {
-          console.log(`[Early] WARNING: Handler not registered, encoderInfo will be lost!`);
+          console.log(`[AudioInspector] Early: WARNING: Handler not registered, encoderInfo will be lost!`);
         }
       }
     }
@@ -1279,6 +1921,15 @@
     window.Blob = new Proxy(OriginalBlob, {
       construct(target, args, newTarget) {
         const instance = Reflect.construct(target, args, newTarget);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // EARLY RETURN: Skip capture if another tab is locked
+        // Prevents memory waste from capturing data in inactive tabs
+        // ═══════════════════════════════════════════════════════════════════
+        if (window.__otherTabLocked) {
+          return instance;
+        }
+
         const options = args[1];
 
         if (options?.type) {
@@ -1372,16 +2023,32 @@
                   ? (blobSize > (recordingState.lastBlobSize * 1.7))
                   : false;
 
+                // Export blob = kayıt bitti. Hemen finalize et.
+                // Bu, pulse → sonuç geçişinin tek seferde olmasını sağlar (flickering önler).
+                if (likelyExportBlob && recordingState.active) {
+                  if (recordingState.finalizeTimer) {
+                    clearTimeout(recordingState.finalizeTimer);
+                    recordingState.finalizeTimer = null;
+                  }
+                  recordingState.active = false;
+                  recordingState.duration = recordingState.startTime
+                    ? (Date.now() - recordingState.startTime) / 1000
+                    : null;
+                  recordingState.finalizedAt = Date.now();
+                }
+
                 const blobSessionInactive = recordingState.startedByBlob === true && recordingState.active !== true;
                 const shouldStartNewBlobSession = (
-                  // First ever blob-based detection
-                  (!recordingState.startTime && !recordingState.duration) ||
+                  // First ever blob-based detection (but NOT if getUserMedia already started a session)
+                  (!recordingState.startTime && !recordingState.duration && recordingState.sessionCount === 0) ||
                   // New mic capture since last blob (strong signal for a new recording)
                   (recordingState.startedByBlob === true && hasNewGumSinceLastBlob) ||
                   // Inactive blob session + new mic capture since finalize (strong signal)
-                  (blobSessionInactive && hasNewGumSinceFinalize) ||
+                  // Guard: Export blobs (>1.7x last size) should NOT start new sessions
+                  (blobSessionInactive && hasNewGumSinceFinalize && !likelyExportBlob) ||
                   // Inactive blob session + long gap (likely a new recording)
-                  (blobSessionInactive && ((gapSinceFinalize > NEW_SESSION_GAP_MS) || (gapSinceLastBlob > NEW_SESSION_GAP_MS)))
+                  // Guard: Export blobs should NOT restart session even with time gap
+                  (blobSessionInactive && !likelyExportBlob && ((gapSinceFinalize > NEW_SESSION_GAP_MS) || (gapSinceLastBlob > NEW_SESSION_GAP_MS)))
                 );
 
                 if (shouldStartNewBlobSession) {
@@ -1526,6 +2193,14 @@
                     recordingState.finalizedAt = Date.now();
                     // Broadcast finalized state
                     broadcastRecordingState(false);
+
+                    // ═══════════════════════════════════════════════════════════
+                    // SIGNATURE PRESERVATION: Save current signature as previous
+                    // PCM/WAV path: No MediaRecorder.stop event, so save here
+                    // Also reset session flag to allow check on next recording
+                    // ═══════════════════════════════════════════════════════════
+                    window.__audioSignatures.previous = calculateCurrentSignature();
+                    signatureCheckedThisSession = false;
 
                     const finalBytes = recordingState.totalBytes || blobSize;
                     const finalDuration = recordingState.duration || recordingDuration;

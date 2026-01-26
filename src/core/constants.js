@@ -14,12 +14,12 @@ export const EVENTS = {
  */
 export const DATA_TYPES = {
   RTC_STATS: 'rtc_stats',
-  USER_MEDIA: 'userMedia',
-  AUDIO_CONTEXT: 'audioContext',
-  AUDIO_WORKLET: 'audioWorklet',
-  MEDIA_RECORDER: 'mediaRecorder',
-  DETECTED_ENCODER: 'detectedEncoder',  // Renamed from WASM_ENCODER - handles all encoder types (WASM, PCM, native)
-  AUDIO_CONNECTION: 'audioConnection',
+  USER_MEDIA: 'user_media',
+  AUDIO_CONTEXT: 'audio_contexts',
+  AUDIO_WORKLET: 'audio_worklet',
+  MEDIA_RECORDER: 'media_recorder',
+  DETECTED_ENCODER: 'detected_encoder',  // Renamed from WASM_ENCODER - handles all encoder types (WASM, PCM, native)
+  AUDIO_CONNECTION: 'audio_connections',
   PLATFORM_DETECTED: 'platform_detected'
 };
 
@@ -79,8 +79,9 @@ export const DATA_STORAGE_KEYS = [
   'audio_worklet',
   'media_recorder',
   'detected_encoder',  // Renamed from wasm_encoder - handles all encoder types
-  'audio_connections',
-  'recording_active'   // Single source of truth for recording state
+  'audio_connections'
+  // NOTE: recording_active is read by updateUI() but intentionally excluded
+  // from DATA_STORAGE_KEYS to prevent storage.onChanged UI flickering
 ];
 
 /**

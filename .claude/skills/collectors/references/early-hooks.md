@@ -229,7 +229,7 @@ stop() {
 ### UI'da usageType Kullanımı
 
 ```javascript
-// audio-tree.js → AUDIO_NODE_DISPLAY_MAP.analyser
+// audio-flow.js → AUDIO_NODE_DISPLAY_MAP.analyser
 analyser: {
   getLabel: (proc) => {
     const usageLabels = {

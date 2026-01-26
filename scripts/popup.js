@@ -11,15 +11,16 @@ import {
 import {
   renderRTCStats,
   renderGUMStats,
-  renderACStats,
-  renderDebugLogs
+  renderACStats
 } from './modules/renderers.js';
 
 import {
   renderEncodingSection
-} from './modules/encoder-ui.js';
+} from './modules/encoding-ui.js';
 
-import { measureTreeLabels } from './modules/audio-tree.js';
+import { measureFlowLabels } from './modules/audio-flow.js';
+
+import { generateTextReport } from './modules/report-generator.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GLOBAL STATE
@@ -29,12 +30,15 @@ let enabled = false; // Default to false (stopped)
 let drawerOpen = false; // Console drawer state
 let currentTabId = null; // Track which tab this panel is associated with
 let updateUITimer = null; // Debounce timer for updateUI() calls
+let currentLogFilter = 'all'; // Console tab log filter state
+let cachedLogs = []; // Cached logs for filtering
+let currentDrawerTab = 'console'; // Active drawer tab: 'console' | 'extension'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DRY: Storage keys fetched from background.js (single source of truth)
 // Fallback array used until background.js responds (prevents race condition)
 // ═══════════════════════════════════════════════════════════════════════════════
-let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'detected_encoder', 'audio_connections', 'recording_active'];
+let DATA_STORAGE_KEYS = ['rtc_stats', 'user_media', 'audio_contexts', 'audio_worklet', 'media_recorder', 'detected_encoder', 'audio_connections'];
 
 // Fetch actual keys from background.js (async, updates DATA_STORAGE_KEYS)
 chrome.runtime.sendMessage({ type: 'GET_STORAGE_KEYS' }, (response) => {
@@ -181,13 +185,19 @@ async function updateUI() {
 
   renderRTCStats(validRtcStats);
   renderGUMStats(validUserMedia);
-  renderACStats(validAudioContexts?.length > 0 ? validAudioContexts : null, validAudioConnections);
+  // Pass encoding-related data via options object (OCP: config object pattern)
+  renderACStats(validAudioContexts?.length > 0 ? validAudioContexts : null, {
+    audioConnections: validAudioConnections,
+    detectedEncoder: validDetectedEncoder,
+    mediaRecorder: validMediaRecorder,
+    recordingActive: validRecordingActive
+  });
   renderEncodingSection(validDetectedEncoder, validRtcStats, validMediaRecorder, validAudioContexts?.length > 0 ? validAudioContexts : null, validUserMedia, validRecordingActive);
-  renderDebugLogs(result.debug_logs, updateLogBadge);
+  renderDrawerLogs(result.debug_logs, updateLogBadge);
 
-  // Audio tree render edildikten sonra label genişliklerini ölç
+  // Audio flow render edildikten sonra label genişliklerini ölç
   requestAnimationFrame(() => {
-    measureTreeLabels();
+    measureFlowLabels();
   });
 }
 
@@ -231,16 +241,13 @@ async function toggleInspector() {
   enabled = !enabled;
 
   if (enabled && activeTab) {
-    // START: Clear any stale auto-stop reason first (prevents 3-4s banner flash)
-    await chrome.storage.local.remove(['autoStoppedReason']);
-
-    // START: Aktif tab'ı kilitle
+    // START: Lock active tab
     const lockedTabData = {
       id: activeTab.id,
       url: activeTab.url,
       title: activeTab.title
     };
-    debugLog(`🔒 Tab kilitlendi: ${activeTab.url} (id: ${activeTab.id})`);
+    debugLog(`🔒 Tab locked: ${activeTab.url} (id: ${activeTab.id})`);
     await chrome.storage.local.set({
       inspectorEnabled: true,
       lockedTab: lockedTabData
@@ -252,8 +259,8 @@ async function toggleInspector() {
       enabled: true
     }, () => chrome.runtime.lastError); // Suppress error
   } else {
-    // STOP: Mesajı KİLİTLİ TAB'A gönder (farklı tab'dan Stop'a basılmış olabilir)
-    debugLog('🔓 Tab kilidi kaldırıldı');
+    // STOP: Send message to LOCKED TAB (Stop may have been pressed from different tab)
+    debugLog('🔓 Tab lock removed');
 
     if (lockedTab?.id) {
       debugLog(`Stopping inspector on locked tab: ${lockedTab.id}`);
@@ -312,10 +319,15 @@ async function checkTabLock() {
 
   debugLog(`checkTabLock: currentTab=${currentTab?.id}, lockedTab=${result.lockedTab?.id}, enabled=${result.inspectorEnabled}`);
 
-  // Auto-stop bildirimi varsa göster ve temizle
-  if (result.autoStoppedReason) {
+  // Auto-stop: show banner only if inspector is NOT running, then remove
+  // (inspector çalışıyorsa banner gösterme - merkezi temizleme noktası)
+  if (result.autoStoppedReason && !result.inspectorEnabled) {
     showAutoStopBanner(result.autoStoppedReason);
     chrome.storage.local.remove(['autoStoppedReason']);
+  } else if (result.inspectorEnabled) {
+    // Inspector running - hide any existing auto-stop banner
+    // (örn: technology_change sonrası "Refresh and Start" tıklandığında)
+    hideAutoStopBanner();
   }
 
   // lockedTab varsa her zaman banner göster (running veya stopped - review için)
@@ -324,8 +336,8 @@ async function checkTabLock() {
     try {
       await chrome.tabs.get(result.lockedTab.id);
     } catch (e) {
-      // Tab artık yok - kilidi kaldır ve temizlik yap
-      debugLog(`🧹 Kilitli tab artık yok (id: ${result.lockedTab.id}), temizleniyor`);
+      // Tab no longer exists - remove lock and cleanup
+      debugLog(`🧹 Locked tab no longer exists (id: ${result.lockedTab.id}), cleaning up`);
       await clearInspectorData();
       await hideLockedTabInfo();
       return true;
@@ -333,13 +345,13 @@ async function checkTabLock() {
 
     const isSameTab = result.lockedTab.id === currentTab?.id;
 
-    // Banner'ı göster - inspector çalışıyor olsun ya da olmasın
+    // Show banner - whether inspector is running or not
     showLockedTabInfo(result.lockedTab, isSameTab, result.inspectorEnabled);
-    debugLog(`Banner gösteriliyor (${isSameTab ? 'aynı tab' : 'farklı tab'}, ${result.inspectorEnabled ? 'running' : 'stopped'}): ${result.lockedTab.url}`);
+    debugLog(`Banner showing (${isSameTab ? 'same tab' : 'different tab'}, ${result.inspectorEnabled ? 'running' : 'stopped'}): ${result.lockedTab.url}`);
 
     return isSameTab;
   } else {
-    debugLog('lockedTab yok - banner gizleniyor');
+    debugLog('No lockedTab - hiding banner');
     await hideLockedTabInfo();
     return true;
   }
@@ -350,7 +362,7 @@ function extractDomain(lockedTab) {
   try {
     return new URL(lockedTab.url).hostname;
   } catch {
-    return lockedTab.title || 'Bilinmeyen';
+    return lockedTab.title || 'Unknown';
   }
 }
 
@@ -381,7 +393,7 @@ function showLockedTabInfo(lockedTab, isSameTab = false, isRunning = false) {
   const controls = document.querySelector('.controls');
 
   if (!banner || !domainSpan || !bannerStatusText) {
-    debugLog('❌ showLockedTabInfo: DOM element bulunamadı!');
+    debugLog('❌ showLockedTabInfo: DOM element not found!');
     return;
   }
 
@@ -395,14 +407,14 @@ function showLockedTabInfo(lockedTab, isSameTab = false, isRunning = false) {
   // Update styling
   updateBannerStyle(banner, isSameTab);
 
-  // Controls disabled state: farklı tab'da Start butonu disabled olmalı
+  // Controls disabled state: Start button should be disabled on different tab
   if (isSameTab) {
     controls?.classList.remove('disabled');
   } else {
     controls?.classList.add('disabled');
   }
 
-  debugLog(`✅ Banner gösterildi: ${domain} (${isSameTab ? 'aynı' : 'farklı'} tab, ${isRunning ? 'running' : 'stopped'})`);
+  debugLog(`✅ Banner shown: ${domain} (${isSameTab ? 'same' : 'different'} tab, ${isRunning ? 'running' : 'stopped'})`);
 }
 
 // Kilitli tab bilgisini gizle
@@ -412,8 +424,8 @@ async function hideLockedTabInfo() {
 
   banner?.classList.remove('visible', 'same-tab', 'different-tab');
 
-  // Controls'u hemen enabled yap, sonra sistem sayfası kontrolü yap
-  // Bu async updateControlsForCurrentTab()'dan daha güvenilir
+  // Enable controls immediately, then check for system page
+  // This is more reliable than async updateControlsForCurrentTab()
   const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
   if (isSystemPage(currentTab?.url)) {
@@ -451,6 +463,7 @@ function updateActionButtons(inspectorRunning) {
 }
 
 // Auto-stop bildirimi göster (origin değişikliği vb.)
+// Banner click-to-dismiss - kullanıcı tıklayana kadar kalır
 function showAutoStopBanner(reason) {
   const banner = document.getElementById('autoStopBanner');
   if (!banner) return;
@@ -460,37 +473,50 @@ function showAutoStopBanner(reason) {
     'injection_failed': 'Injection failed - please reload page',
     'tab_switch': '⚠️ Inspecting stopped: Switched to different tab',
     'navigation': '⚠️ Inspector stopped: Navigated to different site',
-    'window_switch': '⚠️ Inspector stopped: Switched to different window'
+    'window_switch': '⚠️ Inspector stopped: Switched to different window',
+    'technology_change': '🔄 Recording technology changed'
   };
   banner.textContent = messages[reason] || 'Inspector stopped';
   banner.classList.add('visible');
 
-  // 5 saniye sonra gizle
-  setTimeout(() => {
+  // Click to dismiss (no timeout - user must acknowledge)
+  banner.onclick = () => {
     banner.classList.remove('visible');
-  }, 5000);
+    banner.onclick = null;
+  };
 
   debugLog(`Auto-stop banner shown: ${reason}`);
+}
+
+// Auto-stop banner'ı gizle (inspector başladığında çağrılır)
+function hideAutoStopBanner() {
+  const banner = document.getElementById('autoStopBanner');
+  if (banner) {
+    banner.classList.remove('visible');
+    banner.onclick = null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DATA EXPORT AND CLEAR
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Export function
+// Export function - reads from current UI DOM state
 function exportData() {
-  if (!latestData) {
+  // Generate text report from rendered UI (no data parameter needed)
+  const reportText = generateTextReport();
+
+  if (!reportText || reportText.trim().length === 0) {
     alert('No data to export');
     return;
   }
 
-  const json = JSON.stringify(latestData, null, 2);
-  const blob = new Blob([json], { type: 'application/json' });
+  const blob = new Blob([reportText], { type: 'text/plain; charset=utf-8' });
   const url = URL.createObjectURL(blob);
 
   const a = document.createElement('a');
   a.href = url;
-  a.download = `audio-inspector-${Date.now()}.json`;
+  a.download = `audio-inspector-${Date.now()}.txt`;
   a.click();
 
   URL.revokeObjectURL(url);
@@ -516,10 +542,53 @@ async function clearData() {
   location.reload();
 }
 
-// Copy logs to clipboard
-async function copyLogs() {
+// Copy ALL logs to clipboard (everything - Console + Extension, all levels)
+async function copyAllLogs() {
   const result = await chrome.storage.local.get('debug_logs');
   const logs = result.debug_logs || [];
+
+  if (logs.length === 0) {
+    alert('No logs to copy');
+    return;
+  }
+
+  // Format ALL logs as plain text (no filtering)
+  const text = logs.map(log => {
+    const time = formatTime(log.timestamp);
+    return `${time} [${log.prefix}] ${log.message}`;
+  }).join('\n');
+
+  try {
+    await navigator.clipboard.writeText(text);
+    // Show feedback
+    const btn = document.getElementById('copyAllLogsBtn');
+    const originalText = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.style.color = 'var(--accent-green)';
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.style.color = '';
+    }, 1500);
+  } catch (err) {
+    console.error('[Popup] Failed to copy logs:', err);
+    alert('Failed to copy logs');
+  }
+}
+
+// Copy VISIBLE logs to clipboard (respects active tab + level filter)
+async function copyVisibleLogs() {
+  const result = await chrome.storage.local.get('debug_logs');
+  const allLogs = result.debug_logs || [];
+
+  // Filter based on active tab
+  let logs = currentDrawerTab === 'console'
+    ? allLogs.filter(l => l.prefix === 'Console')
+    : allLogs.filter(l => l.prefix !== 'Console');
+
+  // Apply level filter
+  if (currentLogFilter !== 'all') {
+    logs = logs.filter(l => l.level === currentLogFilter);
+  }
 
   if (logs.length === 0) {
     alert('No logs to copy');
@@ -535,7 +604,7 @@ async function copyLogs() {
   try {
     await navigator.clipboard.writeText(text);
     // Show feedback
-    const btn = document.getElementById('copyLogsBtn');
+    const btn = document.getElementById('copyVisibleLogsBtn');
     const originalText = btn.textContent;
     btn.textContent = 'Copied!';
     btn.style.color = 'var(--accent-green)';
@@ -544,7 +613,7 @@ async function copyLogs() {
       btn.style.color = '';
     }, 1500);
   } catch (err) {
-    console.error('Failed to copy logs:', err);
+    console.error('[Popup] Failed to copy logs:', err);
     alert('Failed to copy logs');
   }
 }
@@ -552,8 +621,8 @@ async function copyLogs() {
 // Clear logs only
 async function clearLogs() {
   await clearLogsOnly();
-  renderDebugLogs([], updateLogBadge);
-  updateLogBadge(0);
+  cachedLogs = [];
+  renderDrawerLogs([], updateLogBadge);
 }
 
 // Toggle console drawer
@@ -561,6 +630,111 @@ function toggleDrawer() {
   drawerOpen = !drawerOpen;
   const drawer = document.getElementById('drawerOverlay');
   drawer.classList.toggle('open', drawerOpen);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRAWER FILTERS (Tab + Level)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Setup drawer filters (tab selection + level filter)
+function setupDrawerFilters() {
+  // Tab seçimi (drawer-tab class)
+  document.querySelectorAll('.drawer-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const targetTab = tab.dataset.tab;
+      if (targetTab === currentDrawerTab) return;
+
+      currentDrawerTab = targetTab;
+
+      // Update tab button states
+      document.querySelectorAll('.drawer-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.tab === targetTab));
+
+      // Update tab content visibility
+      document.getElementById('consoleLogsContent')
+        ?.classList.toggle('active', targetTab === 'console');
+      document.getElementById('extensionLogsContent')
+        ?.classList.toggle('active', targetTab === 'extension');
+
+      // Re-render logs for new tab
+      renderDrawerLogs(cachedLogs, updateLogBadge);
+    });
+  });
+
+  // Level filtresi (filter-btn with data-level)
+  document.querySelectorAll('.filter-btn[data-level]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentLogFilter = btn.dataset.level;
+
+      // Update level button states
+      document.querySelectorAll('.filter-btn[data-level]').forEach(b =>
+        b.classList.toggle('active', b.dataset.level === currentLogFilter));
+
+      // Re-render with filter
+      renderDrawerLogs(cachedLogs, updateLogBadge);
+    });
+  });
+}
+
+// Render drawer logs with tab separation and level filtering
+// Console tab: logs with prefix 'Console' (page DevTools output)
+// Extension tab: all other logs (extension internal)
+function renderDrawerLogs(logs, badgeCallback) {
+  const consoleContainer = document.getElementById('consoleLogsContent');
+  const extensionContainer = document.getElementById('extensionLogsContent');
+
+  if (!logs?.length) {
+    if (consoleContainer) consoleContainer.innerHTML = '<div class="no-data">No console logs</div>';
+    if (extensionContainer) extensionContainer.innerHTML = '<div class="no-data">Waiting for events...</div>';
+    badgeCallback?.(0);
+    return;
+  }
+
+  // Cache logs for filtering
+  cachedLogs = logs;
+
+  // Split logs by source
+  const consoleLogs = logs.filter(l => l.prefix === 'Console');
+  const extensionLogs = logs.filter(l => l.prefix !== 'Console');
+
+  // Render Console tab
+  renderLogList(consoleContainer, consoleLogs, 'No console logs');
+
+  // Render Extension tab
+  renderLogList(extensionContainer, extensionLogs, 'Waiting for events...');
+
+  // Update badge (total count)
+  badgeCallback?.(logs.length);
+}
+
+// Helper: Render log list with filtering
+function renderLogList(container, logs, emptyMessage) {
+  if (!container) return;
+
+  // Apply level filter
+  const filtered = currentLogFilter === 'all'
+    ? logs
+    : logs.filter(l => l.level === currentLogFilter);
+
+  if (filtered.length === 0) {
+    const msg = currentLogFilter === 'all' ? emptyMessage : `No ${currentLogFilter} logs`;
+    container.innerHTML = `<div class="no-data">${msg}</div>`;
+    return;
+  }
+
+  container.innerHTML = filtered.map(log => {
+    const colorClass = getLogColorClass(log.level);
+    return `
+      <div class="log-line ${colorClass}">
+        <span class="log-time">${formatTime(log.timestamp)}</span>
+        <span class="log-prefix">[${escapeHtml(log.prefix || 'System')}]</span>
+        <span class="log-message">${escapeHtml(log.message || '')}</span>
+      </div>
+    `;
+  }).join('');
+
+  // Auto-scroll to bottom
+  container.scrollTop = container.scrollHeight;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -628,11 +802,14 @@ function updateLogBadge(count) {
  */
 function initTooltipPositioning() {
   document.addEventListener('mouseenter', (e) => {
-    const el = e.target.closest('.has-tooltip, .tree-tooltip, .truncated-tooltip');
+    // Sadece Element hedefler için çalış (document/Text node'larda closest yok)
+    if (!e.target.closest) return;
+
+    const el = e.target.closest('.has-tooltip, .flow-tooltip, .truncated-tooltip');
     if (!el) return;
 
     const rect = el.getBoundingClientRect();
-    const isLeft = el.classList.contains('tooltip-left') || el.classList.contains('tree-tooltip');
+    const isLeft = el.classList.contains('tooltip-left') || el.classList.contains('flow-tooltip');
     const isTruncated = el.classList.contains('truncated-tooltip');
 
     // Tooltip konumunu hesapla
@@ -702,9 +879,13 @@ initTruncatedTooltips();
 document.getElementById('toggleBtn').addEventListener('click', toggleInspector);
 document.getElementById('exportBtn').addEventListener('click', exportData);
 document.getElementById('clearBtn').addEventListener('click', clearData);
-document.getElementById('copyLogsBtn').addEventListener('click', copyLogs);
+document.getElementById('copyAllLogsBtn').addEventListener('click', copyAllLogs);
+document.getElementById('copyVisibleLogsBtn').addEventListener('click', copyVisibleLogs);
 document.getElementById('clearLogsBtn').addEventListener('click', clearLogs);
 document.getElementById('drawerHandle').addEventListener('click', toggleDrawer);
+
+// Initialize drawer filters (tab + level unified)
+setupDrawerFilters();
 
 // Refresh modal event listeners
 document.getElementById('refreshModalCancel').addEventListener('click', hideRefreshModal);
@@ -742,7 +923,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
     // Update logs if they changed
     if (changes.debug_logs) {
-      renderDebugLogs(changes.debug_logs.newValue, updateLogBadge);
+      const newLogs = changes.debug_logs.newValue || [];
+      renderDrawerLogs(newLogs, updateLogBadge);
     }
 
     // Also check for inspectorEnabled change

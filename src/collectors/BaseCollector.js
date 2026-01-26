@@ -65,12 +65,51 @@ class BaseCollector {
   }
 
   /**
-   * Start collecting data
-   * @abstract
+   * Start collecting data - Template Method Pattern
+   *
+   * Subclasses should override hook methods (_processEarlyInstances, _onStartComplete)
+   * instead of overriding this method entirely.
+   *
+   * Exception: Complex collectors (AudioContextCollector) may override start() entirely
+   * and should add @override JSDoc to indicate intentional override.
+   *
    * @returns {Promise<void>}
    */
   async start() {
-    throw new Error('start() must be implemented by subclass');
+    this.active = true;
+
+    // Hook 1: Process early captures and registry instances
+    const processedCount = await this._processEarlyInstances();
+
+    // Hook 2: Post-start actions (polling, etc.)
+    await this._onStartComplete(processedCount);
+
+    // Log start message
+    const msg = processedCount > 0
+      ? `Started (processed ${processedCount} early instance(s))`
+      : 'Started';
+    logger.info(this.logPrefix, msg);
+  }
+
+  /**
+   * Hook: Process early captures from early-inject.js and registry
+   * Override in subclass to process instances created before collector started
+   * @protected
+   * @returns {Promise<number>} Number of processed instances
+   */
+  async _processEarlyInstances() {
+    return 0;
+  }
+
+  /**
+   * Hook: Post-start actions after early instances are processed
+   * Override in subclass for actions like starting polling, emitting existing state, etc.
+   * @protected
+   * @param {number} processedCount - Number of early instances that were processed
+   * @returns {Promise<void>}
+   */
+  async _onStartComplete(processedCount) {
+    // Default: no-op
   }
 
   /**
@@ -83,13 +122,50 @@ class BaseCollector {
   }
 
   /**
-   * Re-emit current data from active instances
+   * Re-emit current data from active instances - Template Method Pattern
    * Called when UI needs to be refreshed (e.g., after data reset)
-   * Default implementation is no-op - subclasses should override if they maintain state
+   *
+   * Subclasses should override hook methods (_reEmitActiveItems) instead of this method.
+   * Exception: Complex collectors (AudioContextCollector, RTCPeerConnectionCollector)
+   * may override reEmit() entirely with @override JSDoc.
    */
   reEmit() {
+    if (!this.active) return;
+
+    // Hook: Re-emit main active items (streams, recorders, etc.)
+    const emittedCount = this._reEmitActiveItems();
+
+    // Log completion
+    if (emittedCount > 0) {
+      logger.info(this.logPrefix, `Re-emitted ${emittedCount} item(s)`);
+    }
+  }
+
+  /**
+   * Hook: Re-emit active items
+   * Override in subclass to emit current state from active instances
+   * @protected
+   * @returns {number} Number of items emitted
+   */
+  _reEmitActiveItems() {
+    return 0;
+  }
+
+  /**
+   * Reset session state when technology changes or new recording starts
+   * Called by PageInspector when COLLECTOR_RESET message is received
+   *
+   * @param {'hard' | 'soft' | 'none'} resetType - Type of reset
+   *   - 'hard': Technology changed (e.g., MediaRecorder → ScriptProcessor)
+   *             Clear all pipeline + encoder data
+   *   - 'soft': Same technology, new recording (e.g., Opus → MP3 with same path)
+   *             Clear only encoder data, preserve warming/pipeline data
+   *   - 'none': No reset needed, just update encoder data
+   * @param {number} sessionId - New recording session ID
+   */
+  resetSession(resetType, sessionId) {
     // Default: no-op
-    // Subclasses with active state (streams, connections, contexts) should override
+    // Subclasses that maintain encoder/pipeline state should override
   }
 
   /**
@@ -128,7 +204,7 @@ class BaseCollector {
         try {
           cb(data);
         } catch (err) {
-          console.error(`[${this.name}] Event handler error:`, err);
+          logger.error(this.logPrefix, 'Event handler error:', err);
         }
       });
     }

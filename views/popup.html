@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AudioInspector</title>
   <link rel="stylesheet" href="popup.css">
-  <link rel="stylesheet" href="audio-tree.css">
+  <link rel="stylesheet" href="audio-flow.css">
 </head>
 <body>
   <div class="controls">
@@ -37,6 +37,7 @@
   <!-- Auto-Stop Notification Banner -->
   <div class="auto-stop-banner" id="autoStopBanner"></div>
 
+  <!-- Main Content (always visible) -->
   <div class="main-content">
     <!-- WebRTC Section -->
     <div class="card" id="rtcSection">
@@ -91,20 +92,33 @@
         </div>
       </div>
     </div>
-  </div>
+  </div><!-- /main-content -->
 
   <!-- Console Drawer Overlay -->
   <div class="drawer-overlay" id="drawerOverlay">
     <div class="drawer-header">
-      <div class="drawer-title">
-        Console
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-tab="console">Console</button>
+        <button class="drawer-tab" data-tab="extension">Extension</button>
       </div>
-      <div style="display: flex; gap: 6px;">
-        <button class="btn btn-sm" id="copyLogsBtn">Copy</button>
-        <button class="btn btn-sm" id="clearLogsBtn">Clear</button>
+      <div class="console-actions">
+        <button class="btn btn-sm" id="copyAllLogsBtn">Copy All</button>
+        <button class="btn btn-sm btn-danger" id="clearLogsBtn">Clear</button>
       </div>
     </div>
-    <div class="drawer-content" id="debugContent">
+    <div class="console-toolbar">
+      <div class="console-filters">
+        <button class="filter-btn active" data-level="all">All</button>
+        <button class="filter-btn" data-level="error">Errors</button>
+        <button class="filter-btn" data-level="warn">Warnings</button>
+        <button class="filter-btn" data-level="info">Info</button>
+      </div>
+      <button class="btn btn-sm" id="copyVisibleLogsBtn">Copy</button>
+    </div>
+    <div class="drawer-tab-content active" id="consoleLogsContent">
+      <div class="no-data">No console logs</div>
+    </div>
+    <div class="drawer-tab-content" id="extensionLogsContent">
       <div class="no-data">Waiting for events...</div>
     </div>
   </div>
@@ -121,15 +135,15 @@
     <div class="modal-content">
       <div class="modal-header">
         <span class="modal-icon">&#x26A0;</span>
-        <span class="modal-title">Sayfa Yenileme Gerekli</span>
+        <span class="modal-title">Page Refresh Required</span>
       </div>
       <div class="modal-body">
-        <p>Doğru sonuçlar için sayfanın yenilenmesi gerekiyor.</p>
-        <p class="modal-warning">Aktif görüşme veya kayıt sonlanacaktır!</p>
+        <p>Page refresh required for accurate results.</p>
+        <p class="modal-warning">Active call or recording will end!</p>
       </div>
       <div class="modal-actions">
-        <button class="btn btn-modal-cancel" id="refreshModalCancel">İptal</button>
-        <button class="btn btn-modal-confirm" id="refreshModalConfirm">Yenile ve Başlat</button>
+        <button class="btn btn-modal-cancel" id="refreshModalCancel">Cancel</button>
+        <button class="btn btn-modal-confirm" id="refreshModalConfirm">Refresh and Start</button>
       </div>
     </div>
   </div>

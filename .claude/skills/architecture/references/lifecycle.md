@@ -82,6 +82,7 @@ Inspector aktifken başka tab/window'a geçişte otomatik durdurma.
 | `'origin_change'` | Origin değişikliği (content.js) |
 | `'injection_failed'` | Script enjeksiyonu başarısız |
 | `'new_recording'` | İkinci kayıt başladı (MediaRecorder.start) |
+| `'technology_change'` | Audio processing teknolojisi değişti (ScriptProcessor → AudioWorklet) |
 
 **Akış:**
 ```
